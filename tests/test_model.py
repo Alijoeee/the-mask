@@ -167,6 +167,34 @@ def test_maskplan_may_be_empty() -> None:
     assert MaskPlan([]).replacements == []
 
 
+def test_maskplan_orders_replacements_that_start_together_by_their_end() -> None:
+    point, span = Replacement(3, 3, "[A_1]"), Replacement(3, 6, "[B_1]")
+    assert MaskPlan([span, point]).replacements == [point, span]
+    assert MaskPlan([point, span]).replacements == [point, span]
+
+
+@pytest.mark.parametrize("start", [-1, -5])
+def test_maskplan_rejects_a_span_that_starts_before_the_text(start: int) -> None:
+    with pytest.raises(ValueError, match="invalid span"):
+        MaskPlan([Replacement(start, 3, "[A_1]")])
+
+
+@pytest.mark.parametrize("span", [(5, 4), (10, 0), (0, -1), (-3, -4)])
+def test_maskplan_rejects_a_span_that_ends_before_it_starts(span: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="invalid span"):
+        MaskPlan([Replacement(*span, "[A_1]")])
+
+
+def test_maskplan_names_the_replacement_with_the_invalid_span() -> None:
+    with pytest.raises(ValueError, match=r"\[B_1\] .* 7-2"):
+        MaskPlan([Replacement(0, 1, "[A_1]"), Replacement(7, 2, "[B_1]")])
+
+
+def test_maskplan_accepts_an_empty_span_and_one_that_starts_at_the_beginning() -> None:
+    plan = MaskPlan([Replacement(0, 0, "[A_1]"), Replacement(0, 4, "[B_1]")])
+    assert [(r.start, r.end) for r in plan.replacements] == [(0, 0), (0, 4)]
+
+
 def test_case_json_roundtrip() -> None:
     c = Case(
         "K4F7",
@@ -235,21 +263,57 @@ def test_case_json_roundtrip_keeps_text_order_and_empty_lists() -> None:
     assert Case.from_json(case.to_json()) == case
 
 
+# Every way a stored case can be refused ends in this one error, whatever went wrong inside.
+NOT_A_CASE = r"^Not a stored case\.$"
+
+
 @pytest.mark.parametrize(
     "garbage", ["", "not json", "[]", "null", "5", '"text"', "{}", '{"id": "K4F7"}']
 )
 def test_case_from_json_refuses_what_is_not_a_case(garbage: str) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=NOT_A_CASE):
         Case.from_json(garbage)
+
+
+def test_case_from_json_wraps_a_json_syntax_error_in_a_plain_value_error() -> None:
+    with pytest.raises(ValueError, match=NOT_A_CASE) as caught:
+        Case.from_json("{not json")
+    assert type(caught.value) is ValueError
+    assert isinstance(caught.value.__cause__, json.JSONDecodeError)
 
 
 DAMAGE: dict[str, Callable[[dict[str, Any]], object]] = {
     "unknown placeholder type": lambda d: d["entries"][0].update(type="BOGUS"),
     "timestamp that is not a date": lambda d: d.update(created_at="yesterday"),
     "timestamp that is not text": lambda d: d.update(created_at=5),
+    "timestamp without a timezone": lambda d: d.update(created_at="2026-10-17T00:00:00"),
+    "timestamp that is only a date": lambda d: d.update(created_at="2026-10-17"),
     "masked file that is not an object": lambda d: d.update(masked_files=[5]),
     "entry without a type": lambda d: d.update(entries=[{"placeholder": "[PERSON_1]"}]),
     "missing retention": lambda d: d.pop("retention_days"),
+    "missing id": lambda d: d.pop("id"),
+    "id that is not text": lambda d: d.update(id=4711),
+    "missing source files": lambda d: d.pop("source_files"),
+    "source files that are one text": lambda d: d.update(source_files="a.docx"),
+    "source files that are null": lambda d: d.update(source_files=None),
+    "source file that is not text": lambda d: d.update(source_files=["a.docx", 5]),
+    "retention that is text": lambda d: d.update(retention_days="30"),
+    "retention that is a fraction": lambda d: d.update(retention_days=30.5),
+    "retention that is true": lambda d: d.update(retention_days=True),
+    "masked files that are one object": lambda d: d.update(
+        masked_files={"name": "MASKED-K4F7.docx", "sha256": "ab" * 32}
+    ),
+    "masked files that are one text": lambda d: d.update(masked_files="MASKED-K4F7.docx"),
+    "masked file name that is not text": lambda d: d["masked_files"][0].update(name=5),
+    "masked file hash that is not text": lambda d: d["masked_files"][0].update(sha256=None),
+    "entries that are an empty object": lambda d: d.update(entries={}),
+    "entries that are one text": lambda d: d.update(entries="[PERSON_1]"),
+    "entry that is not an object": lambda d: d.update(entries=["[PERSON_1]"]),
+    "entry placeholder that is not text": lambda d: d["entries"][0].update(placeholder=5),
+    "entry value that is not text": lambda d: d["entries"][0].update(value=["John Smith"]),
+    "entry type that is not text": lambda d: d["entries"][0].update(type=5),
+    "variants that are one text": lambda d: d["entries"][0].update(variants="Mr Smith"),
+    "variant that is not text": lambda d: d["entries"][0].update(variants=["Mr Smith", 5]),
 }
 
 
@@ -257,8 +321,16 @@ DAMAGE: dict[str, Callable[[dict[str, Any]], object]] = {
 def test_case_from_json_refuses_a_damaged_case(damage: Callable[[dict[str, Any]], object]) -> None:
     data = json.loads(make_case().to_json())
     damage(data)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=NOT_A_CASE):
         Case.from_json(json.dumps(data))
+
+
+def test_case_from_json_accepts_any_timezone_offset() -> None:
+    data = json.loads(make_case().to_json())
+    data["created_at"] = "2026-10-17T09:30:00+02:00"
+    case = Case.from_json(json.dumps(data))
+    assert case.created_at == datetime(2026, 10, 17, 7, 30, tzinfo=UTC)
+    assert case.expires_at == case.created_at + timedelta(days=30)  # aware, so it can be compared
 
 
 def test_instruction_text_exact() -> None:
