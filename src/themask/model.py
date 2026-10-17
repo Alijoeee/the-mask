@@ -94,12 +94,21 @@ class Replacement:
 
 @dataclass
 class MaskPlan:
-    """The replacements to make, kept in text order; two of them may touch but never overlap."""
+    """The replacements to make, kept in text order; two of them may touch but never overlap.
+
+    Each replacement must cover a real span of the text: it cannot start before the text or end
+    before it starts. An empty span (``start == end``) is allowed.
+    """
 
     replacements: list[Replacement]
 
     def __post_init__(self) -> None:
-        self.replacements = sorted(self.replacements, key=lambda r: r.start)
+        for r in self.replacements:
+            if r.start < 0 or r.end < r.start:
+                raise ValueError(
+                    f"Replacement {r.placeholder} has an invalid span {r.start}-{r.end}."
+                )
+        self.replacements = sorted(self.replacements, key=lambda r: (r.start, r.end))
         for before, after in pairwise(self.replacements):
             if before.end > after.start:
                 raise ValueError(
@@ -124,6 +133,35 @@ class MaskedFile:
 
     name: str
     sha256: str
+
+
+# The checks ``Case.from_json`` runs on each value read from JSON. Each raises TypeError for a value
+# of the wrong kind, which ``from_json`` turns into its one "Not a stored case." error.
+
+
+def _text(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("Expected text.")
+    return value
+
+
+def _texts(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise TypeError("Expected a list.")
+    return [_text(item) for item in value]
+
+
+def _objects(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise TypeError("Expected a list of objects.")
+    return value
+
+
+def _whole_number(value: object) -> int:
+    # bool is a kind of int in Python, but a stored true or false is not a number of days.
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise TypeError("Expected a whole number.")
+    return value
 
 
 @dataclass
@@ -168,24 +206,35 @@ class Case:
 
     @classmethod
     def from_json(cls, s: str) -> Case:
-        """Read a case written by ``to_json``. Raises ValueError if ``s`` is not one."""
+        """Read a case written by ``to_json``.
+
+        Raises ValueError("Not a stored case.") for anything else: text that is not JSON, a field
+        that is missing or of the wrong kind, an unknown placeholder type, or a timestamp that is
+        not a date or has no timezone (a case without one could not be compared with the clock).
+        """
         try:
             data = json.loads(s)
+            created_at = datetime.fromisoformat(_text(data["created_at"]))
+            if created_at.utcoffset() is None:
+                raise ValueError("The timestamp has no timezone.")
             return cls(
-                id=data["id"],
-                created_at=datetime.fromisoformat(data["created_at"]),
-                source_files=list(data["source_files"]),
-                masked_files=[MaskedFile(f["name"], f["sha256"]) for f in data["masked_files"]],
+                id=_text(data["id"]),
+                created_at=created_at,
+                source_files=_texts(data["source_files"]),
+                masked_files=[
+                    MaskedFile(_text(f["name"]), _text(f["sha256"]))
+                    for f in _objects(data["masked_files"])
+                ],
                 entries=[
                     KeyEntry(
-                        e["placeholder"],
-                        PlaceholderType(e["type"]),
-                        e["value"],
-                        list(e["variants"]),
+                        _text(e["placeholder"]),
+                        PlaceholderType(_text(e["type"])),
+                        _text(e["value"]),
+                        _texts(e["variants"]),
                     )
-                    for e in data["entries"]
+                    for e in _objects(data["entries"])
                 ],
-                retention_days=data["retention_days"],
+                retention_days=_whole_number(data["retention_days"]),
             )
-        except (KeyError, TypeError) as error:
+        except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Not a stored case.") from error
