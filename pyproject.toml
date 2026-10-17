@@ -47,6 +47,7 @@ allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "slow: marks a test as slow (deselect with -m 'not slow')",
 ]
