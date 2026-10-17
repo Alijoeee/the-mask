@@ -7,7 +7,7 @@ recognizer in the same text cannot hide its mistake.
 
 import pytest
 
-from themask.detect.engine import MIN_SCORE, PHONE_REGIONS
+from themask.detect.engine import MIN_SCORE, PHONE_REGIONS, Engine
 from themask.detect.patterns import (
     AccountNumberRecognizer,
     AmountRecognizer,
@@ -583,6 +583,11 @@ def test_findings_are_in_text_order_and_carry_their_text(engine):
 
 def test_empty_text(engine):
     assert engine.analyze("") == []
+
+
+def test_a_missing_model_is_an_error_not_a_download():
+    with pytest.raises(OSError, match="not installed"):
+        Engine("xx_no_such_model")
 
 
 def test_overlapping_findings_are_all_kept(engine):

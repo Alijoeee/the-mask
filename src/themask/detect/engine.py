@@ -9,7 +9,9 @@ pipeline decides between them.
 from __future__ import annotations
 
 from importlib import resources
+from pathlib import Path
 
+import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngine, NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import (
@@ -151,6 +153,9 @@ class Engine:
 
 def _nlp_engine(model_name: str) -> NlpEngine:
     """spaCy's model ``model_name``, set up as nlp_config.yaml says (whatever model it names)."""
+    # Presidio downloads a model that is not installed. The MASK never goes online, so it stops here.
+    if not (spacy.util.is_package(model_name) or Path(model_name).exists()):
+        raise OSError(f"The language model {model_name} is not installed.")
     config = resources.files("themask.detect").joinpath("nlp_config.yaml")
     with resources.as_file(config) as path:
         provider = NlpEngineProvider(conf_file=path)
