@@ -14,9 +14,14 @@ from themask.placeholders import (
 
 ALL_TYPES = list(PlaceholderType)
 
-# Full-width square brackets (U+FF3B and U+FF3D), named so that nobody has to tell them from "[".
+# Characters that look like an ASCII one, named so that nobody has to tell them apart by eye:
+# full-width square brackets (U+FF3B, U+FF3D) and the spaces that count as a space (U+00A0,
+# U+202F, U+2009).
 FULL_OPEN = "\N{FULLWIDTH LEFT SQUARE BRACKET}"
 FULL_CLOSE = "\N{FULLWIDTH RIGHT SQUARE BRACKET}"
+NBSP = "\N{NO-BREAK SPACE}"
+NARROW_NBSP = "\N{NARROW NO-BREAK SPACE}"
+THIN_SPACE = "\N{THIN SPACE}"
 
 # The ways an AI tool is known to change "[PERSON_1]" (spec 8.7), each as the whole token.
 ALTERED_FORMS = [
@@ -35,7 +40,6 @@ ALTERED_FORMS = [
 
 # Further changes the grammar tolerates; each of them still reads as "[PERSON_1]".
 MORE_ALTERED_FORMS = [
-    "Person 1",
     "person-1",
     "[Person 1]",
     "[PerSon_1]",
@@ -50,6 +54,23 @@ MORE_ALTERED_FORMS = [
     "**PERSON_1**",
     "__PERSON_1__",
     "`PERSON_1`",
+    # Markdown's escaped underscore, as a Word-to-markdown conversion writes it.
+    r"PERSON\_1",
+    r"person\_1",
+    r"[PERSON\_1]",
+    r"\[PERSON\_1\]",
+    r"**PERSON\_1**",
+    r"[PERSON\_1",
+    # A space between the name and the number needs the brackets, and may be any of the spaces.
+    "[ Person 1 ]",
+    r"\[PERSON 1\]",
+    "**[PERSON 1]**",
+    f"{FULL_OPEN}PERSON 1{FULL_CLOSE}",
+    f"[PERSON{NBSP}1]",
+    f"[PERSON{NARROW_NBSP}1]",
+    f"[PERSON{THIN_SPACE}1]",
+    f"[{NBSP}PERSON_1{NARROW_NBSP}]",
+    f"[{THIN_SPACE}Person{NBSP}1{THIN_SPACE}]",
 ]
 
 
@@ -157,6 +178,70 @@ def test_spaces_next_to_a_bare_name_are_not_part_of_the_token() -> None:
     assert text[m.start : m.end] == "PERSON_1"
 
 
+@pytest.mark.parametrize("raw", [r"PERSON\_1", r"[PERSON\_1]", "[PERSON 1]", "[ PERSON_1 ]"])
+def test_an_escaped_underscore_and_a_spaced_pair_of_brackets_are_changed_forms(raw: str) -> None:
+    m = only_match(f"Dear {raw}, thanks")
+    assert (m.placeholder, m.exact, m.raw) == ("[PERSON_1]", False, raw)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Company 1",
+        "ID 12345",
+        "Phone 2",
+        "person 1",
+        "PERSON 1",
+        "Address 5 and Email 3 and URL 4",
+        "Person 1 shall pay Company 2 the Amount 500 (Quantity 1,000)",
+    ],
+)
+def test_a_name_and_number_separated_by_a_space_without_brackets_are_prose(text: str) -> None:
+    # A bracketless form needs an underscore, a hyphen or markdown's escaped underscore between
+    # the name and the number; a space is ordinary text ("Company 1", "ID 12345").
+    assert find_placeholders(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"PERSON{NBSP}1",
+        f"Person{NARROW_NBSP}1",
+        f"person{THIN_SPACE}1",
+        f"Company{NBSP}2 and ID{NBSP}12345",
+    ],
+)
+def test_unicode_spaces_are_prose_too_when_there_are_no_brackets(text: str) -> None:
+    assert find_placeholders(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[PERSON 1",
+        "PERSON 1]",
+        f"[PERSON{NBSP}1",
+        "[Person 1 and Person 2]",
+        "see [Company 1, Company 2]",
+        r"\[PERSON 1",
+    ],
+)
+def test_a_space_between_name_and_number_needs_both_brackets(text: str) -> None:
+    assert find_placeholders(text) == []
+
+
+@pytest.mark.parametrize("separator", ["_", "-", r"\_"])
+@pytest.mark.parametrize("brackets", [("", ""), ("[", "]"), ("[", ""), ("", "]")])
+def test_underscore_hyphen_and_escaped_underscore_work_with_or_without_brackets(
+    brackets: tuple[str, str], separator: str
+) -> None:
+    opening, closing = brackets
+    raw = f"{opening}PERSON{separator}1{closing}"
+    m = only_match(f"Dear {raw}, thanks")
+    assert (m.raw, m.placeholder) == (raw, "[PERSON_1]")
+    assert m.exact == (raw == "[PERSON_1]")
+
+
 def test_template_brackets_are_untouched() -> None:
     m = only_match("[Name] signs for [COMPANY_1] on [Date]")
     assert (m.raw, m.exact) == ("[COMPANY_1]", True)
@@ -193,6 +278,8 @@ def test_not_a_placeholder() -> None:
         "XPERSON_1",
         "PERSONAL_1",
         "PERSON__1",
+        "PERSON1",
+        "[PERSON1]",
         "[PERSON_ 1]",
         "[CUSTOMER_1]",
         "[IDENTITY_2]",
@@ -291,12 +378,14 @@ def test_next_free_empty() -> None:
 
 def test_next_free_counts_altered_forms_too() -> None:
     # A restore would mistake any of these for a placeholder, so the numbering must clear them.
-    text = "PERSON_3 and [person-5] and **[PERSON_4]** and [PERSON_007]"
-    assert next_free_number(text, PlaceholderType.PERSON) == 8
+    text = r"PERSON_3 and [person-5] and **[PERSON_4]** and [PERSON_007] and PERSON\_9"
+    assert next_free_number(text, PlaceholderType.PERSON) == 10
 
 
 def test_next_free_ignores_what_is_not_a_placeholder() -> None:
-    assert next_free_number("PERSONAL_9 [PERSON_x] [CUSTOMER_8]", PlaceholderType.PERSON) == 1
+    text = "PERSONAL_9 [PERSON_x] [CUSTOMER_8] Person 4 and ID 12345"
+    assert next_free_number(text, PlaceholderType.PERSON) == 1
+    assert next_free_number(text, PlaceholderType.ID) == 1
 
 
 def test_next_free_after_number_zero_is_one() -> None:

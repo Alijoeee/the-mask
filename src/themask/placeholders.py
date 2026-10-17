@@ -1,9 +1,10 @@
 """The placeholder grammar: how ``[TYPE_N]`` is written, found again and counted.
 
 An AI tool sometimes changes a placeholder a little: it drops the brackets, adds spaces, writes the
-name in lower case, escapes the brackets or wraps the placeholder in bold. ``find_placeholders``
-finds those changed forms as well as the exact one, so that a restore can put the real value back
-and ask the owner first when the form was changed.
+name in lower case, escapes the brackets or the underscore, or wraps the placeholder in bold.
+``find_placeholders`` finds those changed forms as well as the exact one, so that a restore can put
+the real value back and ask the owner first when the form was changed. Plain text that merely looks
+like a placeholder, such as "Company 1", is not a changed form and is left alone.
 """
 
 from __future__ import annotations
@@ -28,27 +29,43 @@ PLACEHOLDER_RE = re.compile(rf"\[(?P<type>{_TYPE_NAMES})_(?P<number>0|[1-9][0-9]
 _OPEN = r"\\?\[|\N{FULLWIDTH LEFT SQUARE BRACKET}"
 _CLOSE = r"\\?\]|\N{FULLWIDTH RIGHT SQUARE BRACKET}"
 
+# A space, or one of the spaces a Word file or an AI tool may put in its place.
+_SPACE = r"[ \N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}\N{THIN SPACE}]"
+
+# What may stand between the name and the number, with brackets or without: an underscore, a
+# hyphen, or the underscore escaped the way markdown writes it.
+_SEPARATOR = r"_|-|\\_"
+
 # The exact form and every changed form. Letters and digits are ASCII only: with Unicode case
 # folding a long s or a dotless i would pass for a letter of a type name.
 #
 # The brackets delimit a token. Where one is there, the token needs no word check on that side, so
 # "[PERSON_1]s" still holds "[PERSON_1]". Where one is missing, the bare name or number must not be
 # part of a longer word, so "PERSONAL_1" and "PERSON_1x" hold nothing.
+#
+# A space between the name and the number counts only inside a whole pair of brackets: "[PERSON 1]"
+# is a placeholder, but "Company 1" or "ID 12345" is ordinary text and is left alone.
 _TOKEN_RE = re.compile(
     rf"""
-    (?P<mark>\*\*|__|`)?          # markdown round the token: **bold**, __bold__ or `code`
+    (?P<mark>\*\*|__|`)?                 # markdown round the token: **bold**, __bold__ or `code`
     (?:
-        (?P<open>{_OPEN})[ ]*     # an opening bracket, then any spaces
-        |(?<![A-Za-z0-9])         # no bracket: the name must start a word
+        (?P<open>{_OPEN}){_SPACE}*       # an opening bracket, then any spaces
+        |(?<![A-Za-z0-9])                # no bracket: the name must start a word
     )
     (?P<type>{_TYPE_NAMES})
-    [_ -]
+    (?:
+        {_SEPARATOR}
+        # A space does too, but only inside a pair of brackets: an opening bracket was matched
+        # and a closing one follows the number. Without an opening bracket the conditional falls
+        # to (?!), which never matches.
+        |(?(open){_SPACE}(?={_NUMBER}{_SPACE}*(?:{_CLOSE}))|(?!))
+    )
     (?P<number>{_NUMBER})
     (?:
-        [ ]*(?P<close>{_CLOSE})   # any spaces, then a closing bracket
-        |(?![A-Za-z0-9])          # no bracket: the number must end a word
+        {_SPACE}*(?P<close>{_CLOSE})     # any spaces, then a closing bracket
+        |(?![A-Za-z0-9])                 # no bracket: the number must end a word
     )
-    (?(mark)(?P=mark))            # a marker that opened the token must close it
+    (?(mark)(?P=mark))                   # a marker that opened the token must close it
     """,
     re.VERBOSE | re.IGNORECASE | re.ASCII,
 )
