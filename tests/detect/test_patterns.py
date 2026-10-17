@@ -1,0 +1,633 @@
+"""The detection engine and its pattern recognizers.
+
+Most tests go through the session-scoped ``engine`` fixture, the way the analysis pipeline uses it.
+A test that a recognizer does not fire runs that recognizer on its own, so that a find by another
+recognizer in the same text cannot hide its mistake.
+"""
+
+import pytest
+
+from themask.detect.engine import MIN_SCORE, PHONE_REGIONS
+from themask.detect.patterns import (
+    AccountNumberRecognizer,
+    AmountRecognizer,
+    BareNumberRecognizer,
+    BicRecognizer,
+    EmailAddressRecognizer,
+    NationalIdRecognizer,
+    PercentRecognizer,
+    QuantityRecognizer,
+    RegistrationNumberRecognizer,
+    VatRecognizer,
+    WebAddressRecognizer,
+)
+from themask.model import PlaceholderType
+
+AMOUNT = PlaceholderType.AMOUNT
+PERCENT = PlaceholderType.PERCENT
+QUANTITY = PlaceholderType.QUANTITY
+ID = PlaceholderType.ID
+
+# The spaces Word may put between groups of digits, named so that nobody has to tell them apart
+# by eye.
+NBSP = "\N{NO-BREAK SPACE}"
+NARROW_NBSP = "\N{NARROW NO-BREAK SPACE}"
+THIN_SPACE = "\N{THIN SPACE}"
+
+
+def types_at(engine, text, needle):
+    return {f.type for f in engine.analyze(text) if text[f.start : f.end].strip() == needle}
+
+
+def texts_of(engine, text, placeholder_type):
+    """The exact text of every finding of one type."""
+    return {f.text for f in engine.analyze(text) if f.type == placeholder_type}
+
+
+def found_by(recognizer, text):
+    """What one recognizer finds in ``text`` on its own: matched text -> score."""
+    results = recognizer.analyze(text, recognizer.supported_entities)
+    return {text[r.start : r.end]: r.score for r in results}
+
+
+# --- Amounts -------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("The Price is EUR 1,250,000.00 per year.", "EUR 1,250,000.00"),
+        ("a fee of €1.25m", "€1.25m"),
+        ("pay 1.250.000,00 EUR", "1.250.000,00 EUR"),
+        ("the sum of one million euros", "one million euros"),
+        ("EUR 1 250 000,00", "EUR 1 250 000,00"),
+        ("GBP 48,000", "GBP 48,000"),
+    ],
+)
+def test_amounts(engine, text, needle):
+    assert PlaceholderType.AMOUNT in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        (f"EUR 1{NBSP}250{NBSP}000,00", f"EUR 1{NBSP}250{NBSP}000,00"),
+        (
+            f"EUR{NBSP}1{NARROW_NBSP}250{NARROW_NBSP}000,00",
+            f"EUR{NBSP}1{NARROW_NBSP}250{NARROW_NBSP}000,00",
+        ),
+        (f"a price of 1{THIN_SPACE}250{THIN_SPACE}000 € net", f"1{THIN_SPACE}250{THIN_SPACE}000 €"),
+        ("a cap of £500k", "£500k"),
+        ("USD 2.3bn in total", "USD 2.3bn"),
+        ("EUR 3 million", "EUR 3 million"),
+        ("1.5 million euros", "1.5 million euros"),
+        ("a deposit of 1.000 € is due", "1.000 €"),
+        ("€ 1.000,- per month", "€ 1.000,-"),
+        ("CHF 1'250'000.00", "CHF 1'250'000.00"),
+        ("US$ 5,000", "US$ 5,000"),
+        ("EUR 0.125 per piece", "EUR 0.125"),
+        ("between EUR 10-20 per unit", "EUR 10-20"),
+        ("TRY 75,000", "TRY 75,000"),
+        ("250.000 TL", "250.000 TL"),
+        ("fifty thousand pounds sterling", "fifty thousand pounds sterling"),
+        ("two hundred and fifty thousand euros", "two hundred and fifty thousand euros"),
+        ("Twenty-Five Thousand Euros", "Twenty-Five Thousand Euros"),
+        ("fifty thousand (50,000) euros", "fifty thousand (50,000) euros"),
+    ],
+)
+def test_amounts_in_more_forms(engine, text, needle):
+    assert AMOUNT in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text,value",
+    [
+        ("The fee is EUR 1,000.", "EUR 1,000"),
+        ("EUR 1,000, payable monthly", "EUR 1,000"),
+        ("a deposit (EUR 1,000) is due", "EUR 1,000"),
+        ("the fee is €1.25m; the deposit", "€1.25m"),
+    ],
+)
+def test_amount_never_includes_trailing_punctuation(engine, text, value):
+    assert texts_of(engine, text, AMOUNT) == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "within 30 days",
+        "in 2026",
+        "clause 10.2 applies",
+        "a term of 5 years",
+        "Schedule 3",
+    ],
+)
+def test_not_amount_or_quantity(engine, text):
+    assert not {PlaceholderType.AMOUNT, PlaceholderType.QUANTITY} & {
+        f.type for f in engine.analyze(text)
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "10.2 The Supplier shall deliver the Goods.",
+        "12.3.4 Delivery",
+        "as set out in Section 4.1(b)",
+        "for 1,000 days",
+        "within 2,500 working days",
+        "Vehicles shall meet the Euro 6 emission standard.",
+        "under Regulation (EU) 2016/679",
+        "section 1159 of the Companies Act 2006",
+        "on 01.03.2026",
+        "between 09:00 and 17:00 hours",
+    ],
+)
+def test_clause_numbers_dates_and_durations_are_not_amounts(engine, text):
+    assert not {AMOUNT, QUANTITY} & {f.type for f in engine.analyze(text)}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Total price: 48,000",
+        "minimum order of 10,000 units",
+        "a discount of 12.5%",
+        "a period of 30 days",
+        "the year 2026",
+        "Euro 6",
+        "try 1,000 times",
+    ],
+)
+def test_amount_needs_a_currency(text):
+    assert found_by(AmountRecognizer(), text) == {}
+
+
+# --- Percentages ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [("a discount of 12.5%", "12.5%"), ("interest at 8 per cent", "8 per cent")],
+)
+def test_percent(engine, text, needle):
+    assert PlaceholderType.PERCENT in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("a rebate of 12,5 %", "12,5 %"),
+        (f"a rebate of 12.5{NBSP}%", f"12.5{NBSP}%"),
+        ("8 percent a year", "8 percent"),
+        ("a margin of five per cent", "five per cent"),
+        ("a margin of five (5) per cent", "five (5) per cent"),
+        ("a margin of five (5%)", "five (5%)"),
+        ("a discount of 5-10%", "5-10%"),
+        ("Seven Percent", "Seven Percent"),
+    ],
+)
+def test_percent_in_more_forms(engine, text, needle):
+    assert PERCENT in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["a percentage of the Price", "the 95 percentile", "a few per cent", "per cent", "EUR 12.50"],
+)
+def test_percent_needs_a_number_and_a_percent_sign_or_word(text):
+    assert found_by(PercentRecognizer(), text) == {}
+
+
+# --- Quantities ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("minimum order of 10,000 units", "10,000 units"),
+        ("deliver 48 pallets", "48 pallets"),
+        ("capacity of 2.5 tonnes", "2.5 tonnes"),
+    ],
+)
+def test_quantity(engine, text, needle):
+    assert PlaceholderType.QUANTITY in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("500kg of resin", "500kg"),
+        ("1,000 Cartons", "1,000 Cartons"),
+        (f"10{NBSP}000 units", f"10{NBSP}000 units"),
+        ("a floor area of 1 250 m²", "1 250 m²"),
+        ("a load of 2.5t", "2.5t"),
+        ("20 litres", "20 litres"),
+        ("10-20 pallets", "10-20 pallets"),
+        ("2.5 million units", "2.5 million units"),
+        ("ten (10) pallets", "ten (10) pallets"),
+        ("ten thousand units", "ten thousand units"),
+    ],
+)
+def test_quantity_in_more_forms(engine, text, needle):
+    assert QUANTITY in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "within 30 days",
+        "a term of 5 years",
+        "12 hours",
+        "3 months",
+        "2 weeks",
+        "45 minutes",
+        "Schedule 3",
+        "a fee of €2.5m",
+        "EUR 2.5 m",
+        "in two cases",
+        "one item of the Goods",
+        "clause 10.2 applies",
+    ],
+)
+def test_quantity_needs_a_unit_that_is_not_time(text):
+    assert found_by(QuantityRecognizer(), text) == {}
+
+
+# --- Bank details --------------------------------------------------------------------------------
+
+
+def test_iban_valid_only(engine):
+    assert PlaceholderType.IBAN in types_at(
+        engine, "IBAN NL91 ABNA 0417 1643 00", "NL91 ABNA 0417 1643 00"
+    )
+    assert PlaceholderType.IBAN not in {
+        f.type for f in engine.analyze("IBAN NL91 ABNA 0417 1643 01")
+    }
+
+
+def test_bic(engine):
+    assert PlaceholderType.ID in types_at(engine, "BIC: ABNANL2A", "ABNANL2A")
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("BIC: ABNANL2A", "ABNANL2A"),
+        ("BIC RABONL2U", "RABONL2U"),
+        ("SWIFT: DEUTDEFF", "DEUTDEFF"),
+        ("SWIFT code DEUTDEFF500", "DEUTDEFF500"),
+        ("Bank: HSBC UK, HSBCGB2L", "HSBCGB2L"),
+    ],
+)
+def test_bic_in_more_forms(text, needle):
+    assert found_by(BicRecognizer(), text) == {needle: 0.9}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Upper-case contract words that are BICs in form (SUPPLIER: bank SUPP, country LI).
+        "THE SUPPLIER SHALL INDEMNIFY THE CUSTOMER",
+        "TERMINATION",
+        "DEFINITIONS AND INTERPRETATION",
+        "ARBITRATION",
+        "abnanl2a",
+        "ABNAXX2A",
+    ],
+)
+def test_bic_needs_a_real_one(text):
+    assert found_by(BicRecognizer(), text) == {}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Account number: 12345678", "12345678"),
+        ("account no. 1234 5678 90", "1234 5678 90"),
+        ("A/C 87654321", "87654321"),
+        ("Sort code: 12-34-56", "12-34-56"),
+        ("sort code 12 34 56, account 12345678", "12 34 56"),
+    ],
+)
+def test_account_numbers(engine, text, needle):
+    assert ID in types_at(engine, text, needle)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "on account of 2,000,000 units",
+        "taking into account the 12 months",
+        "Account: NL91 ABNA 0417 1643 00",
+        "12345678",
+        "the account holder is Acme Supplies Ltd",
+    ],
+)
+def test_account_number_needs_its_label(text):
+    assert found_by(AccountNumberRecognizer(), text) == {}
+
+
+# --- VAT, registration and identity numbers ------------------------------------------------------
+
+
+def test_vat(engine):
+    assert PlaceholderType.ID in types_at(engine, "VAT number NL123456782B01", "NL123456782B01")
+
+
+@pytest.mark.parametrize(
+    "text,needle,score",
+    [
+        ("VAT number NL123456782B01", "NL123456782B01", 0.9),
+        ("BTW NL 1234.56.782.B01", "NL 1234.56.782.B01", 0.9),
+        ("USt-IdNr. DE 136 695 976", "DE 136 695 976", 0.9),
+        ("VAT: BE0123456749", "BE0123456749", 0.9),
+        ("VAT: ATU13585627", "ATU13585627", 0.9),
+        ("VAT: FR40303265045", "FR40303265045", 0.9),
+        ("VAT registration GB980780684", "GB980780684", 0.9),
+        ("MWST CHE-107.787.577 IVA", "CHE-107.787.577 IVA", 0.9),
+        ("Org.nr. NO 995 525 828 MVA", "NO 995 525 828 MVA", 0.9),
+        # The right form, a wrong check digit: still hidden, as a value to check.
+        ("VAT number NL123456789B01", "NL123456789B01", 0.6),
+        ("VAT: DE123456789", "DE123456789", 0.6),
+    ],
+)
+def test_vat_scores(text, needle, score):
+    assert found_by(VatRecognizer(), text) == {needle: score}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "NL1234",
+        "IBAN DE89 3704 0044 0532 0130 00",
+        "IBAN NL91 ABNA 0417 1643 00",
+        "the DE team",
+        "postcode DE-80331",
+        "nl123456782b01",
+    ],
+)
+def test_vat_needs_a_country_and_its_format(text):
+    assert found_by(VatRecognizer(), text) == {}
+
+
+def test_registration(engine):
+    assert PlaceholderType.ID in types_at(
+        engine, "registered in England and Wales under number 01234567", "01234567"
+    )
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("registered in England and Wales under number 01234567", "01234567"),
+        ("Company No. 01234567", "01234567"),
+        ("company registration number SC123456", "SC123456"),
+        ("registered with the Chamber of Commerce under number 12345678", "12345678"),
+        ("KvK 12345678", "12345678"),
+        ("KvK-nummer: 12345678", "12345678"),
+        ("Amtsgericht München HRB 123456", "123456"),
+        ("Companies House number 01234567", "01234567"),
+        ("registered under number 0123.456.789", "0123.456.789"),
+    ],
+)
+def test_registration_in_more_forms(text, needle):
+    assert found_by(RegistrationNumberRecognizer(), text) == {needle: 0.7}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "registered in England and Wales",
+        "the company number is to be confirmed",
+        "registered under number 1234",
+        "the company has no 2 offices",
+        "a registered letter",
+        "number 01234567",
+    ],
+)
+def test_registration_needs_its_context_and_a_number(text):
+    assert found_by(RegistrationNumberRecognizer(), text) == {}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("BSN 111222333", "111222333"),
+        ("BSN 1112.22.333", "1112.22.333"),
+        ("T.C. Kimlik No 10000000146", "10000000146"),
+        ("passport number X1234567", "X1234567"),
+        ("Passport No: 123456789", "123456789"),
+    ],
+)
+def test_national_ids(engine, text, needle):
+    assert ID in types_at(engine, text, needle)
+    assert found_by(NationalIdRecognizer(), text) == {needle: 0.85}
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["123456789", "12345678901", "a valid passport", "passport photo 12345678", "1112.22.334"],
+)
+def test_national_id_needs_a_checksum_or_passport_context(text):
+    assert found_by(NationalIdRecognizer(), text) == {}
+
+
+# --- Bare numbers --------------------------------------------------------------------------------
+
+
+def test_bare_number_in_price_context_is_low_confidence_amount(engine):
+    (f,) = [f for f in engine.analyze("Total price: 48,000") if f.type == PlaceholderType.AMOUNT]
+    assert 0.3 <= f.score < 0.85
+
+
+@pytest.mark.parametrize(
+    "text,needle,score",
+    [
+        ("Total price: 48,000", "48,000", 0.75),
+        ("the value is 1,250,000.00", "1,250,000.00", 0.75),
+        ("a fee of 2.500,00", "2.500,00", 0.75),
+        ("48,000", "48,000", 0.4),
+        (f"1{NBSP}250{NBSP}000", f"1{NBSP}250{NBSP}000", 0.4),
+        ("1 250 000", "1 250 000", 0.4),
+        ("a cap of 48000", "48000", 0.4),
+        ("ten thousand (10,000)", "ten thousand (10,000)", 0.4),
+    ],
+)
+def test_bare_numbers(engine, text, needle, score):
+    (f,) = [f for f in engine.analyze(text) if f.type == AMOUNT and f.text == needle]
+    assert f.score == pytest.approx(score)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "in 2026",
+        "from 1999 to 2099",
+        "999.99",
+        "12.50",
+        "for 1,000 days",
+        "2,500 working days",
+        "1,500 hours",
+        "a 1,000-day period",
+        "10.2 The Supplier shall pay",
+        "section 1159 of the Act",
+        "Article 1101",
+        "on 01.03.2026",
+        "Regulation (EU) 2016/679",
+        "Schedule 3",
+        "twenty",
+        "five hundred",
+        "one thousand days",
+    ],
+)
+def test_bare_number_exclusions(text):
+    assert found_by(BareNumberRecognizer(), text) == {}
+
+
+# --- E-mail, phone, web addresses ----------------------------------------------------------------
+
+
+def test_email_phone_url(engine):
+    t = "Contact j.smith@northwind.example, +31 20 123 4567 or https://www.northwind.example/legal"
+    found = {f.type for f in engine.analyze(t)}
+    assert {PlaceholderType.EMAIL, PlaceholderType.PHONE, PlaceholderType.URL} <= found
+
+
+def test_email_phone_url_spans_are_whole(engine):
+    t = "Contact j.smith@northwind.example, +31 20 123 4567 or https://www.northwind.example/legal."
+    assert texts_of(engine, t, PlaceholderType.EMAIL) == {"j.smith@northwind.example"}
+    assert texts_of(engine, t, PlaceholderType.PHONE) == {"+31 20 123 4567"}
+    assert texts_of(engine, t, PlaceholderType.URL) == {"https://www.northwind.example/legal"}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Write to legal@acme.co.uk today", "legal@acme.co.uk"),
+        ("Write to notices@northwind.example.", "notices@northwind.example"),
+    ],
+)
+def test_email_addresses(text, needle):
+    assert set(found_by(EmailAddressRecognizer(), text)) == {needle}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("See https://www.northwind.example/legal.", "https://www.northwind.example/legal"),
+        ("(see https://acme.example/terms)", "https://acme.example/terms"),
+        ("Visit www.acme.example, or call", "www.acme.example"),
+        ("Visit acme.com for the terms", "acme.com"),
+        ("http://shop.acme.co.uk/terms?lang=en", "http://shop.acme.co.uk/terms?lang=en"),
+    ],
+)
+def test_web_addresses(engine, text, needle):
+    assert texts_of(engine, text, PlaceholderType.URL) == {needle}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Contact j.smith@northwind.example",
+        "The Goods.It shall be delivered",
+        "e.g. the Goods, i.e. all of them",
+        "Acme Ltd. and Northwind B.V.",
+    ],
+)
+def test_web_address_needs_a_whole_domain(text):
+    assert found_by(WebAddressRecognizer(), text) == {}
+
+
+# Numbers in their national form. Apart from the first two, Presidio's default regions (US, GB, DE,
+# FR, IL, IN, CA, BR) do not find them: they are found because their country is in PHONE_REGIONS.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Tel. 020 123 4567", "020 123 4567"),
+        ("Tel. +44 20 7946 0958", "+44 20 7946 0958"),
+        ("Tel. 012 34 56 78", "012 34 56 78"),  # Belgium
+        ("Tel. 0501 234 56 78", "0501 234 56 78"),  # Turkey
+        ("Tel. 612 34 56 78", "612 34 56 78"),  # Spain
+        ("Tel. 32 12 34 56", "32 12 34 56"),  # Denmark
+        ("Tel. 070-123 45 67", "070-123 45 67"),  # Sweden
+        ("Tel. 21 23 45 67", "21 23 45 67"),  # Norway
+        ("Tel. 512 345 678", "512 345 678"),  # Poland
+    ],
+)
+def test_phone_numbers_from_the_owners_regions(engine, text, needle):
+    assert PlaceholderType.PHONE in types_at(engine, text, needle)
+
+
+def test_phone_regions():
+    assert " ".join(PHONE_REGIONS) == "GB NL DE FR BE IE TR US ES IT CH AT DK SE NO PL"
+
+
+# --- The engine ----------------------------------------------------------------------------------
+
+CONTRACT = (
+    "Northwind Trading B.V. (KvK 12345678, VAT number NL123456782B01) shall be paid\n"
+    "EUR 1,250,000.00 for 10,000 units, less a discount of 12.5%, within 30 days.\n"
+    "The notice was sent by Jane Smith to the Buyer on Monday.\n"
+    "Contact j.smith@northwind.example or +31 20 123 4567."
+)
+
+
+def test_findings_are_in_text_order_and_carry_their_text(engine):
+    findings = engine.analyze(CONTRACT)
+    assert findings
+    assert [f.start for f in findings] == sorted(f.start for f in findings)
+    assert all(f.text == CONTRACT[f.start : f.end] for f in findings)
+    assert all(f.score >= MIN_SCORE for f in findings)
+
+
+def test_empty_text(engine):
+    assert engine.analyze("") == []
+
+
+def test_overlapping_findings_are_all_kept(engine):
+    found = {(f.type, f.text) for f in engine.analyze("minimum order of 10,000 units")}
+    assert {(QUANTITY, "10,000 units"), (AMOUNT, "10,000")} <= found
+
+
+def test_sources(engine):
+    findings = engine.analyze(CONTRACT)
+    by_text = {(f.type, f.text): f.source for f in findings}
+    assert by_text[(PlaceholderType.PERSON, "Jane Smith")] == "model"
+    assert by_text[(AMOUNT, "EUR 1,250,000.00")] == "pattern"
+    assert by_text[(PlaceholderType.PHONE, "+31 20 123 4567")] == "pattern"
+    assert by_text[(PlaceholderType.EMAIL, "j.smith@northwind.example")] == "pattern"
+    assert {f.source for f in findings} <= {"pattern", "model"}
+
+
+def test_model_companies_keep_their_score(engine):
+    t = "Supplies are sourced from Baltic Fasteners GmbH and its affiliates."
+    (f,) = [f for f in engine.analyze(t) if f.type == PlaceholderType.COMPANY]
+    assert f.text == "Baltic Fasteners GmbH" and f.source == "model" and f.score == 0.85
+
+
+def test_money_percent_and_quantity_come_only_from_patterns(engine):
+    findings = engine.analyze(CONTRACT + " The fee is fifty thousand euros.")
+    assert {f.source for f in findings if f.type in {AMOUNT, PERCENT, QUANTITY}} == {"pattern"}
+
+
+def test_dates_stay_visible(engine):
+    t = "This Agreement is dated 1 March 2026 and amended on 01/03/2027."
+    assert not [f for f in engine.analyze(t) if "2026" in f.text or "2027" in f.text]
+
+
+@pytest.mark.parametrize(
+    "text,needle,placeholder_type",
+    [
+        ("Card 4111 1111 1111 1111", "4111 1111 1111 1111", ID),
+        ("NI number AB 12 34 56 C", "AB 12 34 56 C", ID),
+        ("MAC 00:1A:2B:3C:4D:5E", "00:1A:2B:3C:4D:5E", ID),
+        (
+            "whose registered office is at Keizersgracht 123, 1015 CJ Amsterdam",
+            "Keizersgracht 123",
+            PlaceholderType.ADDRESS,
+        ),
+    ],
+)
+def test_presidio_entities_are_mapped_to_placeholder_types(engine, text, needle, placeholder_type):
+    assert placeholder_type in types_at(engine, text, needle)

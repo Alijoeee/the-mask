@@ -1,0 +1,40 @@
+# The language model behind The MASK's detection of people, companies and places, in the format
+# of Presidio's NlpEngineProvider. Engine() reads this file; its model_name argument replaces the
+# model named here.
+nlp_engine_name: spacy
+models:
+  - lang_code: en
+    model_name: en_core_web_md
+
+ner_model_configuration:
+  # spaCy's labels, as Presidio's entity names. engine.py turns those into placeholder types.
+  model_to_presidio_entity_mapping:
+    PER: PERSON
+    PERSON: PERSON
+    ORG: ORGANIZATION
+    ORGANIZATION: ORGANIZATION
+    LOC: LOCATION
+    GPE: LOCATION
+    FAC: LOCATION
+    LOCATION: LOCATION
+
+  # Presidio lowers the score of the entities listed here; companies keep the model's full score.
+  low_score_entity_names: []
+
+  # Labels the model's results are dropped for: Presidio's defaults, and dates, times and
+  # nationalities, which stay visible. Money, percentages and quantities come from our own
+  # patterns instead (patterns.py).
+  labels_to_ignore:
+    - CARDINAL
+    - EVENT
+    - LANGUAGE
+    - LAW
+    - MONEY
+    - ORDINAL
+    - PERCENT
+    - PRODUCT
+    - QUANTITY
+    - WORK_OF_ART
+    - DATE
+    - TIME
+    - NORP
