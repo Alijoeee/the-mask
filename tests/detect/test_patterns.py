@@ -636,3 +636,28 @@ def test_dates_stay_visible(engine):
 )
 def test_presidio_entities_are_mapped_to_placeholder_types(engine, text, needle, placeholder_type):
     assert placeholder_type in types_at(engine, text, needle)
+
+
+# Presidio recognizers the engine does without (ruling R12), so that these stay visible.
+
+
+@pytest.mark.parametrize("text", ["12.3.4.1 applies", "clause 12.3.4.1"])
+def test_four_level_clause_numbers_stay_visible(engine, text):
+    assert engine.analyze(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "product code A1234",  # was a US driver's licence
+        "code AB1234563",  # was a US DEA (medical licence) number
+        "bank reference 123456789012",  # was a US bank account number
+    ],
+)
+def test_codes_are_not_ids(engine, text):
+    assert ID not in {f.type for f in engine.analyze(text)}
+
+
+def test_ip_addresses_are_not_found(engine):
+    """A known limit: Presidio's IP recognizer read four-level clause numbers as IP addresses."""
+    assert engine.analyze("192.168.0.1") == []

@@ -80,6 +80,15 @@ _DROPPED_ENTITIES = frozenset({"DATE_TIME", "NRP"})
 # and the phone recognizer, which is set up again for PHONE_REGIONS.
 _REPLACED_RECOGNIZERS = ("EmailRecognizer", "UrlRecognizer", "PhoneRecognizer")
 
+# Presidio's recognizers the engine does without (ruling R12), each for the reason given. Their
+# entities keep their place in _PRESIDIO_TYPES, should one of them come back.
+_DROPPED_RECOGNIZERS = (
+    "IpRecognizer",  # reads four-level clause numbers (12.3.4.1) as IP addresses
+    "UsLicenseRecognizer",  # flags product codes such as A1234 at exactly the 0.3 threshold
+    "UsBankRecognizer",  # any 8 to 17 digits near "bank" or "account"; ours finds labelled ones
+    "MedicalLicenseRecognizer",  # US DEA numbers, which these contracts do not hold
+)
+
 # The recognizer that reports the language model's names, companies and places; every other
 # recognizer works with patterns.
 _MODEL_RECOGNIZER = SpacyRecognizer.__name__
@@ -102,7 +111,7 @@ class Engine:
         nlp_engine = _nlp_engine(model_name)
         registry = RecognizerRegistry(supported_languages=["en"])
         registry.load_predefined_recognizers(languages=["en"], nlp_engine=nlp_engine)
-        for name in _REPLACED_RECOGNIZERS:
+        for name in _REPLACED_RECOGNIZERS + _DROPPED_RECOGNIZERS:
             registry.remove_recognizer(name)
         registry.add_recognizer(PhoneRecognizer(supported_regions=PHONE_REGIONS))
         # Presidio leaves the UK National Insurance number off by default.
