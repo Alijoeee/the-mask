@@ -176,6 +176,11 @@ _PHONE_REGIONS: tuple[str | None, ...] = (None, "GB", "NL", "DE", "TR")
 
 _URL_SCHEME = re.compile(r"[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
 
+_IBAN_GROUP_SIZE = 4
+# Spaces, dots and hyphens (including the typographic and the non-breaking hyphen that Word can put
+# inside an identifier) only make an identifier easier to read; they are not part of it.
+_ID_SEPARATORS = re.compile(r"[\s.\-\N{HYPHEN}\N{NON-BREAKING HYPHEN}]+")
+
 
 def _person_variants(value: str) -> set[str]:
     tokens = value.split()
@@ -268,12 +273,29 @@ def _url_variants(value: str) -> set[str]:
     return variants
 
 
+def _iban_variants(value: str) -> set[str]:
+    compact = "".join(value.split())
+    variants = {compact}
+    if compact.isalnum():  # anything else (hyphens, a label) has no standard grouping
+        size = _IBAN_GROUP_SIZE
+        variants.add(" ".join(compact[i : i + size] for i in range(0, len(compact), size)))
+    variants.discard("")
+    return variants
+
+
+def _id_variants(value: str) -> set[str]:
+    compact = _ID_SEPARATORS.sub("", value)
+    return {compact} - {""}
+
+
 _VARIANT_RULES: dict[PlaceholderType, Callable[[str], set[str]]] = {
     PlaceholderType.PERSON: _person_variants,
     PlaceholderType.COMPANY: _company_variants,
     PlaceholderType.AMOUNT: _amount_variants,
     PlaceholderType.PHONE: _phone_variants,
     PlaceholderType.URL: _url_variants,
+    PlaceholderType.IBAN: _iban_variants,
+    PlaceholderType.ID: _id_variants,
 }
 
 
@@ -292,8 +314,12 @@ def variants_of(value: str, t: PlaceholderType) -> set[str]:
     * PHONE: the national format when the number is valid in the UK, the Netherlands, Germany or
       Turkey, or carries its own country code ("+31 20 123 4567" gives "020 123 4567").
     * URL: without the scheme, without ``www.``, and without both.
-    * Every other type: just the value. Spacing and case differences are handled by ``normalize``
-      and ``flexible_pattern``.
+    * IBAN: with all spaces removed and in groups of four ("NL91ABNA0417164300" and "NL91 ABNA 0417
+      1643 00"), whichever way it was written. ``flexible_pattern`` can only widen spaces that are
+      already there, so the sweep needs both forms to find the other one.
+    * ID: with spaces, dots and hyphens removed ("12.345.678" gives "12345678").
+    * Every other type: just the value. Case differences are handled by ``normalize`` and
+      ``flexible_pattern``.
     """
     derive = _VARIANT_RULES.get(t)
     return {value} | (derive(value) if derive else set())

@@ -238,19 +238,18 @@ def test_variants_always_include_the_value(placeholder_type: PlaceholderType) ->
         PlaceholderType.QUANTITY,
         PlaceholderType.EMAIL,
         PlaceholderType.ADDRESS,
-        PlaceholderType.IBAN,
-        PlaceholderType.ID,
         PlaceholderType.CUSTOM,
     ],
 )
 def test_other_types_return_only_the_value(placeholder_type: PlaceholderType) -> None:
+    # IBAN and ID have their own rules, further down. Case is handled by the matching, not here.
     value = "Mr John Smith Ltd EUR 1,250,000.00 https://www.northwind.example +31 20 123 4567"
     assert variants_of(value, placeholder_type) == {value}
 
 
 @pytest.mark.parametrize("placeholder_type", list(PlaceholderType))
 @pytest.mark.parametrize(
-    "value", ["Mr", "Ltd", "Mr Ltd", "https://", "www.", "EUR", "...", "+", "0"]
+    "value", ["Mr", "Ltd", "Mr Ltd", "https://", "www.", "EUR", "...", "+", "0", "   ", "- . -"]
 )
 def test_degenerate_values_never_produce_empty_variants(
     placeholder_type: PlaceholderType, value: str
@@ -583,6 +582,89 @@ def test_url_without_scheme_and_without_www(value: str, expected: set[str]) -> N
 
 
 # --------------------------------------------------------------------------------------------
+# variants_of: IBAN and ID (the sweep cannot match an unspaced value against a spaced one)
+# --------------------------------------------------------------------------------------------
+
+
+def test_iban_variants() -> None:
+    v = variants_of("NL91 ABNA 0417 1643 00", PlaceholderType.IBAN)
+    assert {"NL91ABNA0417164300", "NL91 ABNA 0417 1643 00"} <= v
+
+
+def test_iban_written_without_spaces_gets_the_grouped_form() -> None:
+    v = variants_of("NL91ABNA0417164300", PlaceholderType.IBAN)
+    assert {"NL91 ABNA 0417 1643 00"} <= v
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "NL91 ABNA 0417 1643 00",
+        "NL91ABNA0417164300",
+        "NL91 ABNA 04171643 00",  # grouped some other way
+        f"NL91{NBSP}ABNA{NBSP}0417{NBSP}1643{NBSP}00",
+        "NL91\nABNA 0417\t1643  00",  # broken over a line
+        " NL91 ABNA 0417 1643 00 ",
+    ],
+)
+def test_iban_comes_spaced_and_unspaced_whichever_way_it_was_written(value: str) -> None:
+    v = variants_of(value, PlaceholderType.IBAN)
+    assert v == {value, "NL91ABNA0417164300", "NL91 ABNA 0417 1643 00"}
+
+
+@pytest.mark.parametrize(
+    "iban,grouped",
+    [
+        ("DE89370400440532013000", "DE89 3704 0044 0532 0130 00"),  # last group of two
+        ("NO9386011117947", "NO93 8601 1117 947"),  # last group of three
+        ("BE68539007547034", "BE68 5390 0754 7034"),  # all groups of four
+    ],
+)
+def test_iban_is_grouped_in_fours_with_a_short_last_group(iban: str, grouped: str) -> None:
+    assert variants_of(iban, PlaceholderType.IBAN) == {iban, grouped}
+
+
+def test_iban_keeps_the_case_it_was_written_in() -> None:
+    v = variants_of("nl91abna0417164300", PlaceholderType.IBAN)
+    assert v == {"nl91abna0417164300", "nl91 abna 0417 1643 00"}
+
+
+def test_iban_with_other_separators_is_not_regrouped() -> None:
+    # Hyphens are not part of the IBAN formats, so no grouping is invented for them.
+    value = "NL91-ABNA-0417-1643-00"
+    assert variants_of(value, PlaceholderType.IBAN) == {value}
+
+
+def test_id_variants() -> None:
+    assert {"12345678"} <= variants_of("12.345.678", PlaceholderType.ID)
+
+
+def test_id_that_is_already_compact_has_only_the_value() -> None:
+    assert variants_of("NL123456782B01", PlaceholderType.ID) == {"NL123456782B01"}
+
+
+@pytest.mark.parametrize(
+    "value,compact",
+    [
+        ("12.345.678", "12345678"),
+        ("NL 1234.56.782.B01", "NL123456782B01"),
+        ("123-45-6789", "123456789"),
+        ("12.34-56 78", "12345678"),
+        (f"NL{NBSP}1234 56 782{NBSP}B01", "NL123456782B01"),
+        ("AB\N{HYPHEN}123456", "AB123456"),
+        ("AB\N{NON-BREAKING HYPHEN}123456", "AB123456"),
+        ("nl 1234-56-782-b01", "nl123456782b01"),  # case is left as written
+    ],
+)
+def test_id_loses_its_spaces_dots_and_hyphens(value: str, compact: str) -> None:
+    assert variants_of(value, PlaceholderType.ID) == {value, compact}
+
+
+def test_id_keeps_every_other_character() -> None:
+    assert variants_of("AB/12_34", PlaceholderType.ID) == {"AB/12_34"}
+
+
+# --------------------------------------------------------------------------------------------
 # flexible_pattern
 # --------------------------------------------------------------------------------------------
 
@@ -707,6 +789,19 @@ def test_flexible_pattern_rejects_a_blank_value(value: str) -> None:
             "visit northwind.example for details",
             "northwind.example",
         ),
+        (
+            "NL91ABNA0417164300",
+            PlaceholderType.IBAN,
+            "account NL91 ABNA 0417 1643 00 at",
+            "NL91 ABNA 0417 1643 00",
+        ),
+        (
+            "NL91 ABNA 0417 1643 00",
+            PlaceholderType.IBAN,
+            "account NL91ABNA0417164300 at",
+            "NL91ABNA0417164300",
+        ),
+        ("12.345.678", PlaceholderType.ID, "number 12345678 applies", "12345678"),
     ],
 )
 def test_another_spelling_is_found_by_the_pattern_and_by_normalize(
