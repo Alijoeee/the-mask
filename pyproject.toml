@@ -1,0 +1,60 @@
+[project]
+name = "the-mask"
+version = "0.1.0"
+description = "Masks confidential values in contracts before they go to an AI tool, fully offline."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "PySide6-Essentials==6.12.0",
+    "presidio-analyzer==2.2.364",
+    "spacy==3.8.16",
+    "en_core_web_md @ https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl",
+    "python-docx==1.2.0",
+    "lxml==6.1.3",
+    "pdfplumber==0.11.10",
+    "cryptography==50.0.2",
+    "keyring==25.7.0",
+    "schwifty==2026.7.3",
+    "python-stdnum==2.2",
+    "phonenumbers==9.0.41",
+    "rapidfuzz==3.14.6",
+    "platformdirs==4.13.4",
+    "tldextract==5.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-qt==4.5.0",
+    "Faker==40.43.0",
+    "reportlab==5.0.1",
+    "pillow==13.0.0",
+    "ruff==0.17.1",
+    "mypy==2.4.0",
+    "briefcase==0.4.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/themask"]
+
+[tool.hatch.metadata]
+# The spaCy model is published as a wheel on GitHub, not on PyPI, so it is pinned by URL.
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks a test as slow (deselect with -m 'not slow')",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+files = ["src"]
