@@ -26,6 +26,7 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+from tests.fixtures.docx import PACKAGE_RELS
 from tests.helpers import plant, reviewed
 from themask import export
 from themask.detect.lists import CaseLists
@@ -62,6 +63,14 @@ SUPPLY = "Northwind Trading B.V. supplies the goods to Thamesgate Catering plc."
 def para(text: str) -> str:
     """A paragraph of one run holding ``text``."""
     return f'<w:p><w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+
+
+def link_to(target: str) -> bytes:
+    """A document.xml.rels relating rId1 to ``target`` as an external hyperlink."""
+    kind = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+    row = f'<Relationship Id="rId1" Type="{kind}" Target="{target}" TargetMode="External"/>'
+    xml = f'<Relationships xmlns="{PACKAGE_RELS}">{row}</Relationships>'
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml).encode()
 
 
 def body_text(path: Path) -> str:
@@ -304,6 +313,31 @@ def test_several_files_with_a_redline_are_numbered(
     assert res.case.source_files == ["supply-03.docx", "supply-01.docx"]
 
 
+def test_a_value_marked_in_one_file_leaves_the_links_of_the_others(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # The annex never names the company where it is read, but links to its sales address
+    # (ruling R82): the key's values leave every file's links, not only the file they were in.
+    contract = make_docx(para(SUPPLY) + para("Orders go to sales@northwind.example."))
+    link = (
+        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+    )
+    rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
+    annex = make_docx(para("Annex 1: the price list.") + link, raw=rels)
+    sources = load_sources([contract, annex], False)
+    review = ReviewState(combined_text(sources).text, [], [], lists, CaseLists([], [], set()))
+    review.hide_text("Northwind Trading B.V.", COMPANY)
+    review.hide_text("sales@northwind.example", PlaceholderType.EMAIL)
+    res = export_case(
+        sources, review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert not res.blocked and res.leak_hits == [] and len(res.outputs) == 2
+    targets = DocxPackage.open(res.outputs[1]).raw("word/_rels/document.xml.rels")
+    assert b"northwind" not in targets.lower()
+    assert "Write to the sales desk." in body_text(res.outputs[1])
+
+
 def test_a_pdf_is_masked_like_a_word_file(
     corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
@@ -390,6 +424,44 @@ def test_what_nobody_marked_is_listed_once(
     canonicals = [normalize(group.canonical) for group in res.unmarked]
     assert normalize("Burren Logistics Limited") in canonicals
     assert len(set(canonicals)) == len(canonicals)
+
+
+def test_with_several_files_a_hit_names_its_file(
+    corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R81: the annex of the pair carries a font named after a party of the case.
+    font = b'<w:font w:name="Isarthal Hygiene Systems GmbH"><w:family w:val="swiss"/></w:font>'
+    planted = tmp_path / "supply-07-annex.docx"
+    plant(corpus / "supply-07-annex.docx", "word/fontTable.xml", font, planted)
+    srcs, review = reviewed([corpus / "supply-07.docx", planted], engine, lists)
+    res = export_case(srcs, review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None)
+    assert res.blocked and res.leak_hits
+    assert all(re.fullmatch(r"MASKED-[A-Z2-9]{4}-[12]\.docx: .+", h.part) for h in res.leak_hits)
+    (hit,) = [h for h in res.leak_hits if h.part.endswith(": word/fontTable.xml")]
+    assert re.fullmatch(r"MASKED-[A-Z2-9]{4}-2\.docx: word/fontTable\.xml", hit.part)
+
+
+def test_a_hit_names_its_file_as_it_was_written(
+    make_docx: MakeDocx,
+    engine: Engine,
+    lists: UserLists,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(export, "new_case_code", lambda rng=None, existing=(): "TEST")
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "MASKED-TEST-2.docx").write_bytes(b"another file")
+    sources = load_sources([make_docx(para(SUPPLY)), make_docx(para(SUPPLY))], False)
+    review = ReviewState(combined_text(sources).text, [], [], lists, CaseLists([], [], set()))
+    company = review.hide_text("Northwind Trading B.V.", COMPANY)
+    review.set_occurrence_enabled(company.id, 1, False)  # the one in the second file
+    res = export_case(sources, review, ExportOptions(out), engine, lists, lambda c: None)
+    assert not res.blocked
+    assert [p.name for p in res.outputs] == ["MASKED-TEST-1.docx", "MASKED-TEST-2 (2).docx"]
+    assert [h.part for h in res.allowed_hits] == ["MASKED-TEST-2 (2).docx: word/document.xml"]
+    assert res.leak_hits == res.allowed_hits
+    assert (out / "MASKED-TEST-2.docx").read_bytes() == b"another file"
 
 
 def test_values_too_short_to_check_are_reported(

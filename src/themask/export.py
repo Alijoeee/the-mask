@@ -8,15 +8,16 @@ is cleaned too. A PDF is first written into a new Word file (``pdf_to_docx``, ru
 is then prepared like any other. The review works on the text of those prepared copies, joined by
 ``combined_text``: every file's version after its changes, then the versions before them.
 
-``export_case`` masks a copy of each prepared version with its part of the review's plan, puts the
-banner on top and saves it under a neutral name in a private temporary folder, where the leak
-check searches it for every value of the key. A value found in more places than the owner left
-it visible on purpose (ruling R60) blocks the export: the files are deleted and nothing is saved.
-Otherwise the detection runs again on the masked files, for what nobody marked; the files are
-written into the output folder, never over a file that is there; and the case's key is saved. If
-the key cannot be saved, the files written go again: a masked file without its key could never be
-restored. A file added to an existing case keeps the case's code, continues the numbering of its
-files and adds to its key. Nothing here writes to the log.
+``export_case`` masks a copy of each prepared version with its part of the review's plan, and takes
+every value of the case's key out of its link addresses, field instructions and bookmark names
+(ruling R82). It puts the banner on top and saves the file under a neutral name in a private
+temporary folder, where the leak check searches it for every value of the key. A value found in
+more places than the owner left it visible on purpose (ruling R60) blocks the export: the files
+are deleted and nothing is saved. Otherwise the detection runs again on the masked files, for what
+nobody marked; the files are written into the output folder, never over a file that is there; and
+the case's key is saved. If the key cannot be saved, the files written go again: a masked file
+without its key could never be restored. A file added to an existing case keeps the case's code,
+continues the numbering of its files and adds to its key. Nothing here writes to the log.
 """
 
 from __future__ import annotations
@@ -118,10 +119,12 @@ class ExportResult:
     export is ``blocked`` the first is None and the second empty, as nothing was saved.
     ``leak_hits`` are all the places the leak check found a value of the key, and
     ``allowed_hits`` those of them that are the occurrences the owner left visible on purpose
-    (ruling R60): the export is blocked by the others. ``unmarked`` holds what the detection
-    finds in the masked files that the owner never marked (only after an export that was not
-    blocked), ``unverifiable`` the placeholders whose values are too short to be checked, and
-    ``instruction`` the instruction to paste into the AI tool.
+    (ruling R60): the export is blocked by the others. When the export makes several files, a
+    hit's ``part`` begins with the name of its file, "MASKED-K4F7-2.docx: word/header1.xml"
+    (ruling R81). ``unmarked`` holds what the detection finds in the masked files that the owner
+    never marked (only after an export that was not blocked), ``unverifiable`` the placeholders
+    whose values are too short to be checked, and ``instruction`` the instruction to paste into
+    the AI tool.
     """
 
     case: Case | None
@@ -166,9 +169,11 @@ def export_case(
 
     The files are named ``MASKED-<code>.docx`` for one file, ``-1``, ``-2`` ... for several, and
     ``-before`` and ``-after`` for the two versions of a redline (``-1-before`` among several).
-    Each file is checked for every value of ``review.key_entries()``; a placeholder found in
-    more places than the owner switched off one by one blocks the export (ruling R60). Not
-    blocked, the files go into ``options.out_dir`` and the case is passed to ``save_case``.
+    Every file has the values of ``review.key_entries()`` taken out of its addresses,
+    instructions and bookmark names, the values marked in the other files too (ruling R82), and
+    is checked for all of them; a placeholder found in more places than the owner switched off
+    one by one blocks the export (ruling R60). Not blocked, the files go into
+    ``options.out_dir`` and the case is passed to ``save_case``.
 
     Raises ValueError, before anything is written, when there is no file, when ``review`` was not
     made on the text of ``sources`` (``combined_text``), when the sources were loaded for a
@@ -190,20 +195,21 @@ def export_case(
     staging = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX))
     try:
         staged = [
-            _mask(views[i], plans[i], staging / names[views[i].index, views[i].side]) for i in order
+            _mask(views[i], plans[i], entries, staging / names[views[i].index, views[i].side])
+            for i in order
         ]
-        hits = [hit for path in staged for hit in scan_package(path, entries)]
-        blocking = _blocking(hits, _allowances(review.groups))
-        allowed = [hit for hit in hits if hit.placeholder not in blocking]
+        found = [scan_package(path, entries) for path in staged]
+        blocking = _blocking([hit for hits in found for hit in hits], _allowances(review.groups))
         if blocking:
+            hits = _named(found, staged)
+            allowed = [hit for hit in hits if hit.placeholder not in blocking]
             return ExportResult(None, [], hits, [], AI_INSTRUCTION, True, allowed, not_checkable)
         unmarked = _unmarked(staged, engine, user_lists, entries)
         outputs, case = _save(staged, sources, entries, code, options, save_case)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return ExportResult(
-        case, outputs, hits, unmarked, AI_INSTRUCTION, False, allowed, not_checkable
-    )
+    hits = _named(found, outputs)  # by the names the files were written under
+    return ExportResult(case, outputs, hits, unmarked, AI_INSTRUCTION, False, hits, not_checkable)
 
 
 # ---- loading ------------------------------------------------------------------------------------
@@ -367,15 +373,16 @@ def _numbers_used(case: Case) -> int:
 # ---- masking and checking -----------------------------------------------------------------------
 
 
-def _mask(view: _View, plan: MaskPlan, out: Path) -> Path:
-    """Masks a copy of the version ``view`` with ``plan``, puts the banner on top and saves it at
-    ``out``. The prepared package stays as it was, so the same sources can be exported again.
+def _mask(view: _View, plan: MaskPlan, entries: list[KeyEntry], out: Path) -> Path:
+    """Masks a copy of the version ``view`` with ``plan`` and the case's key ``entries``, puts
+    the banner on top and saves it at ``out``. The prepared package stays as it was, so the same
+    sources can be exported again.
     """
     pkg = view.pkg.copy()
     doc_text = extract_text(pkg)  # the copy has paragraphs of its own
     if doc_text.text != view.text.text:
         raise ValueError("A file has changed since it was read; load it again.")
-    apply_mask(pkg, doc_text, plan)
+    apply_mask(pkg, doc_text, plan, entries=entries)
     insert_banner(pkg)
     pkg.save(out)
     return out
@@ -400,6 +407,19 @@ def _blocking(hits: list[LeakHit], allowed: dict[str, int]) -> set[str]:
         for placeholder, count in hits_by_placeholder(hits).items()
         if count > allowed.get(placeholder, 0)
     }
+
+
+def _named(found: list[list[LeakHit]], files: list[Path]) -> list[LeakHit]:
+    """The hits ``found`` in each of ``files``, in their order. With several files each hit's
+    part begins with the name of its file (ruling R81); the hits of one file keep their parts.
+    """
+    if len(files) == 1:
+        return list(found[0])
+    return [
+        replace(hit, part=f"{file.name}: {hit.part}")
+        for file, hits in zip(files, found, strict=True)
+        for hit in hits
+    ]
 
 
 def _unmarked(

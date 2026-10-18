@@ -35,7 +35,7 @@ from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import DocText, extract_text, paragraph_nodes
 from themask.docx.restorer import replace_in_paragraph
 from themask.instruction import BANNER_TEXT
-from themask.model import MaskPlan, Replacement
+from themask.model import KeyEntry, MaskPlan, PlaceholderType, Replacement
 from themask.textnorm import flexible_pattern, normalize
 
 W = NS["w"]
@@ -972,6 +972,89 @@ def test_an_empty_plan_changes_nothing(corpus: Path) -> None:
     before = {name: pkg.raw(name) for name in pkg.names()}
     assert apply_mask(pkg, dt, MaskPlan([])) == MaskReport(0, 0, 0, 0)
     assert {name: pkg.raw(name) for name in pkg.names()} == before
+
+
+# ---- the values of a case's other files (ruling R82) ----------------------------------------
+
+# The key of a case whose contract names the company and its sales address, for an annex.
+OTHER_FILES = [
+    KeyEntry(
+        "[COMPANY_1]",
+        PlaceholderType.COMPANY,
+        "Northwind Trading B.V.",
+        ["Northwind", "Northwind Trading B.V."],
+    ),
+    KeyEntry("[EMAIL_1]", PlaceholderType.EMAIL, "sales@northwind.example", []),
+]
+
+
+def test_the_keys_values_leave_links_instructions_and_names_but_never_the_text(
+    make_docx: MakeDocx,
+) -> None:
+    # The annex never names the company where it is read, but links to its address, refers to
+    # it in a field (%-escaped: ruling R26) and names a bookmark after it. And one paragraph shows
+    # the name where the plan leaves it.
+    bookmark = (
+        '<w:p><w:bookmarkStart w:id="0" w:name="Northwind_Terms"/><w:r><w:t>Terms</w:t></w:r>'
+        '<w:bookmarkEnd w:id="0"/></w:p>'
+    )
+    body = (
+        p("Annex 1: the price list.")
+        + '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+        + "<w:p><w:fldSimple w:instr=' HYPERLINK \"mailto:orders%40northwind.example\" '>"
+        "<w:r><w:t>order</w:t></w:r></w:fldSimple></w:p>"
+        + bookmark
+        + field_code(" PAGEREF Northwind_Terms \\h ")
+        + p("Northwind stays where the plan leaves it.")
+    )
+    targets = links("mailto:sales@northwind.example")
+    pkg = DocxPackage.open(make_docx(body, raw={"word/_rels/document.xml.rels": targets}))
+    dt = extract_text(pkg)
+    report = apply_mask(pkg, dt, MaskPlan([]), entries=OTHER_FILES)
+    assert report == MaskReport(
+        replaced=0, hyperlinks_unwrapped=1, instr_fields_masked=2, bookmarks_renamed=1
+    )
+    assert b"northwind" not in pkg.raw("word/_rels/document.xml.rels").lower()
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//w:fldSimple", NS).get(f"{{{W}}}instr") == (
+        ' HYPERLINK "mailto:orders%40[COMPANY_1].example" '
+    )
+    assert root.find(".//w:bookmarkStart", NS).get(f"{{{W}}}name") == "bm1"
+    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" PAGEREF bm1 \\h "]
+    # What is read changes only where the plan says: here nowhere.
+    paragraphs = extract_text(pkg).text.split("\n")
+    assert "Write to the sales desk." in paragraphs
+    assert "Northwind stays where the plan leaves it." in paragraphs
+
+
+def test_the_keys_values_follow_the_rules_the_plans_values_follow(make_docx: MakeDocx) -> None:
+    # Rulings R14, R27 and R30, as for the plan's own values: a value too short to mean anything
+    # in an address or a name leaves them alone but is replaced in an instruction, and a field's
+    # name and format keyword are never a value ("Page" and PAGE).
+    key = [
+        KeyEntry("[CUSTOM_1]", PlaceholderType.CUSTOM, "AB1", []),
+        KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Page Industries", ["Page"]),
+    ]
+    body = (
+        p("Schedule 2.")
+        + '<w:p><w:bookmarkStart w:id="0" w:name="_AB1"/><w:r><w:t>Terms</w:t></w:r>'
+        '<w:bookmarkEnd w:id="0"/></w:p>'
+        + '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>the form</w:t></w:r></w:hyperlink></w:p>'
+        + "<w:p><w:fldSimple w:instr=' QUOTE \"Code AB1\" '><w:r><w:t>Code</w:t></w:r>"
+        "</w:fldSimple></w:p>" + field_code(" PAGE \\* MERGEFORMAT ")
+    )
+    targets = links("https://www.example.org/forms/ab1")
+    pkg = DocxPackage.open(make_docx(body, raw={"word/_rels/document.xml.rels": targets}))
+    dt = extract_text(pkg)
+    report = apply_mask(pkg, dt, MaskPlan([]), entries=key)
+    assert report == MaskReport(0, 0, 1, 0)
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//w:bookmarkStart", NS).get(f"{{{W}}}name") == "_AB1"
+    assert b"forms/ab1" in pkg.raw("word/_rels/document.xml.rels")
+    assert root.find(".//w:fldSimple", NS).get(f"{{{W}}}instr") == ' QUOTE "Code [CUSTOM_1]" '
+    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" PAGE \\* MERGEFORMAT "]
+    assert extract_text(pkg).text == dt.text
 
 
 # ---- banner and names ------------------------------------------------------------------------
