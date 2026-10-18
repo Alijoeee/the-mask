@@ -10,17 +10,21 @@ compared depends on its type; a variant is compared as its entry's type:
   PAGEREF nor "B. Lee" in "reasonable endeavours". Names are folded a second way as well, with
   the punctuation that has no space beside it dropped (ruling R68), so "Acme BV" is found for
   "Acme B.V." and "North-wind" for "Northwind"; an initial's full stop before a word still parts
-  them ("S.Hall" is no "shall"). A match in either fold is a hit;
+  them ("S.Hall" is no "shall"), and so does a slash ("and/or" is no "Andor": ruling R72). A
+  match in either fold is a hit;
 * a number (AMOUNT, PERCENT, QUANTITY, IBAN, ID, PHONE) by its letters and digits alone, so
   "1.250.000" is found for "1,250,000" and "NL91ABNA0417164300" for "NL91 ABNA 0417 1643 00";
-  only a decimal part stays apart (ruling R71: "1,250.00" and "1.250,00" alike are 1250 with 00
-  after the point, never 125000). Where it starts or ends with a digit, it counts only where no
-  other digit touches it there in the text itself (rulings R65, R70): right beside it, beyond a
-  single full stop, comma, apostrophe or non-breaking space, or beyond a plain space where the
-  digits beyond are a thousands group of three ("1250" is not found in "11250", "EUR 1,250" not
-  in "EUR 12,500", "1 250" not in "1 250 000"; "1,250" is in "In 2025 1,250 units"). A tab, a
-  line break or any other mark parts two numbers ("Instalment 2<tab>125,000"), and so does a
-  footnote mark; cents after it ("125,000.00") are no other number.
+  only a decimal part stays apart (rulings R71, R72: "1,250.00" and "1.250,00" alike are 1250,
+  never 125000, and "1,250.50" is "1,250.5"). A decimal point is the last full stop or comma of a
+  number, with one or two digits after it, unlike every separator before it: "08.123.456.78" has
+  none. Where a number starts or ends with a digit, it counts only where no other digit touches
+  it there in the text itself (rulings R65, R70, R72): right beside it, beyond a single full stop,
+  comma, apostrophe (straight or curly) or space that only groups thousands (no-break, narrow,
+  thin), or beyond a plain space where the digits beyond are a thousands group of three ("1250"
+  is not found in "11250", "EUR 1,250" not in "EUR 12,500", "1 250" not in "1 250 000"; "1,250"
+  is in "In 2025 1,250 units"). A tab, a line break or any other mark parts two numbers
+  ("Instalment 2<tab>125,000"), and so does a footnote mark; cents after it ("125,000.00") are
+  no other number.
 
 It searches:
 
@@ -52,9 +56,12 @@ file's own name and the name of any other part are searched.
 
 A value of fewer than four letters and digits is not searched for: it would be found everywhere.
 ``unverifiable`` names the placeholders whose value and variants are all that short, which the
-export reports as not checkable (ruling R14 c). A person's bare surname is never in the key
-(ruling R52); it is searched for in the document's text and counts where it stands as a person's
-name, the way the sweep took it: "Smith shall attend" is a hit, "the Price" is not.
+export reports as not checkable (ruling R14 c). For the same reason a number found counts only
+where the text writes it with four letters and digits or more: "10.00%" is the number 10 (ruling
+R72), found as "10.00" or "10,00" but never as the 10 of "Clause 10". A person's bare surname is
+never in the key (ruling R52); it is searched for in the document's text and counts where it
+stands as a person's name, the way the sweep took it: "Smith shall attend" is a hit, "the Price"
+is not.
 
 A hit says where it is and shows about forty characters round it, with every stretch that
 normalises to a value, a variant or a surname of the key (wherever it stands, glued to other
@@ -275,9 +282,10 @@ _MARK_CLASS, _FORMAT_CLASS = _character_classes()
 _MARKS = re.compile(f"[{_MARK_CLASS}{_FORMAT_CLASS}]+")
 _NOT_A_LETTER_OR_DIGIT = re.compile(r"[\W_]+")
 # The second way of folding a name drops what is neither a letter, a digit nor a space where no
-# space stands beside it ("B.V.", "North-wind"), but keeps a word break after an initial's full
-# stop before a word ("S.Hall"), where dropping it would make another word.
-_GLUED = re.compile(r"(?<!\s)(?:[^\w\s]|_)+(?!\s)")
+# space stands beside it ("B.V.", "North-wind"), but keeps a slash ("and/or" is no "Andor") and
+# a word break after an initial's full stop before a word ("S.Hall"), where dropping it would make
+# another word (ruling R72).
+_GLUED = re.compile(r"(?<!\s)(?:[^\w\s/]|_)+(?!\s)")
 _INITIAL = re.compile(r"(?<![^\W_])([^\W\d_])\.(?=[^\W\d_]{2})")
 
 
@@ -288,50 +296,83 @@ def _prefolded(text: str) -> str:
     return _MARKS.sub("", folded.replace("\N{LATIN SMALL LETTER DOTLESS I}", "i"))
 
 
-# Ruling R71: a number's decimal part stays apart when numbers are compared. A run of digit groups
-# is joined by full stops, commas, apostrophes or the spaces that only ever group thousands (a
-# plain space joins no run: it may stand between two numbers). Its last separator is a decimal
-# point when it is a full stop or a comma with one or two digits after it, and the groups between
-# the first and the last are thousands groups: "1,250.00", "1.250,00", "12,5"; not "1,250" nor
-# "06.12.34.56.78" (a telephone number) nor "18.10.26" (a date). The point is folded to this mark.
-_NUMBER_RUN = re.compile(r"\d+(?:[.,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}]\d+)+")
-_GROUP_SEPARATOR = re.compile(r"[.,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}]")
+# Rulings R71, R72: a number's decimal part stays apart when numbers are compared. A run of digit
+# groups is joined by full stops, commas, apostrophes (straight or curly) or the spaces that only
+# ever group thousands (no-break, narrow no-break, thin; a plain space joins no run: it may stand
+# between two numbers). Its last separator is a decimal point when it is a full stop or a comma
+# with one or two digits after it, unlike every separator before it: "1,250.00", "1.250,00",
+# "1'250.50", "1250.00", "12,5"; not "1,250", nor "08.123.456.78" (a telephone number) nor
+# "192.168.100.12". The point is folded to this mark, and the zeros that end the decimal part
+# fold away ("1,250.50" is 1250 and 5, "1,250.00" is 1250).
+_GROUP_SEPARATORS = (
+    ".,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}\N{THIN SPACE}\N{RIGHT SINGLE QUOTATION MARK}"
+)
+_NUMBER_RUN = re.compile(rf"\d+(?:[{_GROUP_SEPARATORS}]\d+)+")
+_GROUP_SEPARATOR = re.compile(f"[{_GROUP_SEPARATORS}]")
 _DECIMAL_MARK = "x"
 
 
-def _decimal_points(text: str) -> list[int]:
-    """Where ``text`` writes a number's decimal point (ruling R71)."""
-    points = []
+@dataclass(frozen=True)
+class _Decimal:
+    """A number's decimal part: its point, the zeros that end it, and whether a digit is left
+    between them (else the point folds away too)."""
+
+    point: int
+    zeros: range
+    marked: bool
+
+    @property
+    def folded_away(self) -> range:
+        """The places in the text of what folds away: the zeros that end it, and its point as
+        well when only zeros follow it."""
+        return self.zeros if self.marked else range(self.point, self.zeros.stop)
+
+
+def _decimals(text: str) -> list[_Decimal]:
+    """The decimal parts of the numbers ``text`` writes (rulings R71, R72)."""
+    found = []
     for run in _NUMBER_RUN.finditer(text):
         separators = list(_GROUP_SEPARATOR.finditer(run.group()))
-        groups = _GROUP_SEPARATOR.split(run.group())
         last = separators[-1]
-        thousands = all(len(group) == 3 for group in groups[1:-1])
-        if (
-            last.group() in ".,"
-            and len(groups[-1]) <= 2
-            and thousands
-            and (len(groups) == 2 or len(groups[0]) <= 3)
-        ):
-            points.append(run.start() + last.start())
-    return points
+        if last.group() not in ".," or any(s.group() == last.group() for s in separators[:-1]):
+            continue
+        digits_start = run.start() + last.end()
+        if run.end() - digits_start > 2:
+            continue
+        kept = run.end()
+        while kept > digits_start and unicodedata.decimal(text[kept - 1], -1) == 0:
+            kept -= 1
+        found.append(
+            _Decimal(run.start() + last.start(), range(kept, run.end()), kept > digits_start)
+        )
+    return found
 
 
 def _folds(text: str) -> tuple[str, str, str]:
     """``text`` folded the three ways it is searched: by its words (every run of anything else
     than letters and digits one space, none at either end: ruling R63), by its words with glued
     punctuation dropped (ruling R68), and as numbers, by its letters and digits alone with each
-    decimal point a mark (rulings R14, R71)."""
+    decimal point a mark and the zeros that end a decimal part dropped (rulings R14, R71, R72)."""
     pre = _prefolded(text)
     words = _NOT_A_LETTER_OR_DIGIT.sub(" ", pre).strip()
     tight = _NOT_A_LETTER_OR_DIGIT.sub(" ", _GLUED.sub("", _INITIAL.sub(r"\1 ", pre))).strip()
-    points = _decimal_points(text)
-    if points:
-        marked = list(text)
-        for point in points:
-            marked[point] = _DECIMAL_MARK
-        pre = _prefolded("".join(marked))
-    return words, tight, _NOT_A_LETTER_OR_DIGIT.sub("", pre)
+    marked = _marked(text)
+    numbers = pre if marked == text else _prefolded(marked)
+    return words, tight, _NOT_A_LETTER_OR_DIGIT.sub("", numbers)
+
+
+def _marked(text: str) -> str:
+    """``text`` as its numbers are folded from: each decimal point the mark, or a space where only
+    zeros follow it, and the zeros that end a decimal part spaces (rulings R71, R72)."""
+    decimals = _decimals(text)
+    if not decimals:
+        return text
+    marked = list(text)
+    for decimal in decimals:
+        marked[decimal.point] = _DECIMAL_MARK if decimal.marked else " "
+        for zero in decimal.zeros:
+            marked[zero] = " "
+    return "".join(marked)
 
 
 # The views of a folded text: by words, by words with glued punctuation dropped, as numbers, and
@@ -370,43 +411,33 @@ _PIECE = re.compile(f"[^{_JOINING}][{_JOINING}]*|[{_JOINING}]+")
 def _traced(text: str) -> _Trace | None:
     """``text`` folded and traced back; None should tracing it ever fold it otherwise than
     ``_folds`` does."""
-    pre: list[str] = []
-    pre_starts: list[int] = []
-    pre_ends: list[int] = []
-    if text.isascii():
-        for at, char in enumerate(text):
-            pre.append(char.lower())
-            pre_starts.append(at)
-            pre_ends.append(at + 1)
-    else:
-        for piece in _PIECE.finditer(text):
-            folded = _prefolded(piece.group())
-            pre += folded
-            pre_starts += [piece.start()] * len(folded)
-            pre_ends += [piece.end()] * len(folded)
-    prefolded = "".join(pre)
+    prefolded, pre_starts, pre_ends = _prefolded_traced(text)
+    marked = _marked(text)  # the numbers are folded from it, character for character
+    numbers = (prefolded, pre_starts, pre_ends) if marked == text else _prefolded_traced(marked)
     guarded = _INITIAL.sub(r"\1 ", prefolded)
     glued = [False] * len(guarded)
     for run in _GLUED.finditer(guarded):
         glued[run.start() : run.end()] = [True] * (run.end() - run.start())
-    points = set(_decimal_points(text))
     views: list[tuple[str, list[int], list[int]]] = []
     for kind in (_WORDS, _TIGHT, _COMPACT, _PLAIN):
+        base, base_starts, base_ends = (
+            numbers
+            if kind == _COMPACT
+            else (guarded if kind == _TIGHT else prefolded, pre_starts, pre_ends)
+        )
         chars: list[str] = []
         starts: list[int] = []
         ends: list[int] = []
-        for at, char in enumerate(guarded if kind == _TIGHT else prefolded):
+        for at, char in enumerate(base):
             if kind == _TIGHT and glued[at]:
                 continue
-            if kind == _COMPACT and pre_starts[at] in points and char in ".,":
-                char = _DECIMAL_MARK
-            elif not (char.isalnum() and char != "_"):
+            if not (char.isalnum() and char != "_"):
                 if kind in (_COMPACT, _PLAIN) or not chars or chars[-1] == " ":
                     continue
                 char = " "
             chars.append(char)
-            starts.append(pre_starts[at])
-            ends.append(pre_ends[at])
+            starts.append(base_starts[at])
+            ends.append(base_ends[at])
         if chars and chars[-1] == " ":
             del chars[-1], starts[-1], ends[-1]
         views.append(("".join(chars), starts, ends))
@@ -418,6 +449,22 @@ def _traced(text: str) -> _Trace | None:
         (views[0][1], views[1][1], views[2][1], views[3][1]),
         (views[0][2], views[1][2], views[2][2], views[3][2]),
     )
+
+
+def _prefolded_traced(text: str) -> tuple[str, list[int], list[int]]:
+    """``text`` prefolded piece by piece, with the start and the end in ``text`` of the piece each
+    prefolded character comes from."""
+    if text.isascii():
+        return text.lower(), list(range(len(text))), list(range(1, len(text) + 1))
+    pre: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    for piece in _PIECE.finditer(text):
+        folded = _prefolded(piece.group())
+        pre.append(folded)
+        starts += [piece.start()] * len(folded)
+        ends += [piece.end()] * len(folded)
+    return "".join(pre), starts, ends
 
 
 # A long text is traced only round what was found in it, in chunks of about this many characters
@@ -570,16 +617,16 @@ _DECIMAL_POINT_IN_KEY = re.compile(rf"(?<=\d){_DECIMAL_MARK}(?=\d)")
 
 # Ruling R65: what may stand between two digits of one number, and the cents after a number. A
 # plain space stands between two digits of one number only before a thousands group (ruling R70).
-_NUMBER_SEPARATORS = frozenset(".,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}")
+_NUMBER_SEPARATORS = frozenset(_GROUP_SEPARATORS)
 _CENTS = re.compile(r"[.,][0-9]{2}(?![0-9])")
 
 
 def _touched(text: str, start: int, end: int, key: str) -> bool:
     """Whether another digit touches the number found at ``text[start:end]`` on a side where its
-    needle ``key`` starts or ends with a digit (rulings R65, R70): right beside it, beyond a
-    single full stop, comma, apostrophe or non-breaking space, or beyond a plain space where the
-    digits beyond it are a thousands group. A tab, a line break, any other mark or the end of the
-    text parts them, and so do cents after it."""
+    needle ``key`` starts or ends with a digit (rulings R65, R70, R72): right beside it, beyond a
+    single full stop, comma, apostrophe or space that only groups thousands, or beyond a plain
+    space where the digits beyond it are a thousands group. A tab, a line break, any other mark
+    or the end of the text parts them, and so do cents after it."""
     if key[:1].isdecimal() and _digit_at(text, start - 1, -1):
         return True
     return key[-1:].isdecimal() and not _CENTS.match(text, end) and _digit_at(text, end, 1)
@@ -615,15 +662,28 @@ Located = list[tuple[int, int, _Match]]
 
 def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Located:
     """The matches at their places in ``text``, in order: a number that another digit touches
-    left out (ruling R65), and of two matches one of which holds the other only the outer one
-    ("Northwind Trading B.V." left in a file is one place, not one for each of its variants). A
-    match that cannot be placed stands at -1."""
+    left out (ruling R65), and so is one that the text writes with fewer than ``MIN_LENGTH``
+    letters and digits ("10.00%" is the number 10, and counts as "10.00" but not as the 10 of
+    "Clause 10": rulings R14 c, R72); and of two matches one of which holds the other only the
+    outer one ("Northwind Trading B.V." left in a file is one place, not one for each of its
+    variants). A match that cannot be placed stands at -1."""
     placed = []
+    folded_away: set[int] | None = None
     for match in matches:
         source = trace.source(match) if trace is not None else _source(text, match)
         if source is None:
             placed.append(((-1, -1), match))
-        elif match.name or not _touched(text, *source, match.key):
+            continue
+        if not match.name:
+            if folded_away is None:
+                folded_away = {at for decimal in _decimals(text) for at in decimal.folded_away}
+            start, end = source
+            while end in folded_away:  # what folds away at its end is its own (ruling R72)
+                end += 1
+            source = (start, end)
+            if len(normalize(text[start:end])) < MIN_LENGTH:
+                continue
+        if match.name or not _touched(text, *source, match.key):
             placed.append((source, match))
     kept: Located = []
     reach = -2

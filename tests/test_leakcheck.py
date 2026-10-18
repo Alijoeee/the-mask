@@ -436,7 +436,7 @@ def test_what_parts_a_number_from_a_number(make_docx: MakeDocx) -> None:
     hits = scan_package(make_docx(shown), [tel, fee, deposit])
     assert [hit.context for hit in hits] == [
         "Tel. 2: +[PHONE_1]",
-        "Fee [AMOUNT_1].00 per year.",
+        "Fee [AMOUNT_1] per year.",
         "Fee [AMOUNT_1]\N{SUPERSCRIPT ONE} payable.",
         "A fee of [AMOUNT_2].50 applies.",
     ]
@@ -460,21 +460,81 @@ def test_a_plain_space_parts_numbers_unless_a_thousands_group_follows(make_docx:
     ]
 
 
+def test_a_thin_space_and_a_curly_apostrophe_group_thousands(make_docx: MakeDocx) -> None:
+    thin, curly = "\N{THIN SPACE}", "\N{RIGHT SINGLE QUOTATION MARK}"
+    units = KeyEntry("[QUANTITY_1]", QUANTITY, f"1{thin}250 units", [f"1{thin}250"])
+    # Like a no-break space, they join the groups of one number (ruling R72).
+    inside = para(f"A cap of 1{thin}250{thin}000 applies.") + para(
+        f"A cap of 1{curly}250{curly}000 applies."
+    )
+    assert scan_package(make_docx(inside), [units]) == []
+    hits = scan_package(make_docx(para(f"In 2025 1{thin}250 units shall be delivered.")), [units])
+    assert [hit.context for hit in hits] == ["In 2025 [QUANTITY_1] shall be delivered."]
+
+
 def test_a_decimal_part_stays_apart(make_docx: MakeDocx) -> None:
     big = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 125,000", ["125,000"])
     small = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 1,250", ["1,250"])
     million = KeyEntry("[AMOUNT_3]", AMOUNT, "EUR 1,250,000", ["1,250,000"])
-    # 1,250.00 is 1250 with cents, not 125000 (ruling R71).
+    # 1,250.00 is 1250 with cents, not 125000 (ruling R71); its zeros fold away (ruling R72).
     assert scan_package(make_docx(para("A fee of EUR 1,250.00 applies.")), [big]) == []
     shown = para("A fee of EUR 1,250.00 applies.") + para("A cap of 1.250.000,00 applies.")
     hits = scan_package(make_docx(shown), [small, million])
     assert [hit.context for hit in hits] == [
-        "A fee of [AMOUNT_2].00 applies.",
-        "A cap of [AMOUNT_3],00 applies.",
+        "A fee of [AMOUNT_2] applies.",
+        "A cap of [AMOUNT_3] applies.",
     ]
     # Three digits after the last separator are a group of thousands, not decimals: 1,250.125 is
     # the number 1250125, and holds no 1,250.
     assert scan_package(make_docx(para("A rate of 1,250.125 applies.")), [small]) == []
+
+
+def test_a_decimal_point_is_unlike_the_separators_before_it(make_docx: MakeDocx) -> None:
+    tel = KeyEntry("[PHONE_1]", PHONE, "08 123 456 78", [])
+    register = KeyEntry("[ID_1]", ID, "123.456.78", [])
+    # A full stop that also parts the groups before it is no decimal point (ruling R72): these
+    # are the same digits, grouped another way.
+    shown = para("Tel. 08.123.456.78") + para("Register 123 456 78.")
+    hits = scan_package(make_docx(shown), [tel, register])
+    assert [hit.context for hit in hits] == ["Tel. [PHONE_1]", "Register [ID_1]."]
+    assert_nothing_shown(hits, [tel, register])
+
+
+def test_the_zeros_that_end_a_decimal_part_fold_away(make_docx: MakeDocx) -> None:
+    written = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 1,250.50", [])
+    short = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 1,250.5", [])
+    # 1,250.50 and 1,250.5 are one amount, however it is written (ruling R72).
+    for entry, text in ((written, "EUR 1,250.5"), (short, "EUR 1,250.50")):
+        hits = scan_package(make_docx(para(f"A fee of {text} applies.")), [entry])
+        assert [hit.context for hit in hits] == [f"A fee of {entry.placeholder} applies."]
+    # 1,250.00 is 1,250, written with its zeros or not, and still no 125,000.
+    even = KeyEntry("[AMOUNT_3]", AMOUNT, "EUR 1,250.00", ["1,250.00"])
+    shown = para("A fee of EUR 1,250 applies.") + para("A deposit of EUR 1,250.0 applies.")
+    hits = scan_package(make_docx(shown), [even])
+    assert [hit.context for hit in hits] == [
+        "A fee of [AMOUNT_3] applies.",
+        "A deposit of [AMOUNT_3] applies.",
+    ]
+    assert_nothing_shown(hits, [even])
+    assert scan_package(make_docx(para("A cap of EUR 125,000 applies.")), [even]) == []
+
+
+def test_a_number_counts_only_where_written_with_four_letters_and_digits(
+    make_docx: MakeDocx,
+) -> None:
+    # 10.00% is the number 10 (ruling R72), which would be found everywhere: it counts where the
+    # text writes it with its zeros, as the key does, and never as a bare 10 (ruling R14 c).
+    rate = KeyEntry("[PERCENT_1]", PERCENT, "10.00%", [])
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "\N{EURO SIGN}159.00", ["159.00"])
+    assert unverifiable([rate, fee]) == []
+    quiet = para("Clause 10 applies for 10 days.") + para("See page 159.")
+    assert scan_package(make_docx(quiet), [rate, fee]) == []
+    shown = para("Interest of 10,00% applies.") + para("A fee of 159.00 applies.")
+    hits = scan_package(make_docx(shown), [rate, fee])
+    assert [hit.context for hit in hits] == [
+        "Interest of [PERCENT_1]% applies.",
+        "A fee of [AMOUNT_1] applies.",
+    ]
 
 
 # ---- the file format's names, and those it was given (rulings R66, R67) --------------------------
@@ -587,6 +647,9 @@ def test_names_are_found_however_they_are_punctuated(make_docx: MakeDocx) -> Non
     # An initial's full stop before a word still parts them: "S.Hall" makes no "shall".
     sarah = KeyEntry("[PERSON_1]", PERSON, "Sarah Hall", ["S.Hall", "S. Hall"])
     assert scan_package(make_docx(para("The Supplier shall deliver.")), [sarah]) == []
+    # So does a slash: "and/or" makes no "Andor" (ruling R72).
+    andor = KeyEntry("[COMPANY_4]", COMPANY, "Andor Technology Ltd", ["Andor"])
+    assert scan_package(make_docx(para("The Supplier and/or the Buyer shall pay.")), [andor]) == []
 
 
 # ---- what a hit shows, and how many it is (ruling R69) -------------------------------------------
