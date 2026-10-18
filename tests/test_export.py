@@ -1,12 +1,13 @@
 """The export: the files loaded and prepared, masked with the review's plan, checked and saved.
 
 The brief's tests run the whole pipeline on corpus files: one file, a contract with its annex, a
-redline in two versions, nothing marked, a file added to a case. The leak gate's allowance for the
-occurrences the owner left visible (ruling R60) is tested on supply-01 with one occurrence switched
-off, with and without a value planted where no review can see it, and over two small files. Small
-made-up files reviewed by hand cover the rest: values too short to check, what nobody marked,
-case codes in use, files never overwritten, the key and the numbering of a case a file is added
-to, a key that could not be saved, and what an export refuses.
+redline in two versions, nothing marked, a file added to a case. The leak gate decides on a twin of
+each file in which every place of every value of the key is replaced (ruling R84): it is tested on
+supply-01 with one occurrence switched off, with and without a value planted where no review can
+see it, with a form never hidden, and over two small files. Small made-up files reviewed by hand
+cover the rest: values too short to check, what nobody marked, case codes in use, files never
+overwritten, files of the same name, the key, the numbering and the retention of a case a file is
+added to, a key that could not be saved, and what an export refuses.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import tempfile
 import uuid
 import zipfile
 from collections.abc import Collection
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
@@ -59,6 +60,11 @@ PERCENT = PlaceholderType.PERCENT
 PERSON = PlaceholderType.PERSON
 
 SUPPLY = "Northwind Trading B.V. supplies the goods to Thamesgate Catering plc."
+# A run set in a font named after the company: a leftover no review sees (ruling R66).
+FONT_RUN = (
+    '<w:p><w:r><w:rPr><w:rFonts w:ascii="Northwind Trading B.V."/></w:rPr>'
+    "<w:t>Delivery is free.</w:t></w:r></w:p>"
+)
 
 
 def para(text: str) -> str:
@@ -268,6 +274,28 @@ def test_combined_text_names_each_version(corpus: Path) -> None:
         assert combined.text[start:end] == text
 
 
+def test_files_of_the_same_name_are_told_apart(make_docx: MakeDocx, tmp_path: Path) -> None:
+    # Three files from three folders whose names Finder shows alike: each version of the
+    # combined text has a name of its own, so a place can be traced back to its file.
+    files = [
+        ("a", "contract.docx", "Northwind Trading B.V. supplies the goods."),
+        ("b", "Contract.docx", "Thamesgate Catering plc buys them."),
+        ("c", "contract (2).docx", "Burren Logistics Limited carries them."),
+    ]
+    paths = []
+    for folder, name, text in files:
+        (tmp_path / folder).mkdir()
+        paths.append(tmp_path / folder / name)
+        paths[-1].write_bytes(make_docx(para(text)).read_bytes())
+    combined = combined_text(load_sources(paths, False))
+    assert [name for name, _, _ in combined.parts] == [
+        "contract.docx (after)",
+        "Contract (2).docx (after)",
+        "contract (2) (2).docx (after)",
+    ]
+    assert combined.locate(combined.text.index("Thamesgate"))[0] == "Contract (2).docx (after)"
+
+
 def test_only_word_and_pdf_files_are_read(corpus: Path, tmp_path: Path) -> None:
     other = tmp_path / "Supply Agreement.txt"
     other.write_text(SUPPLY, encoding="utf-8")
@@ -375,18 +403,19 @@ def test_an_occurrence_left_visible_on_purpose_is_allowed(
     review.set_occurrence_enabled(company.id, 0, False)
     saved: list[Case] = []
     res = export_case(srcs, review, ExportOptions(tmp_path), engine, lists, saved.append)
-    # The one place the owner switched off is still there, and allowed (ruling R60).
-    assert not res.blocked and res.outputs and saved
-    assert res.leak_hits and res.allowed_hits == res.leak_hits
-    assert {hit.placeholder for hit in res.leak_hits} == {"[COMPANY_1]"}
-    assert sum(hit.count for hit in res.leak_hits) == 1
+    # The one place the owner switched off is still there, listed as left visible on purpose; the
+    # twin with that place replaced too is clean, so nothing blocks (ruling R84).
+    assert not res.blocked and res.outputs and saved and res.leak_hits == []
+    assert {hit.placeholder for hit in res.allowed_hits} == {"[COMPANY_1]"}
+    assert sum(hit.count for hit in res.allowed_hits) == 1
     assert normalize(company.canonical) in normalize(body_text(res.outputs[0]))
 
 
-def test_a_leftover_beyond_the_allowance_blocks_and_saves_nothing(
+def test_a_leftover_blocks_and_saves_nothing(
     corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A font named after the company: no review sees it, the leak check does (ruling R66).
+    # A font named after the company: no review sees it, the leak check does (ruling R66). The
+    # place the owner switched off is replaced in the twin, so only the font is found there.
     font = b'<w:font w:name="Northwind Trading"><w:family w:val="swiss"/></w:font>'
     src = plant(corpus / "supply-01.docx", "word/fontTable.xml", font, tmp_path / "planted.docx")
     srcs, review = reviewed([src], engine, lists)
@@ -396,23 +425,19 @@ def test_a_leftover_beyond_the_allowance_blocks_and_saves_nothing(
     out.mkdir()
     saved: list[Case] = []
     res = export_case(srcs, review, ExportOptions(out), engine, lists, saved.append)
-    # One place allowed, two found: the company blocks, and nothing is saved anywhere.
+    # The font blocks, and nothing is saved anywhere; the place switched off is listed apart.
     assert res.blocked and res.case is None and res.outputs == [] and saved == []
-    assert sum(hit.count for hit in res.leak_hits if hit.placeholder == "[COMPANY_1]") == 2
-    assert any(hit.part == "word/fontTable.xml" for hit in res.leak_hits)
-    assert res.allowed_hits == [] and res.unmarked == [] and res.instruction == AI_INSTRUCTION
+    leftovers = [(hit.part, hit.placeholder, hit.count) for hit in res.leak_hits]
+    assert leftovers == [("word/fontTable.xml", "[COMPANY_1]", 1)]
+    assert [(hit.part, hit.count) for hit in res.allowed_hits] == [("word/document.xml", 1)]
+    assert res.unmarked == [] and res.instruction == AI_INSTRUCTION
     assert list(out.iterdir()) == [] and list(temp.iterdir()) == []
 
 
-def test_the_allowance_counts_over_all_the_files(
+def test_a_leftover_in_another_file_blocks(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
-    # A run set in a font named after the company: a leftover no review sees.
-    font = (
-        '<w:p><w:r><w:rPr><w:rFonts w:ascii="Northwind Trading B.V."/></w:rPr>'
-        "<w:t>Delivery is free.</w:t></w:r></w:p>"
-    )
-    paths = [make_docx(para(SUPPLY) + para(SUPPLY)), make_docx(para(SUPPLY) + font)]
+    paths = [make_docx(para(SUPPLY) + para(SUPPLY)), make_docx(para(SUPPLY) + FONT_RUN)]
     sources = load_sources(paths, False)
     review = ReviewState(combined_text(sources).text, [], [], lists, CaseLists([], [], set()))
     company = review.hide_text("Northwind Trading B.V.", COMPANY)
@@ -420,9 +445,82 @@ def test_the_allowance_counts_over_all_the_files(
     res = export_case(
         sources, review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
     )
-    # One place allowed in the first file, a leftover in the second: two places, so blocked.
-    assert res.blocked and res.outputs == [] and res.allowed_hits == []
-    assert sum(hit.count for hit in res.leak_hits) == 2
+    # One place left visible in the first file, a leftover in the second: blocked.
+    assert res.blocked and res.outputs == []
+    (leftover,) = res.leak_hits
+    assert re.fullmatch(r"MASKED-[A-Z2-9]{4}-2\.docx: word/document\.xml", leftover.part)
+    (visible,) = res.allowed_hits
+    assert re.fullmatch(r"MASKED-[A-Z2-9]{4}-1\.docx: word/document\.xml", visible.part)
+
+
+def test_a_form_never_hidden_leaves_no_room_for_a_leftover(
+    corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Never hiding "Northwind" switches its places off and takes the form out of the key, so no
+    # scan of the masked file sees those places. The twin has them replaced, and the font named
+    # after the company is found (ruling R84).
+    font = b'<w:font w:name="Northwind Trading B.V."><w:family w:val="swiss"/></w:font>'
+    src = plant(corpus / "supply-01.docx", "word/fontTable.xml", font, tmp_path / "planted.docx")
+    srcs, review = reviewed([src], engine, lists)
+    review.add_never_hide("Northwind")
+    assert group_with(review, "[COMPANY_1]").disabled  # its places are switched off
+    out = tmp_path / "out"
+    res = export_case(srcs, review, ExportOptions(out), engine, lists, lambda c: None)
+    assert res.blocked and res.outputs == [] and not out.exists()
+    leftovers = [(hit.part, hit.placeholder) for hit in res.leak_hits]
+    assert leftovers == [("word/fontTable.xml", "[COMPANY_1]")]
+
+
+def test_a_group_switched_off_in_a_file_added_leaves_no_room_for_a_leftover(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # The annex names the case's company only as "Northwind", a form its stored entry does not
+    # list, and the owner switches the seeded group off whole. The twin has its places replaced,
+    # and the font named after the company is found (ruling R84).
+    case = Case(
+        "TEST",
+        datetime(2026, 10, 1, tzinfo=UTC),
+        ["a.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", [])],
+    )
+    body = para("Northwind delivers the goods to every site.") + para("Northwind invoices monthly.")
+    srcs, review = reviewed([make_docx(body + FONT_RUN)], engine, lists, case=case)
+    seeded = group_with(review, "[COMPANY_1]")
+    assert [f.text for f in seeded.findings] == ["Northwind", "Northwind"]
+    review.set_group_enabled(seeded.id, False)
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    res = export_case(srcs, review, options, engine, lists, lambda c: None)
+    assert res.blocked
+    leftovers = [(hit.part, hit.placeholder, hit.count) for hit in res.leak_hits]
+    assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
+
+
+def test_a_place_switched_off_in_an_instruction_leaves_no_room_for_a_leftover(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # The masker takes the value out of every field instruction whatever the switches say, so no
+    # scan sees the place switched off there. The twin is checked instead (ruling R84).
+    field = (
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> QUOTE "Northwind Trading B.V." </w:instrText>'
+        '</w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>the seller</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+    path = make_docx(para("Northwind Trading B.V. sells.") + field + FONT_RUN)
+    (source,) = load_sources([path], False)
+    review = by_hand(source, lists, ("Northwind Trading B.V.", COMPANY))
+    group = group_with(review, "[COMPANY_1]")
+    quoted = next(
+        i for i, f in enumerate(group.findings) if review.text[f.start - 7 : f.start] == 'QUOTE "'
+    )
+    review.set_occurrence_enabled(group.id, quoted, False)
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert res.blocked
+    leftovers = [(hit.part, hit.placeholder, hit.count) for hit in res.leak_hits]
+    assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
 
 
 def test_what_nobody_marked_is_listed_once(
@@ -474,7 +572,7 @@ def test_a_hit_names_its_file_as_it_was_written(
     assert not res.blocked
     assert [p.name for p in res.outputs] == ["MASKED-TEST-1.docx", "MASKED-TEST-2 (2).docx"]
     assert [h.part for h in res.allowed_hits] == ["MASKED-TEST-2 (2).docx: word/document.xml"]
-    assert res.leak_hits == res.allowed_hits
+    assert res.leak_hits == []
     assert (out / "MASKED-TEST-2.docx").read_bytes() == b"another file"
 
 
@@ -572,7 +670,7 @@ def test_a_file_added_to_a_case_merges_the_key(
     text = combined_text([source]).text
     groups = [
         group_of(text, "[COMPANY_1]", COMPANY, "Northwind Trading B.V."),  # the same value
-        group_of(text, "[COMPANY_2]", COMPANY, "Thamesgate Catering Ltd"),  # another value
+        group_of(text, "[COMPANY_2]", COMPANY, "Thamesgate Catering Ltd"),  # another form
         group_of(text, "[COMPANY_3]", COMPANY, "Burren Logistics Limited"),  # a new one
     ]
     reserved = [e.placeholder for e in case.entries]
@@ -581,13 +679,16 @@ def test_a_file_added_to_a_case_merges_the_key(
     options = ExportOptions(tmp_path / "out", existing_case=case)
     res = export_case([source], review, options, engine, lists, saved.append)
     (merged,) = saved
+    # A stored value is never rewritten: the case's first file still restores to it, and the
+    # form the new file shows joins its variants (ruling R86).
     assert [(e.placeholder, e.value) for e in merged.entries] == [
         ("[COMPANY_1]", "Northwind Trading B.V."),
         ("[PERSON_1]", "Mathew Bennett"),
-        ("[COMPANY_2]", "Thamesgate Catering Ltd"),
+        ("[COMPANY_2]", "Thamesgate Catering plc"),
         ("[COMPANY_3]", "Burren Logistics Limited"),
     ]
     assert merged.entries[0].variants == ["Northwind", "Northwind Trading B.V."]
+    assert merged.entries[2].variants == ["Thamesgate Catering Ltd"]
     assert (merged.id, merged.created_at) == (case.id, case.created_at)
     assert merged.source_files == ["Supply Agreement.docx", path.name]
     assert [f.name for f in merged.masked_files] == ["MASKED-TEST.docx", "MASKED-TEST-2.docx"]
@@ -627,6 +728,65 @@ def test_a_file_added_to_a_case_continues_its_numbering(
     options = ExportOptions(tmp_path / "out", redline_split=redline, existing_case=case)
     res = export_case([source], by_hand(source, lists), options, engine, lists, lambda c: None)
     assert [p.name for p in res.outputs] == expected
+
+
+def test_a_case_a_file_is_added_to_keeps_its_retention(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R85: the option is for new cases. A case 45 days old and kept for 90 must not expire
+    # at once because a file was added to it.
+    created = datetime.now(UTC) - timedelta(days=45)
+    case = Case(
+        "TEST",
+        created,
+        ["a.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", [])],
+        retention_days=90,
+    )
+    annex = make_docx(para("Northwind Trading B.V. delivers."))
+    srcs, review = reviewed([annex], engine, lists, case=case)
+    saved: list[Case] = []
+    options = ExportOptions(tmp_path / "out", retention_days=30, existing_case=case)
+    export_case(srcs, review, options, engine, lists, saved.append)
+    (kept,) = saved
+    assert kept.retention_days == 90 and kept.created_at == created
+    assert kept.expires_at > datetime.now(UTC)
+
+
+def test_a_merge_in_a_file_added_never_rewrites_a_value_of_the_case(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R86: in the added file's review the owner merges the case's company with another
+    # name, whose fuller form becomes the group's. The case's first file still restores to the
+    # stored value; the new form joins the entry's variants.
+    case = Case(
+        "TEST",
+        datetime(2026, 10, 1, tzinfo=UTC),
+        ["a.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", [])],
+    )
+    annex = make_docx(
+        para("Northwind Trading B.V. and Northwind Holdings International Limited sign.")
+    )
+    (source,) = load_sources([annex], False)
+    text = combined_text([source]).text
+    seeded = group_of(text, "[COMPANY_1]", COMPANY, "Northwind Trading B.V.")
+    reserved = [entry.placeholder for entry in case.entries]
+    review = ReviewState(text, [seeded], [], lists, CaseLists([], [], set()), reserved)
+    other = review.hide_text("Northwind Holdings International Limited", COMPANY)
+    merged = review.merge([seeded.id, other.id])
+    assert (merged.placeholder, merged.canonical) == (
+        "[COMPANY_1]",
+        "Northwind Holdings International Limited",
+    )
+    saved: list[Case] = []
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    export_case([source], review, options, engine, lists, saved.append)
+    (entry,) = [e for e in saved[0].entries if e.placeholder == "[COMPANY_1]"]
+    assert entry.value == "Northwind Trading B.V."
+    assert "Northwind Holdings International Limited" in entry.variants
 
 
 def northwind_case() -> Case:
@@ -675,11 +835,7 @@ def test_a_leftover_of_a_value_of_the_case_in_a_file_added_blocks(
     # Ruling R83: a run of the annex is set in a font named after the case's company, which the
     # annex's text never names.
     case = northwind_case()
-    font = (
-        '<w:p><w:r><w:rPr><w:rFonts w:ascii="Northwind Trading B.V."/></w:rPr>'
-        "<w:t>Delivery is free.</w:t></w:r></w:p>"
-    )
-    annex = make_docx(para("Burren Logistics Limited carries the goods.") + font)
+    annex = make_docx(para("Burren Logistics Limited carries the goods.") + FONT_RUN)
     (source,) = load_sources([annex], False)
     reserved = [entry.placeholder for entry in case.entries]
     review = by_hand(source, lists, ("Burren Logistics Limited", COMPANY), reserved=reserved)
@@ -708,8 +864,8 @@ def test_a_value_of_the_case_left_visible_in_a_file_added_is_allowed(
     review = ReviewState(text, [seeded], [], lists, CaseLists([], [], set()), reserved)
     options = ExportOptions(tmp_path / "out", existing_case=case)
     res = export_case([source], review, options, engine, lists, lambda c: None)
-    assert not res.blocked and res.outputs
-    assert sum(hit.count for hit in res.leak_hits) == 2 and res.allowed_hits == res.leak_hits
+    assert not res.blocked and res.outputs and res.leak_hits == []
+    assert sum(hit.count for hit in res.allowed_hits) == 2
 
 
 # ---- what an export refuses ---------------------------------------------------------------------
@@ -729,6 +885,13 @@ def test_an_export_refuses_what_does_not_fit(
     (redline,) = load_sources([corpus / "supply-03.docx"], True)
     with pytest.raises(ValueError, match="redline"):
         export_case([redline], by_hand(redline, lists), out, engine, lists, saved.append)
+    # Files with tracked changes loaded without their version before, exported as a redline.
+    (unsplit,) = load_sources([corpus / "supply-03.docx"], False)
+    redline_options = ExportOptions(tmp_path / "out", redline_split=True)
+    with pytest.raises(ValueError, match="tracked changes"):
+        export_case(
+            [unsplit], by_hand(unsplit, lists), redline_options, engine, lists, saved.append
+        )
     # A file added to a case, reviewed without the case's placeholders reserved (ruling R61).
     key = [KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", [])]
     case = Case("TEST", datetime(2026, 10, 1, tzinfo=UTC), ["a.docx"], [], key)

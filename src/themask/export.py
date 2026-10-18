@@ -12,14 +12,17 @@ is then prepared like any other. The review works on the text of those prepared 
 every value of the case's key out of its link addresses, field instructions and bookmark names
 (ruling R82): the review's key, or for a file added to a case the case's whole key as it will be
 saved (ruling R83). It puts the banner on top and saves the file under a neutral name in a
-private temporary folder, where the leak check searches it for every value of that key. A value
-found in more places than the owner left it visible on purpose (ruling R60) blocks the export:
-the files are deleted and nothing is saved. Otherwise the detection runs again on the masked
-files, for what nobody marked; the files are written into the output folder, never over a file
-that is there; and the case's key is saved. If the key cannot be saved, the files written go
-again: a masked file without its key could never be restored. A file added to an existing case
-keeps the case's code, continues the numbering of its files and adds to its key. Nothing here
-writes to the log.
+private temporary folder. The leak gate decides on a twin of each file (ruling R84), masked the
+same way but with every place the review holds of each value of the key replaced, the places the
+owner switched off too: any value the leak check still finds in a twin is a leftover, and blocks
+the export. The files are then deleted and nothing is saved. The places the owner left visible
+on purpose are what the leak check finds in a file itself beyond its twin; they are listed,
+never blocking. Otherwise the detection runs again on the masked files, for what nobody marked;
+the files are written into the output folder, never over a file that is there; and the case's
+key is saved. If the key cannot be saved, the files written go again: a masked file without its
+key could never be restored. A file added to an existing case keeps the case's code, date and
+retention, continues the numbering of its files and adds to its key, never rewriting a value it
+holds. Nothing here writes to the log.
 """
 
 from __future__ import annotations
@@ -43,13 +46,7 @@ from themask.docx.reader import DocText, extract_text, has_revisions
 from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
 from themask.instruction import AI_INSTRUCTION
-from themask.leakcheck import (
-    LeakHit,
-    hits_by_placeholder,
-    rescan_detection,
-    scan_package,
-    unverifiable,
-)
+from themask.leakcheck import LeakHit, rescan_detection, scan_package, unverifiable
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
 from themask.pdf.to_docx import pdf_to_docx
@@ -99,11 +96,11 @@ class ExportOptions:
 
     ``out_dir`` is the folder the masked files go into, made when it is missing.
     ``redline_split`` says the files were loaded for a redline review, each file with tracked
-    changes in a version before and after them. ``retention_days`` is how long the case's key is
-    kept. ``existing_case`` is the case a file is added to: its review was analysed with the
-    case's key and reserves its placeholders, the case keeps its code and date, the new files
-    continue its numbering and the key grows. ``existing_codes`` are the codes of the cases the
-    store holds, readable or not, which a new case never takes (ruling R74).
+    changes in a version before and after them. ``retention_days`` is how long a new case's key
+    is kept. ``existing_case`` is the case a file is added to: its review was analysed with the
+    case's key and reserves its placeholders, the case keeps its code, date and retention (ruling
+    R85), the new files continue its numbering and the key grows. ``existing_codes`` are the codes
+    of the cases the store holds, readable or not, which a new case never takes (ruling R74).
     """
 
     out_dir: Path
@@ -119,14 +116,15 @@ class ExportResult:
 
     ``case`` is the case saved, with its key, and ``outputs`` the masked files written; when the
     export is ``blocked`` the first is None and the second empty, as nothing was saved.
-    ``leak_hits`` are all the places the leak check found a value of the key, and
-    ``allowed_hits`` those of them that are the occurrences the owner left visible on purpose
-    (ruling R60): the export is blocked by the others. When the export makes several files, a
-    hit's ``part`` begins with the name of its file, "MASKED-K4F7-2.docx: word/header1.xml"
-    (ruling R81). ``unmarked`` holds what the detection finds in the masked files that the owner
-    never marked (only after an export that was not blocked), ``unverifiable`` the placeholders
-    whose values are too short to be checked, and ``instruction`` the instruction to paste into
-    the AI tool.
+    ``leak_hits`` are the leftovers: the places where the leak check finds a value of the key in
+    a file's twin, in which every place the review holds of each value is replaced (ruling R84).
+    Any one of them blocks the export. ``allowed_hits`` are the places the owner left visible on
+    purpose: what the leak check finds in a file itself beyond its twin. When the export makes
+    several files, a hit's ``part`` begins with the name of its file,
+    "MASKED-K4F7-2.docx: word/header1.xml" (ruling R81). ``unmarked`` holds what the detection
+    finds in the masked files that the owner never marked (only after an export that was not
+    blocked), ``unverifiable`` the placeholders whose values are too short to be checked, and
+    ``instruction`` the instruction to paste into the AI tool.
     """
 
     case: Case | None
@@ -175,15 +173,16 @@ def export_case(
     The key is ``review.key_entries()``, or for a file added to a case the case's key merged with
     it, as the case will be saved (ruling R83). Every file has the key's values taken out of its
     addresses, instructions and bookmark names, the values marked in the other files too (ruling
-    R82), and is checked for all of them; a placeholder found in more places than the owner left
-    visible on purpose blocks the export (ruling R60). Not blocked, the files go into
-    ``options.out_dir`` and the case is passed to ``save_case``.
+    R82). Its twin, with every place the review holds of the key's values replaced, the places
+    switched off too, is checked for all of them, and any value found there blocks the export
+    (ruling R84). Not
+    blocked, the files go into ``options.out_dir`` and the case is passed to ``save_case``.
 
     Raises ValueError, before anything is written, when there is no file, when ``review`` was not
     made on the text of ``sources`` (``combined_text``), when the sources were loaded for a
-    redline review but the options say otherwise, and when a file is added to a case whose
-    placeholders the review does not reserve (ruling R61). What saving raises comes through,
-    after the masked files written are deleted again.
+    redline review and the options say otherwise or the other way round, and when a file is added
+    to a case whose placeholders the review does not reserve (ruling R61). What saving raises
+    comes through, after the masked files written are deleted again.
     """
     views = _views(sources)
     combined = _joined(views)
@@ -191,32 +190,43 @@ def export_case(
     existing = options.existing_case
     code = existing.id if existing is not None else new_case_code(existing=options.existing_codes)
     names = _file_names(code, sources, existing)
-    plans = _plans(review.mask_plan(), combined)
     entries = review.key_entries()
     # A file added to a case is masked and checked for the whole key the case will keep: also for
     # the values its own review did not find in its text (ruling R83).
     key = _merged(existing.entries, entries) if existing is not None else entries
+    plans = _plans(review.mask_plan(), combined)
+    twins = _plans(_whole_plan(review.groups, key), combined)
     not_checkable = unverifiable(key)
     # The files in the order they are listed: by source, a redline's version before first.
     order = sorted(range(len(views)), key=lambda i: (views[i].index, views[i].side == "after"))
     staging = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX))
     try:
-        staged = [
-            _mask(views[i], plans[i], key, staging / names[views[i].index, views[i].side])
+        checked = [
+            _checked(
+                views[i], plans[i], twins[i], key, staging, names[views[i].index, views[i].side]
+            )
             for i in order
         ]
-        found = [scan_package(path, key) for path in staged]
-        blocking = _blocking([hit for hits in found for hit in hits], _allowances(review.groups))
-        if blocking:
-            hits = _named(found, staged)
-            allowed = [hit for hit in hits if hit.placeholder not in blocking]
-            return ExportResult(None, [], hits, [], AI_INSTRUCTION, True, allowed, not_checkable)
+        staged = [path for path, _, _ in checked]
+        leftovers = [hits for _, hits, _ in checked]
+        visible = [hits for _, _, hits in checked]
+        if any(leftovers):
+            return ExportResult(
+                None,
+                [],
+                _named(leftovers, staged),
+                [],
+                AI_INSTRUCTION,
+                True,
+                _named(visible, staged),
+                not_checkable,
+            )
         unmarked = _unmarked(staged, engine, user_lists, key)
         outputs, case = _save(staged, sources, key, code, options, save_case)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    hits = _named(found, outputs)  # by the names the files were written under
-    return ExportResult(case, outputs, hits, unmarked, AI_INSTRUCTION, False, hits, not_checkable)
+    allowed = _named(visible, outputs)  # by the names the files were written under
+    return ExportResult(case, outputs, [], unmarked, AI_INSTRUCTION, False, allowed, not_checkable)
 
 
 # ---- loading ------------------------------------------------------------------------------------
@@ -287,16 +297,34 @@ def _views(sources: list[SourceDoc]) -> list[_View]:
     """Every version to mask, in the order of the combined text: each file after its changes,
     then each file's version before them where it has one.
     """
+    names = _told_apart(sources)
     views = [
-        _View(i, "after", f"{s.path.name} (after)", s.pkg_after, s.text_after)
+        _View(i, "after", f"{names[i]} (after)", s.pkg_after, s.text_after)
         for i, s in enumerate(sources)
     ]
     views += [
-        _View(i, "before", f"{s.path.name} (before)", s.pkg_before, s.text_before)
+        _View(i, "before", f"{names[i]} (before)", s.pkg_before, s.text_before)
         for i, s in enumerate(sources)
         if s.pkg_before is not None and s.text_before is not None
     ]
     return views
+
+
+def _told_apart(sources: list[SourceDoc]) -> list[str]:
+    """The file name of each source, made its own: a name an earlier source has already,
+    compared without case as Finder compares names, gets " (2)", " (3)" ... before its
+    extension, so that each version of the combined text has a name of its own.
+    """
+    taken: set[str] = set()
+    names = []
+    for source in sources:
+        name, number = source.path.name, 1
+        while name.casefold() in taken:
+            number += 1
+            name = f"{source.path.stem} ({number}){source.path.suffix}"
+        taken.add(name.casefold())
+        names.append(name)
+    return names
 
 
 def _joined(views: list[_View]) -> CombinedText:
@@ -314,6 +342,11 @@ def _check(
         raise ValueError("The review was not made on these files; analyse them again.")
     if not options.redline_split and any(s.pkg_before is not None for s in sources):
         raise ValueError("The files were loaded for a redline review, which this export is not.")
+    if options.redline_split and any(s.has_revisions and s.pkg_before is None for s in sources):
+        raise ValueError(
+            "Files with tracked changes were loaded without their version before the changes;"
+            " load them again for a redline review."
+        )
     case = options.existing_case
     if case is not None and not {e.placeholder for e in case.entries} <= review.reserved:
         # A group made in such a review could take the number of a value of the case that the
@@ -325,7 +358,8 @@ def _check(
 
 
 def _plans(plan: MaskPlan, combined: CombinedText) -> list[MaskPlan]:
-    """The review's plan cut into one plan for each version, counted from the start of its text.
+    """A plan of the combined text cut into one plan for each version, counted from the start of
+    its text.
 
     A replacement never lies across two versions, as no finding takes in the separator between
     them; raises ValueError for one that does.
@@ -341,6 +375,23 @@ def _plans(plan: MaskPlan, combined: CombinedText) -> list[MaskPlan]:
         start = starts[index]
         parts[index].append(Replacement(r.start - start, r.end - start, r.placeholder))
     return [MaskPlan(replacements) for replacements in parts]
+
+
+def _whole_plan(groups: list[Group], key: list[KeyEntry]) -> MaskPlan:
+    """The plan of the leak gate's twins (ruling R84): every finding of each group whose
+    placeholder ``key`` holds, those switched off one by one and those of a group switched off
+    whole too. The review's own plan is part of it, as a group with a finding to replace is in
+    the key. Findings never overlap, so this is a plan the masker can make.
+    """
+    keyed = {entry.placeholder for entry in key}
+    return MaskPlan(
+        [
+            Replacement(finding.start, finding.end, group.placeholder)
+            for group in groups
+            if group.placeholder in keyed
+            for finding in group.findings
+        ]
+    )
 
 
 # ---- names --------------------------------------------------------------------------------------
@@ -383,10 +434,30 @@ def _numbers_used(case: Case) -> int:
 # ---- masking and checking -----------------------------------------------------------------------
 
 
+def _checked(
+    view: _View, plan: MaskPlan, twin_plan: MaskPlan, key: list[KeyEntry], folder: Path, name: str
+) -> tuple[Path, list[LeakHit], list[LeakHit]]:
+    """The version ``view`` masked with ``plan`` and saved as ``name`` in ``folder``, with its
+    leftovers and the places left visible on purpose (ruling R84).
+
+    The leftovers are what the leak check finds of ``key`` in the file's twin, masked with
+    ``twin_plan``; where that replaces no more than ``plan``, the file is its own twin. The places
+    left visible are what the leak check finds in the file itself beyond its twin.
+    """
+    path = _mask(view, plan, key, folder / name)
+    shown = scan_package(path, key)
+    if twin_plan.replacements == plan.replacements:
+        return path, shown, []
+    twins = folder / "twins"
+    twins.mkdir(exist_ok=True)
+    leftovers = scan_package(_mask(view, twin_plan, key, twins / name), key)
+    return path, leftovers, _left_visible(shown, leftovers)
+
+
 def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:
     """Masks a copy of the version ``view`` with ``plan`` and the case's ``key``, puts the banner
     on top and saves it at ``out``. The prepared package stays as it was, so the same sources can
-    be exported again.
+    be exported again, and masked again for the twin.
     """
     pkg = view.pkg.copy()
     doc_text = extract_text(pkg)  # the copy has paragraphs of its own
@@ -398,26 +469,18 @@ def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:
     return out
 
 
-def _allowances(groups: list[Group]) -> dict[str, int]:
-    """For each placeholder, how many of its occurrences the owner left visible on purpose (ruling
-    R60): those switched off one by one, and all those of a group switched off whole. The key
-    holds such a group's value only when a file is added to a case that has it (ruling R83).
+def _left_visible(shown: list[LeakHit], leftovers: list[LeakHit]) -> list[LeakHit]:
+    """The hits of a masked file that its twin does not have: the places left visible on
+    purpose. Hits are told apart as the leak check counts them, by part, placeholder and context;
+    the count of the twin's same hit, a leftover, is taken off.
     """
-    allowed: dict[str, int] = {}
-    for group in groups:
-        off = len(group.findings) - len(group.active_findings())
-        if off:
-            allowed[group.placeholder] = allowed.get(group.placeholder, 0) + off
-    return allowed
-
-
-def _blocking(hits: list[LeakHit], allowed: dict[str, int]) -> set[str]:
-    """The placeholders the leak check found in more places, over all the files, than allowed."""
-    return {
-        placeholder
-        for placeholder, count in hits_by_placeholder(hits).items()
-        if count > allowed.get(placeholder, 0)
-    }
+    in_twin = {(hit.part, hit.placeholder, hit.context): hit.count for hit in leftovers}
+    visible = []
+    for hit in shown:
+        count = hit.count - in_twin.get((hit.part, hit.placeholder, hit.context), 0)
+        if count > 0:
+            visible.append(replace(hit, count=count))
+    return visible
 
 
 def _named(found: list[list[LeakHit]], files: list[Path]) -> list[LeakHit]:
@@ -510,7 +573,10 @@ def _case(
     key: list[KeyEntry],
     options: ExportOptions,
 ) -> Case:
-    """The case to save with ``key``: a new one, or the existing case with the new files added."""
+    """The case to save with ``key``: a new one, or the existing case with the new files added.
+    An existing case keeps its date and its retention, so adding a file never makes it expire
+    sooner (ruling R85).
+    """
     names = [source.path.name for source in sources]
     existing = options.existing_case
     if existing is None:
@@ -521,14 +587,15 @@ def _case(
         [*existing.source_files, *names],
         [*existing.masked_files, *files],
         key,
-        options.retention_days,
+        existing.retention_days,
     )
 
 
 def _merged(kept: list[KeyEntry], added: list[KeyEntry]) -> list[KeyEntry]:
-    """The key of a case a file was added to: its entries, in their order, each with the variants
-    the new review adds or replaced by the new review's entry where the value changed; then the
-    new review's other entries, in their order.
+    """The key of a case a file was added to: its entries, in their order, then the new review's
+    other entries, in theirs. A stored value is never rewritten, as the case's other files are
+    restored with it (ruling R86): where the new review has an entry of the same placeholder, its
+    value and variants join the stored entry's variants.
     """
     new = {entry.placeholder: entry for entry in added}
     merged = []
@@ -536,8 +603,7 @@ def _merged(kept: list[KeyEntry], added: list[KeyEntry]) -> list[KeyEntry]:
         update = new.pop(entry.placeholder, None)
         if update is None:
             merged.append(replace(entry, variants=list(entry.variants)))
-        elif update.value == entry.value:
-            merged.append(replace(entry, variants=sorted({*entry.variants, *update.variants})))
         else:
-            merged.append(update)
+            forms = {*entry.variants, update.value, *update.variants}
+            merged.append(replace(entry, variants=sorted(forms)))
     return merged + list(new.values())
