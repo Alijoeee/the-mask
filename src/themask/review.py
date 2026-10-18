@@ -7,14 +7,16 @@ lists. ``mask_plan`` and ``key_entries`` then give the replacements to make and 
 
 * A group is never renumbered: the owner is looking at its placeholder. A group made in the
   review (hidden by hand, or split off) takes the next free number of its type, after the exact
-  ``[TYPE_N]`` the text holds already (ruling R44) and after the groups' own.
+  ``[TYPE_N]`` the text holds already (ruling R44), after the groups' own and after those an
+  existing case's key holds (``reserved``, ruling R61).
 * The owner's choice beats the analysis. ``hide_text`` hides a value whatever the never-hide
   lists say, finds every occurrence of it whether or not the sweep would have taken it (a bare
   surname inside a phrase, ruling R54), and re-types a group the analysis typed otherwise. What
   it hides is the owner's own ("user" findings): no later sweep takes it over.
 * A sweep run here can take over another group's last finding (ruling R35); a group left with
-  no finding is dropped, as the analysis does. Groups stay in order of first appearance and a
-  group's findings in text order.
+  no finding is dropped, as the analysis does. The groups the case's key holds are never taken
+  over, as in the analysis (ruling R61). Groups stay in order of first appearance and a group's
+  findings in text order.
 """
 
 from __future__ import annotations
@@ -110,7 +112,9 @@ class ReviewState:
     ``text`` and ``groups`` are the analysed text and its groups (changed in place by the methods
     below), ``warnings`` the analysis's warnings for the screen. ``user_lists`` and ``case_lists``
     are the owner's lists and the case's; ``add_always_hide`` and ``add_never_hide`` change and
-    save the owner's. Methods raise ValueError for an unknown group or occurrence, and for a
+    save the owner's. ``reserved`` are the placeholders an existing case's key holds (ruling
+    R61): a group made here never takes such a number, and a group that has one is never taken
+    over by a sweep. Methods raise ValueError for an unknown group or occurrence, and for a
     change that cannot be made.
     """
 
@@ -121,25 +125,33 @@ class ReviewState:
         warnings: list[str],
         user_lists: UserLists,
         case_lists: CaseLists,
+        reserved: Collection[str] = (),
     ) -> None:
         self.text = text
         self.groups = groups
         self.warnings = warnings
         self.user_lists = user_lists
         self.case_lists = case_lists
+        self.reserved = frozenset(reserved)
 
     @classmethod
     def from_analysis(
-        cls, analysis: Analysis, user_lists: UserLists, case_lists: CaseLists
+        cls,
+        analysis: Analysis,
+        user_lists: UserLists,
+        case_lists: CaseLists,
+        reserved: Collection[str] = (),
     ) -> ReviewState:
-        """A review of ``analysis``, on copies of its groups: the analysis stays as it was."""
+        """A review of ``analysis``, on copies of its groups: the analysis stays as it was.
+        Adding a file to an existing case, pass the placeholders of its key as ``reserved``.
+        """
         groups = [
             replace(
                 g, variants=set(g.variants), findings=list(g.findings), disabled=set(g.disabled)
             )
             for g in analysis.groups
         ]
-        return cls(analysis.text, groups, list(analysis.warnings), user_lists, case_lists)
+        return cls(analysis.text, groups, list(analysis.warnings), user_lists, case_lists, reserved)
 
     # --- Switches --------------------------------------------------------------------------------
 
@@ -366,17 +378,22 @@ class ReviewState:
 
     def _next_placeholder(self, kind: PlaceholderType) -> str:
         """The placeholder a new group of ``kind`` takes: after the exact ``[TYPE_N]`` the text
-        holds already (altered forms are no placeholders, ruling R44) and after the groups' own.
+        holds already (altered forms are no placeholders, ruling R44), after the groups' own and
+        after the reserved ones (ruling R61).
         """
         found = list(PLACEHOLDER_RE.finditer(self.text))
-        found += [m for g in self.groups if (m := PLACEHOLDER_RE.fullmatch(g.placeholder))]
+        held = [*self.reserved, *(g.placeholder for g in self.groups)]
+        found += [m for placeholder in held if (m := PLACEHOLDER_RE.fullmatch(placeholder))]
         highest = max((int(m["number"]) for m in found if m["type"] == kind.value), default=0)
         return format_placeholder(kind, highest + 1)
 
     def _sweep(self, fixed: Collection[Group] = ()) -> None:
-        """Sweep the text for every group's variants, as the analysis did."""
+        """Sweep the text for every group's variants, as the analysis did. The groups the case's
+        key holds (``reserved``) are fixed besides ``fixed``: no sweep takes them over (ruling R61).
+        """
         is_term = never_hide_check(self.user_lists, self.case_lists)
-        sweep(self.text, self.groups, fixed=fixed, is_term=is_term)
+        keyed = [g for g in self.groups if g.placeholder in self.reserved]
+        sweep(self.text, self.groups, fixed=[*fixed, *keyed], is_term=is_term)
 
     def _tidy(self) -> None:
         """Drop the groups a sweep left with no finding, and put each group's findings and the

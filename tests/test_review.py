@@ -38,9 +38,10 @@ def group(kind, placeholder, canonical, findings, variants=(), **flags):
     )
 
 
-def hand_made(text, groups, lists):
+def hand_made(text, groups, lists, reserved=()):
     """A review of ``text`` over ``groups`` exactly as given: no engine, nothing swept."""
-    return ReviewState.from_analysis(Analysis(text, groups, []), lists, CaseLists([], [], set()))
+    analysis = Analysis(text, groups, [])
+    return ReviewState.from_analysis(analysis, lists, CaseLists([], [], set()), reserved)
 
 
 def placeholders(review):
@@ -471,3 +472,55 @@ def test_key_entries_leave_out_particle_surnames_and_tiny_variants(lists):
     person, company = review.key_entries()
     assert person.variants == ["J. van der Berg", "Jane van der Berg"]
     assert company.variants == ["Acme", "Acme Ltd"]  # a company's short name stays
+
+
+# --- An existing case's key (ruling R61) ------------------------------------------------------
+
+
+def test_a_number_the_case_key_holds_is_never_taken_by_a_new_group(lists):
+    # [COMPANY_2] belongs to an earlier file of the case: this file has no group for it.
+    review = hand_made("Baltic Fasteners GmbH signs.", [], lists, reserved=["[COMPANY_2]"])
+    assert review.hide_text("Baltic Fasteners GmbH", C).placeholder == "[COMPANY_3]"
+
+
+def test_a_split_and_a_re_typed_group_skip_the_numbers_the_case_key_holds(lists):
+    text = "Acme Ltd signs. Acme Ltd pays. Orion leaves."
+    acme = group(
+        C, "[COMPANY_1]", "Acme Ltd", [spot(C, text, "Acme Ltd"), spot(C, text, "Acme Ltd", 1)]
+    )
+    orion = group(C, "[COMPANY_2]", "Orion", [spot(C, text, "Orion")])
+    review = hand_made(text, [acme, orion], lists, reserved=["[COMPANY_5]", "[CUSTOM_2]"])
+    assert review.split(acme.id, [1]).placeholder == "[COMPANY_6]"
+    assert review.hide_text("Orion", CUSTOM).placeholder == "[CUSTOM_3]"
+
+
+def test_a_group_the_case_key_holds_is_not_taken_over_by_a_longer_hidden_text(lists):
+    text = "Project Falcon starts. Later Project Falcon ends."
+
+    def review_with(reserved):
+        found = [spot(CUSTOM, text, "Falcon", source="sweep")]  # as the key's seed finds it
+        return hand_made(text, [group(CUSTOM, "[CUSTOM_1]", "Falcon", found)], lists, reserved)
+
+    # Without the key, the longer occurrence takes the shorter finding over (ruling R35) ...
+    loose = review_with([])
+    loose.hide_text("Project Falcon", CUSTOM)
+    assert placeholders(loose) == ["[CUSTOM_2]"] and len(loose.groups[0].findings) == 2
+    # ... but not a group whose placeholder the key holds: it keeps its finding.
+    kept = review_with(["[CUSTOM_1]"])
+    new = kept.hide_text("Project Falcon", CUSTOM)
+    assert placeholders(kept) == ["[CUSTOM_1]", "[CUSTOM_2]"]
+    assert [f.text for f in kept.groups[0].findings] == ["Falcon"]
+    assert [f.start for f in new.findings] == [text.rindex("Project Falcon")]
+
+
+def test_a_merge_does_not_take_over_a_group_the_case_key_holds(lists):
+    text = "Project Falcon starts. Later Project Falcon ends. Orion leaves."
+    seeded = group(CUSTOM, "[CUSTOM_1]", "Falcon", [spot(CUSTOM, text, "Falcon", source="sweep")])
+    falcon = group(
+        CUSTOM, "[CUSTOM_2]", "Project Falcon", [spot(CUSTOM, text, "Project Falcon", 1)]
+    )
+    orion = group(CUSTOM, "[CUSTOM_3]", "Orion", [spot(CUSTOM, text, "Orion")])
+    review = hand_made(text, [seeded, falcon, orion], lists, reserved=["[CUSTOM_1]"])
+    merged = review.merge([falcon.id, orion.id])
+    assert merged.placeholder == "[CUSTOM_2]" and len(merged.findings) == 2
+    assert [f.text for f in review.groups[0].findings] == ["Falcon"]
