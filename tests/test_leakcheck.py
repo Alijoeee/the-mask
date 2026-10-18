@@ -4,8 +4,10 @@ The brief's tests run on supply-01 masked for the brief's two values (``masked_d
 values planted into its parts afterwards (``tests.helpers.plant``). Small made-up files cover the
 rest: the digit and length rules (ruling R14), %-escaped link targets and instructions (R26),
 text kept in attributes (R19), field names in instructions (R31), a person's bare surname (R52),
-a value split across runs, XML comments, the bytes of parts that are not XML, part names, and
-what a hit shows. No hit may show a value: every test that gets hits checks them.
+names by their whole words (R63), the file format's own vocabulary (R64), a value split across
+runs, XML comments, the bytes of parts that are not XML, part names, and what a hit shows. Five
+corpus files go through the whole pipeline. No hit may show a value: every test that gets hits
+checks them.
 """
 
 from __future__ import annotations
@@ -314,6 +316,92 @@ def test_a_party_named_like_the_file_format_counts_in_content_only(
     assert [(hit.part, hit.context) for hit in hits] == [
         ("word/document.xml", 'tooltip="[COMPANY_1] portal"')
     ]
+
+
+def test_the_names_of_standard_parts_are_no_names(masked_docx: Path, tmp_path: Path) -> None:
+    core = KeyEntry("[COMPANY_1]", COMPANY, "Core Systems Ltd", ["Core Systems", "Core"])
+    with zipfile.ZipFile(masked_docx) as archive:  # "core" is in names, a content type, a target
+        assert "docProps/core.xml" in archive.namelist()
+        assert b"core-properties" in archive.read("[Content_Types].xml")
+        assert b"docProps/core.xml" in archive.read("_rels/.rels")
+    assert scan_package(masked_docx, [core]) == []
+    planted = para("Core shall deliver.").encode()
+    hits = scan_package(
+        plant(masked_docx, "word/document.xml", planted, tmp_path / "c.docx"), [core]
+    )
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/document.xml", "[COMPANY_1] shall deliver.")
+    ]
+    # Any other part's name, and the file's own name, are names like any text.
+    logo = plant(masked_docx, "word/media/core-logo.png", b"\x89PNG", tmp_path / "Core-deal.docx")
+    hits = scan_package(logo, [core])
+    assert [(hit.part, hit.context) for hit in hits] == [
+        (FILE_NAME, "[COMPANY_1]-deal.docx"),
+        (PART_NAME, "word/media/[COMPANY_1]-logo.png"),
+    ]
+
+
+def test_counts_of_the_extended_properties_are_no_amounts(make_docx: MakeDocx) -> None:
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 1,250", ["1,250"])
+    app = xml(
+        '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/'
+        'docPropsVTypes"><TotalTime>1250</TotalTime><Pages>1250</Pages><Words>1250</Words>'
+        "<Characters>1250</Characters><Lines>1250</Lines><DocSecurity>1250</DocSecurity>"
+        '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Title'
+        "</vt:lpstr></vt:variant><vt:variant><vt:i4>1250</vt:i4></vt:variant></vt:vector>"
+        "</HeadingPairs></Properties>"
+    )
+    raw = {"docProps/app.xml": app}
+    assert scan_package(make_docx(para("Clean."), raw=raw), [fee]) == []
+    # A bare number that the document shows is a value all the same.
+    hits = scan_package(make_docx(para("1250"), raw=raw), [fee])
+    assert [(hit.part, hit.context) for hit in hits] == [("word/document.xml", "[AMOUNT_1]")]
+
+
+def test_a_drawings_geometry_holds_no_amounts(make_docx: MakeDocx) -> None:
+    entries = [
+        KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 1,828,800", ["1,828,800"]),
+        KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 21,600", ["21,600"]),
+    ]
+    body = (
+        '<w:p><w:r><w:drawing><wp:anchor distL="114300" relativeHeight="251659264">'
+        '<wp:positionH relativeFrom="column"><wp:posOffset>1828800</wp:posOffset></wp:positionH>'
+        '<wp:extent cx="1828800" cy="21600"/><a:graphic><a:graphicData><a:prstGeom prst="rect">'
+        '<a:avLst><a:gd name="adj" fmla="val 21600"/></a:avLst></a:prstGeom></a:graphicData>'
+        "</a:graphic></wp:anchor></w:drawing></w:r></w:p>"
+        '<w:p><w:r><w:pict><v:shapetype coordsize="21600,21600" path="m,l,21600r21600,l21600,xe"/>'
+        '<v:shape style="position:absolute;width:1828800pt;height:21600pt"/></w:pict></w:r></w:p>'
+    )
+    assert scan_package(make_docx(body), entries) == []
+    hits = scan_package(make_docx(body + para("Paid 1,828,800 for 21,600 units.")), entries)
+    assert [(hit.placeholder, hit.context) for hit in hits] == [
+        ("[AMOUNT_1]", "Paid [AMOUNT_1] for [AMOUNT_2] units."),
+        ("[AMOUNT_2]", "Paid [AMOUNT_1] for [AMOUNT_2] units."),
+    ]
+
+
+def test_theme_and_scheme_names_are_no_names(make_docx: MakeDocx, masked_docx: Path) -> None:
+    office = KeyEntry("[COMPANY_1]", COMPANY, "Office Supplies Ltd", ["Office Supplies", "Office"])
+    theme = xml(
+        f'<a:theme xmlns:a="{A_NS}" name="Office Theme"><a:themeElements>'
+        '<a:clrScheme name="Office"/><a:fontScheme name="Office"/><a:fmtScheme name="Office"/>'
+        "</a:themeElements></a:theme>"
+    )
+    raw = {"word/theme/theme1.xml": theme}
+    assert scan_package(make_docx(para("Clean."), raw=raw), [office]) == []
+    tooltip = (
+        '<w:p><w:hyperlink w:tooltip="Office portal"><w:r><w:t>portal</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+    )
+    hits = scan_package(make_docx(para("Clean.") + tooltip, raw=raw), [office])
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/document.xml", 'tooltip="[COMPANY_1] portal"')
+    ]
+    # Word's own theme in the masked corpus file is named "Office" too.
+    with zipfile.ZipFile(masked_docx) as archive:
+        assert b'name="Office' in archive.read("word/theme/theme1.xml")
+    assert all(hit.part != "word/theme/theme1.xml" for hit in scan_package(masked_docx, [office]))
 
 
 # ---- where values hide --------------------------------------------------------------------------

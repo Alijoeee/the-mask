@@ -29,11 +29,17 @@ It searches:
 * the file's own name and the name of every part.
 
 What is the file format's own vocabulary and never the document's content is not searched (ruling
-R64): for a value of digits only, an attribute that is a bare number or hex code (a size, a
-colour, an id); the namespace and schema addresses (values starting with "http://schemas.",
+R64): the namespace and schema addresses (values starting with "http://schemas.",
 "http://www.w3.org" or "urn:schemas-microsoft-com") and the type of every relationship; the fonts
 the file declares (``w:rFonts``, the font table's names, the typefaces of DrawingML and themes);
-and the Application, AppVersion and Template of the file's extended properties.
+the names of a theme and its schemes ("Office"); the Application, AppVersion and Template of the
+file's extended properties; for a value of digits only, an attribute that is a bare number or hex
+code (a size, a colour, an id), the whole text of an element that bears none of the document's
+text when it is a bare number (a drawing's position, the word count of the extended properties),
+and a drawing's geometry (VML shapes, DrawingML shape guides); and for a name, the names of the
+standard parts every Word file has (word/document.xml, docProps/core.xml ...), with the content
+types and relationship targets that name them. The file's own name and the name of any other part
+are searched.
 
 A value of fewer than four letters and digits is not searched for: it would be found everywhere.
 ``unverifiable`` names the placeholders whose value and variants are all that short, which the
@@ -50,6 +56,7 @@ owner never marked. Nothing here writes to the log.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import sys
 import unicodedata
@@ -68,7 +75,7 @@ from themask.detect.grouping import PersonName
 from themask.detect.pipeline import CombinedText, analyze
 from themask.detect.sweep import crosses_a_line, is_searchable, stands_as_a_name
 from themask.docx.masker import FIELD_NAMES, FORMAT_SWITCHES, INSTRUCTION_WORD
-from themask.docx.package import NS, RELS_NS, DocxPackage
+from themask.docx.package import NS, RELS_NS, TYPES_NS, DocxPackage
 from themask.docx.reader import extract_text
 from themask.model import Group, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
@@ -152,12 +159,14 @@ def scan_package(path: Path, entries: list[KeyEntry]) -> list[LeakHit]:
     ]
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
-            shown = hider.name(info.filename)
+            standard = _is_standard_part(info.filename)  # its name holds no name of ours
+            shown = hider.name(info.filename, names=not standard)
             hits += [
                 LeakHit(PART_NAME, match.placeholder, shown)
                 for match in needles.matches(info.filename)
+                if not (standard and match.name)
             ]
-            hits += _part_hits(shown, archive.read(info), needles, in_bytes, hider)
+            hits += _part_hits(info.filename, shown, archive.read(info), needles, in_bytes, hider)
             hits += by_surname.pop(info.filename, [])
     for rest in by_surname.values():
         hits += rest
@@ -502,11 +511,12 @@ class _Hider:
         context = f"{before}{shown}{after}"
         return placeholder if self._shows(context) else context
 
-    def name(self, name: str) -> str:
-        """``name`` with every value in it hidden."""
-        spans = self._spans(name)
+    def name(self, name: str, names: bool = True) -> str:
+        """``name`` with every value in it hidden; only the numbers, without ``names`` (the name
+        of a standard part)."""
+        spans = self._spans(name, names)
         shown = name if spans is None else _replaced(name, _merged(spans), 0, len(name))
-        return _CUT if self._shows(shown) else shown
+        return _CUT if self._shows(shown, names) else shown
 
     def covers(self, text: str, start: int, end: int) -> bool:
         """Whether a value or a variant of the key stands in ``text`` round ``start``-``end``."""
@@ -518,28 +528,31 @@ class _Hider:
             for source in map(trace.source, self._needles.find(trace.words, trace.compact))
         )
 
-    def _spans(self, text: str) -> list[tuple[int, int, str]] | None:
-        """Every stretch of ``text`` to hide, with its placeholder; None when ``text`` cannot be
-        traced."""
+    def _spans(self, text: str, names: bool = True) -> list[tuple[int, int, str]] | None:
+        """Every stretch of ``text`` to hide, with its placeholder (only the numbers, without
+        ``names``); None when ``text`` cannot be traced."""
         trace = _traced(text)
         if trace is None:
             return None
         spans = [
             (*trace.source(match), match.placeholder)
             for match in self._needles.find(trace.words, trace.compact)
+            if names or not match.name
         ]
-        spans += [
-            (m.start(), m.end(), placeholder)
-            for pattern, placeholder in self._surnames
-            for m in pattern.finditer(text)
-        ]
+        if names:
+            spans += [
+                (m.start(), m.end(), placeholder)
+                for pattern, placeholder in self._surnames
+                for m in pattern.finditer(text)
+            ]
         return spans
 
-    def _shows(self, text: str) -> bool:
-        """Whether ``text`` still shows a value, a variant or a surname of the key."""
-        return bool(self._needles.matches(text)) or any(
-            pattern.search(text) for pattern, _ in self._surnames
-        )
+    def _shows(self, text: str, names: bool = True) -> bool:
+        """Whether ``text`` still shows a value, a variant or a surname of the key (only a
+        number, without ``names``)."""
+        if any(names or not match.name for match in self._needles.matches(text)):
+            return True
+        return names and any(pattern.search(text) for pattern, _ in self._surnames)
 
 
 def _merged(spans: Iterable[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
@@ -630,12 +643,42 @@ _FONT_NAMES = {
     f"{{{_A}}}cs": "typeface",
     f"{{{_A}}}font": "typeface",
 }
+# The names of a theme and of its colour, font and format schemes ("Office").
+_SCHEMES = frozenset(
+    f"{{{_A}}}{name}" for name in ("theme", "clrScheme", "fontScheme", "fmtScheme")
+)
 # The program and the template the extended properties name.
 _PROGRAM = frozenset(f"{{{NS['ep']}}}{name}" for name in ("Application", "AppVersion", "Template"))
-# A size, a colour or an id, never searched for a value of digits only.
+
+# A size, a colour, an id or a count: never searched for a value of digits only where it is an
+# attribute's whole value, or the whole text of an element that bears none of the document's
+# text.
 _BARE_NUMBER = re.compile(
     r"[-+]?(?:[0-9]+(?:\.[0-9]+)?(?:%|pt|pc|pi|in|cm|mm|px|em|ex)?|[0-9a-f]+)", re.IGNORECASE
 )
+# The elements that bear the document's text: its texts and instructions, and the core
+# properties. Comments and processing instructions bear text as well.
+_TEXT_BEARING = _SHOWN_TEXTS | _INSTRUCTION_TEXTS
+_TEXT_BEARING_NAMESPACES = (f"{{{NS['dc']}}}", f"{{{NS['cp']}}}")
+# A drawing's geometry, never searched for a value of digits only either: every attribute of a
+# VML element but those that hold text (a watermark's string, alt text, a title, a link), and the
+# formula of a DrawingML shape guide ("val 16667").
+_VML = "{urn:schemas-microsoft-com:"
+_VML_TEXTS = frozenset({"string", "alt", "title", "href"})
+_SHAPE_GUIDE = f"{{{_A}}}gd"
+
+# The parts every Word file names alike, and their relationships parts (ruling R64 f): what they
+# are called is no name of the document's, nor are the content types and the relationship targets
+# that name them.
+_STANDARD_PART = re.compile(
+    r"\[Content_Types\]\.xml|_rels/\.rels|docProps/(?:core|app|custom)\.xml"
+    r"|word/(?:document|styles|stylesWithEffects|settings|webSettings|fontTable|numbering"
+    r"|footnotes|endnotes|comments)\.xml"
+    r"|word/theme/theme[0-9]+\.xml|word/(?:header|footer)[0-9]+\.xml|word/glossary/.+",
+    re.IGNORECASE,
+)
+_DEFAULT = f"{{{TYPES_NS}}}Default"
+_OVERRIDE = f"{{{TYPES_NS}}}Override"
 
 
 @dataclass
@@ -643,16 +686,18 @@ class _Block:
     """A text searched as one: the text a paragraph shows, another text, an XML comment, or an
     attribute's value.
 
-    ``label`` is the name of the attribute that holds it, and ``bare`` says the attribute's value
-    is a bare number or hex code. ``instructions`` are where field instructions stand in it, and
-    ``decodes`` is the block it is the %-decoded form of.
+    ``label`` is the name of the attribute that holds it. ``no_digits`` says that no value of
+    digits only is searched for in it (a size, a count, a drawing's geometry: ruling R64), and
+    ``no_names`` that no name is (it names a standard part). ``instructions`` are where field
+    instructions stand in it, and ``decodes`` is the block it is the %-decoded form of.
     """
 
     text: str
     label: str | None = None
     instructions: list[tuple[int, int]] = field(default_factory=list)
     decodes: int | None = None
-    bare: bool = False
+    no_digits: bool = False
+    no_names: bool = False
 
 
 class _Paragraph:
@@ -674,11 +719,14 @@ class _Paragraph:
 
 
 class _Reader:
-    """Reads an XML part into the blocks to search, in document order."""
+    """Reads the XML part ``part`` into the blocks to search, in document order."""
 
-    def __init__(self) -> None:
+    def __init__(self, part: str) -> None:
         self.blocks: list[_Block] = []
         self._paragraphs: list[tuple[int, _Paragraph]] = []
+        # Where the targets of a relationships part are read from: the folder of the part it
+        # serves (the package's root for _rels/.rels).
+        self._folder = posixpath.dirname(posixpath.dirname(part))
 
     def read(self, root: etree._Element) -> list[_Block]:
         for node in reversed(list(root.itersiblings(preceding=True))):
@@ -703,47 +751,73 @@ class _Reader:
             self._paragraphs.append((len(self.blocks), paragraph))
             self.blocks.append(_Block(""))
         for name, value in element.attrib.items():
-            self._attribute(tag, name, value)
+            self._attribute(element, name, value)
         if paragraph is not None and tag in _SHOWN_CHARACTERS:
             paragraph.add(_SHOWN_CHARACTERS[tag], False)
         instruction = tag in _INSTRUCTION_TEXTS
         shown_in = paragraph if instruction or tag in _SHOWN_TEXTS else None
+        bearing = tag in _TEXT_BEARING or tag.startswith(_TEXT_BEARING_NAMESPACES)
         if element.text and tag not in _PROGRAM:
-            self._text(element.text, shown_in, instruction)
+            self._text(element.text, shown_in, instruction, bearing)
         for child in element:
             if isinstance(child.tag, str):
                 self._element(child, paragraph)
             elif child.tag is not etree.Entity:  # a comment or a processing instruction
                 self._loose(child)
             if child.tail:
-                self._text(child.tail, shown_in, instruction)
+                self._text(child.tail, shown_in, instruction, bearing)
 
-    def _attribute(self, tag: str, name: str, value: str) -> None:
+    def _attribute(self, element: etree._Element, name: str, value: str) -> None:
+        tag = element.tag
         if _is_format_vocabulary(tag, name, value):
             return
         label = name.rpartition("}")[2]
         instruction = name == _INSTRUCTION
-        spans = [(0, len(value))] if instruction else []
-        bare = _BARE_NUMBER.fullmatch(value) is not None
-        self.blocks.append(_Block(value, label, spans, bare=bare))
+        block = _Block(
+            value,
+            label,
+            [(0, len(value))] if instruction else [],
+            no_digits=_is_geometry(tag, label, value),
+            no_names=self._names_a_standard_part(element, name, value),
+        )
+        self.blocks.append(block)
         decoded = instruction or (tag == _RELATIONSHIP and name == "Target")
         if decoded and "%" in value:
             self._decoded(value, label, instruction, len(self.blocks) - 1)
 
-    def _text(self, text: str, paragraph: _Paragraph | None, instruction: bool) -> None:
+    def _names_a_standard_part(self, element: etree._Element, name: str, value: str) -> bool:
+        """Whether an attribute names a standard part (ruling R64 f): a Default of the content
+        types (a file extension and its type), the Override of a standard part, or the target
+        of a relationship, inside the package, that is a standard part."""
+        tag = element.tag
+        if tag == _DEFAULT:
+            return True
+        if tag == _OVERRIDE:
+            return _is_standard_part(element.get("PartName", ""))
+        if tag == _RELATIONSHIP and name == "Target" and element.get("TargetMode") != "External":
+            return _is_standard_part(_target_part(self._folder, value))
+        return False
+
+    def _text(
+        self, text: str, paragraph: _Paragraph | None, instruction: bool, bearing: bool
+    ) -> None:
         if paragraph is not None:
             paragraph.add(text, instruction)
             return
         if text.isspace():  # the layout of the XML between elements: nothing to find
             return
-        self.blocks.append(_Block(text, None, [(0, len(text))] if instruction else []))
+        # A bare number in an element that bears no text is a position or a count (ruling R64).
+        no_digits = not bearing and _BARE_NUMBER.fullmatch(text.strip()) is not None
+        spans = [(0, len(text))] if instruction else []
+        self.blocks.append(_Block(text, None, spans, no_digits=no_digits))
         if instruction and "%" in text:
             self._decoded(text, None, True, len(self.blocks) - 1)
 
     def _decoded(self, text: str, label: str | None, instruction: bool, of: int) -> None:
         decoded = unquote(text)
         spans = [(0, len(decoded))] if instruction else []
-        self.blocks.append(_Block(decoded, label, spans, decodes=of))
+        no_names = self.blocks[of].no_names
+        self.blocks.append(_Block(decoded, label, spans, decodes=of, no_names=no_names))
 
     def _loose(self, node: etree._Element) -> None:
         """A comment or a processing instruction: a text of its own."""
@@ -757,13 +831,45 @@ class _Reader:
 
 def _is_format_vocabulary(tag: str, name: str, value: str) -> bool:
     """Whether an attribute holds the file format's own vocabulary (ruling R64): an address of a
-    namespace or schema, the type of a relationship, or a font."""
+    namespace or schema, the type of a relationship, a font, or the name of a theme or scheme."""
     return (
         value[:32].casefold().startswith(_FORMAT_ADDRESSES)
         or (tag == _RELATIONSHIP and name == "Type")
         or tag == _RUN_FONTS
         or _FONT_NAMES.get(tag) == name
+        or (tag in _SCHEMES and name == "name")
     )
+
+
+def _is_geometry(tag: str, label: str, value: str) -> bool:
+    """Whether an attribute is a bare number or hex code, or a drawing's geometry: no value of
+    digits only is searched for in it (ruling R64)."""
+    return (
+        _BARE_NUMBER.fullmatch(value) is not None
+        or (tag.startswith(_VML) and label not in _VML_TEXTS)
+        or (tag == _SHAPE_GUIDE and label == "fmla")
+    )
+
+
+def _is_standard_part(name: str) -> bool:
+    """Whether ``name``, a part's name or a content type's PartName, is one of the parts every
+    Word file names alike, or the relationships part of one (ruling R64 f)."""
+    name = unquote(name).lstrip("/")
+    if _STANDARD_PART.fullmatch(name):
+        return True
+    folder, _, file = name.rpartition("/")
+    if posixpath.basename(folder) != "_rels" or not file.endswith(".rels"):
+        return False
+    served = posixpath.join(posixpath.dirname(folder), file.removesuffix(".rels"))
+    return _STANDARD_PART.fullmatch(served) is not None
+
+
+def _target_part(folder: str, target: str) -> str:
+    """The part a relationship's ``target`` names, read from ``folder``."""
+    target = unquote(target)
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(folder, target))
 
 
 def _parsed(data: bytes) -> etree._Element | None:
@@ -777,19 +883,20 @@ def _parsed(data: bytes) -> etree._Element | None:
 
 
 def _part_hits(
-    part: str,
+    name: str,
+    shown: str,
     data: bytes,
     needles: _Needles,
     in_bytes: _Needles,
     hider: _Hider,
 ) -> list[LeakHit]:
-    """The hits in the part ``part`` (its name as a hit shows it) holding ``data``."""
+    """The hits in the part ``name`` holding ``data``; ``shown`` is its name as a hit shows it."""
     root = _parsed(data)
     if root is None:
-        return _byte_hits(part, data, in_bytes, hider)
-    hits = _block_hits(part, _Reader().read(root), needles, hider)
+        return _byte_hits(shown, data, in_bytes, hider)
+    hits = _block_hits(shown, _Reader(name).read(root), needles, hider)
     if root.getroottree().docinfo.doctype:  # what its DTD declares is in no element
-        hits += _byte_hits(part, data, in_bytes, hider)
+        hits += _byte_hits(shown, data, in_bytes, hider)
     return hits
 
 
@@ -810,7 +917,10 @@ def _block_hits(part: str, blocks: list[_Block], needles: _Needles, hider: _Hide
         local = match.shifted(-offsets[index])
         if (index, local.start, local.end, local.key, local.name) in exempt:
             continue
-        if blocks[index].bare and local.key.isdigit():  # a size, a colour or an id
+        block = blocks[index]
+        if local.name and block.no_names:  # the name of a standard part
+            continue
+        if block.no_digits and local.key.replace(" ", "").isdigit():  # a size, a count ...
             continue
         found.setdefault(index, []).append(local)
     hits = []
@@ -949,7 +1059,8 @@ def _surname_hits(
                 if hider.covers(paragraph, local_start, local_end):
                     continue
                 context = hider.context(paragraph, local_start, local_end, entry.placeholder)
-                hit = LeakHit(hider.name(segment.part), entry.placeholder, context)
+                part = hider.name(segment.part, names=not _is_standard_part(segment.part))
+                hit = LeakHit(part, entry.placeholder, context)
                 found.append((start, segment.part, hit))
     by_part: dict[str, list[LeakHit]] = {}
     for _, part, hit in sorted(found, key=lambda f: f[0]):
