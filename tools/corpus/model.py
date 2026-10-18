@@ -1,7 +1,7 @@
 """A contract as plain data, and its ground truth.
 
-A contract is built once as data and then written out: as a Word file here, as a PDF in a later
-task. Nothing in this module knows about XML. A tracked deletion is a ``Span`` with
+A contract is built once as data and then written out: as a Word file and as PDF files. Nothing in
+this module knows about XML or PDF. A tracked deletion is a ``Span`` with
 ``revision="del"``; a party name split the way Word often saves it is three ``Span`` objects in a
 row; a footnote is a ``FootnoteRef`` in the text plus an entry in ``ContractSpec.footnotes``.
 """

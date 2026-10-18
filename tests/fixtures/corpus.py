@@ -7,9 +7,10 @@ import pytest
 
 @pytest.fixture(scope="session")
 def corpus(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A folder with every corpus file: the Word contracts, their truth files and the manifest."""
+    """A folder with every corpus file: the Word and PDF contracts, their truth files, the manifest."""
     # Imported here, not at the top: this module is loaded as a plugin for the whole suite, and
-    # the generator (Faker, Pillow, python-docx, schwifty) is only needed by tests that use it.
+    # the generator (Faker, Pillow, python-docx, reportlab, schwifty) is only needed by tests that
+    # use it.
     from tools.make_corpus import generate
 
     out = tmp_path_factory.mktemp("corpus")

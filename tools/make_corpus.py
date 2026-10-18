@@ -1,9 +1,10 @@
-"""The made-up contract corpus: Word contracts with their ground truth, for the tests to run on.
+"""The made-up contract corpus: Word and PDF contracts with their ground truth, for tests to run on.
 
     uv run python -m tools.make_corpus [out_dir]
 
 writes 25 contracts and the annexes three of them come with (28 Word files), a ``.truth.json``
-beside each Word file listing every secret in it, and ``manifest.json`` listing the files and their
+beside each Word file listing every secret in it, eight PDF files made from the same contracts (six
+with a text layer, a scanned one and a mixed one), and ``manifest.json`` listing the files and their
 features (default folder: ``tests/corpus/generated/``, which git ignores). The same files come out
 every time. ``tests/corpus/README.md`` describes the corpus; the tests get it from the ``corpus``
 fixture.
@@ -22,6 +23,7 @@ from typing import cast
 from tools.corpus.build import build_spec
 from tools.corpus.docx_writer import write_docx
 from tools.corpus.model import FEATURES, KINDS, ContractSpec, Kind, TruthItem
+from tools.corpus.pdf_writer import write_mixed_pdf, write_pdf, write_scanned_pdf
 
 __all__ = [
     "CATALOGUE",
@@ -34,6 +36,9 @@ __all__ = [
     "generate",
     "main",
     "write_docx",
+    "write_mixed_pdf",
+    "write_pdf",
+    "write_scanned_pdf",
     "write_truth",
 ]
 
@@ -139,6 +144,18 @@ CATALOGUE: tuple[Planned, ...] = (
 )
 
 
+# The PDF files are made from Word contracts and share their truth files. These six come with a
+# text layer; none has a value only in deleted or hidden text, or a special space the built-in PDF
+# fonts cannot show, so every value of the truth shows in the text of the PDF. The scanned PDF
+# (pictures only) is supply-01 and the mixed PDF (page 2 a picture) is dpa-01.
+TEXT_PDFS = ("supply-01", "supply-04", "supply-05", "supply-06", "supply-10", "nda-01")
+SCANNED_PDF = ("scanned-01", "supply-01")
+MIXED_PDF = ("mixed-01", "dpa-01")
+# The features of a Word file that a PDF made from it has too. The others are Word's own: comments,
+# tracked changes, hidden text, text boxes, document properties and links.
+PDF_FEATURES = frozenset({"header_footer", "table", "image", "footnotes", "thirty_pages"})
+
+
 def write_truth(spec: ContractSpec, path: Path) -> None:
     """Write the truth of ``spec`` as a JSON list (plain ASCII, so any platform reads it alike)."""
     items = [item.to_json() for item in spec.truth]
@@ -156,14 +173,52 @@ def _write(spec: ContractSpec, out_dir: Path, stem: str) -> dict[str, object]:
     }
 
 
+def _pdf_entry(
+    stem: str, source: str, features: list[str], image_pages: list[int]
+) -> dict[str, object]:
+    """The manifest entry of ``<stem>.pdf``, made from the contract ``source``.
+
+    ``image_pages`` are the pages (counted from 1) that are pictures with no text layer.
+    """
+    return {
+        "file": f"{stem}.pdf",
+        "format": "pdf",
+        "features": features,
+        "truth": f"{source}.truth.json",
+        "source": source,
+        "image_pages": image_pages,
+    }
+
+
+def _write_pdfs(specs: dict[str, ContractSpec], out_dir: Path) -> list[dict[str, object]]:
+    """Write the PDF files from the specs of the Word contracts they are made from."""
+    manifest = []
+    for name in TEXT_PDFS:
+        spec = specs[name]
+        image_pages = write_pdf(spec, out_dir / f"{name}.pdf")
+        features = sorted(spec.features & PDF_FEATURES)
+        manifest.append(_pdf_entry(name, name, features, image_pages))
+    stem, source = SCANNED_PDF
+    image_pages = write_scanned_pdf(specs[source], out_dir / f"{stem}.pdf")
+    manifest.append(_pdf_entry(stem, source, ["scanned"], image_pages))
+    stem, source = MIXED_PDF
+    image_pages = write_mixed_pdf(specs[source], out_dir / f"{stem}.pdf")
+    manifest.append(_pdf_entry(stem, source, ["mixed"], image_pages))
+    return manifest
+
+
 def generate(out_dir: Path) -> list[dict[str, object]]:
     """Write the whole corpus into ``out_dir`` and return the manifest it also writes.
 
     The manifest lists each Word file with its features and truth file; an annex follows its
-    contract and names it in ``annex_of``.
+    contract and names it in ``annex_of``. The PDF files come after all the Word files. A PDF
+    names the contract it is made from in ``source`` and shares its truth file, and ``image_pages``
+    lists its pages that are pictures only, without a text layer.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = []
+    wanted = {*TEXT_PDFS, SCANNED_PDF[1], MIXED_PDF[1]}
+    specs = {}
     for planned in CATALOGUE:
         spec = build_spec(
             planned.seed,
@@ -173,11 +228,14 @@ def generate(out_dir: Path) -> list[dict[str, object]]:
             project=planned.project,
             bare_amount=planned.bare_amount,
         )
+        if planned.name in wanted:
+            specs[planned.name] = spec
         manifest.append(_write(spec, out_dir, planned.name))
         if spec.annex is not None:
             entry = _write(spec.annex, out_dir, f"{planned.name}-annex")
             entry["annex_of"] = f"{planned.name}.docx"
             manifest.append(entry)
+    manifest.extend(_write_pdfs(specs, out_dir))
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
     return manifest
 
@@ -198,8 +256,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     started = time.perf_counter()
     manifest = generate(args.out_dir)
     seconds = time.perf_counter() - started
+    pdfs = sum(entry["format"] == "pdf" for entry in manifest)
     print(
-        f"Wrote {len(manifest)} Word files with their truth to {args.out_dir} in {seconds:.1f} s."
+        f"Wrote {len(manifest) - pdfs} Word files with their truth and {pdfs} PDF files"
+        f" to {args.out_dir} in {seconds:.1f} s."
     )
     return 0
 

@@ -3,13 +3,15 @@
 Every later task tests against these files, so besides the checks from the plan these tests pin
 the promises the corpus makes: the fixed feature assignments, values written verbatim in the text,
 the ``only_in_deletion`` and ``hidden`` flags, no number or contact detail left out of the truth,
-and no placeholder-like token where none is meant to be.
+and no placeholder-like token where none is meant to be. The PDF files (text, scanned and mixed)
+share the truth of their Word twins: the text PDFs show every value of it in their text layer.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import statistics
 import time
 import zipfile
 from collections import Counter
@@ -18,14 +20,24 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+import pdfplumber
 import phonenumbers
+import pytest
 from lxml import etree
 from schwifty import BIC, IBAN
 from stdnum.eu import vat
 
 from themask.placeholders import find_placeholders
 from themask.textnorm import flexible_pattern, normalize
-from tools.make_corpus import generate, main
+from tools.make_corpus import (
+    CATALOGUE,
+    ContractSpec,
+    build_spec,
+    generate,
+    main,
+    write_mixed_pdf,
+    write_pdf,
+)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {
@@ -95,7 +107,7 @@ def test_truth_covers_every_type(corpus: Path) -> None:
 
 
 def test_features_are_real(corpus: Path) -> None:
-    man = json.loads((corpus / "manifest.json").read_text())
+    man = manifest(corpus)
     for doc in man:
         with zipfile.ZipFile(corpus / doc["file"]) as package:
             names = set(package.namelist())
@@ -127,9 +139,10 @@ def test_deterministic(tmp_path: Path) -> None:
     assert (tmp_path / "a" / "supply-01.truth.json").read_bytes() == (
         tmp_path / "b" / "supply-01.truth.json"
     ).read_bytes()
-    # Not only the truth: every file, Word files included, comes out byte for byte the same.
+    # Not only the truth: every file, Word and PDF files included, comes out byte for byte the same.
     files_a = sorted(p.name for p in (tmp_path / "a").iterdir())
     assert files_a == sorted(p.name for p in (tmp_path / "b").iterdir())
+    assert sum(name.endswith(".pdf") for name in files_a) == 8  # the text, scanned and mixed PDFs
     for name in files_a:
         assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes(), name
 
@@ -182,9 +195,10 @@ def paras(path: Path) -> tuple[Para, ...]:
     return tuple(out)
 
 
-def manifest(corpus: Path) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = json.loads((corpus / "manifest.json").read_text())
-    return result
+def manifest(corpus: Path, fmt: str = "docx") -> list[dict[str, Any]]:
+    """The entries of the manifest for one format: the Word files unless asked for the PDFs."""
+    entries: list[dict[str, Any]] = json.loads((corpus / "manifest.json").read_text())
+    return [d for d in entries if d["format"] == fmt]
 
 
 def truth_of(corpus: Path, file: str) -> list[dict[str, Any]]:
@@ -620,6 +634,265 @@ def test_supply_01_leaves_nothing_once_its_truth_is_masked(corpus: Path) -> None
     flat = normalize("".join(blob))
     for t in truth:
         assert normalize(t["value"]) not in flat, t["value"]
+
+
+# --------------------------------------------------------------------------------------------
+# The PDF files
+# --------------------------------------------------------------------------------------------
+
+# The Word files that also come as a PDF with a text layer. None of them has a value only in
+# deleted or hidden text or a special space, so each PDF can show every value of the truth file it
+# shares with its Word twin.
+PDF_TWINS = ["supply-01", "supply-04", "supply-05", "supply-06", "supply-10", "nda-01"]
+PDF_FEATURES = {"header_footer", "table", "image", "footnotes", "thirty_pages"}  # kept from Word
+SCAN_SIZE = (1240, 1754)  # an A4 page at 150 dpi, in pixels
+
+
+@dataclass(frozen=True)
+class PdfPage:
+    """What pdfplumber finds on one page of a PDF."""
+
+    text: str
+    median_size: float  # of the characters, in points
+    larger_lines: tuple[str, ...]  # the lines set in a larger font than the median
+    tables: tuple[tuple[tuple[str, ...], ...], ...]  # the rows of each table, with whole cells
+    images: tuple[tuple[int, int], ...]  # the size in pixels of each picture
+    covered: float  # the part of the page the pictures cover
+
+
+@cache
+def pdf_pages(path: Path) -> tuple[PdfPage, ...]:
+    pages = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            median = statistics.median(c["size"] for c in page.chars) if page.chars else 0.0
+            larger = tuple(
+                line["text"]
+                for line in page.extract_text_lines()
+                if max(c["size"] for c in line["chars"]) > median + 0.5
+            )
+            tables = tuple(
+                tuple(tuple(" ".join((cell or "").split()) for cell in row) for row in t.extract())
+                for t in page.find_tables()
+            )
+            pictures = [
+                (i["srcsize"], i["x1"] - i["x0"], i["bottom"] - i["top"]) for i in page.images
+            ]
+            covered = sum(w * h for _, w, h in pictures) / (page.width * page.height)
+            pages.append(
+                PdfPage(
+                    page.extract_text() or "",
+                    median,
+                    larger,
+                    tables,
+                    tuple(size for size, _, _ in pictures),
+                    covered,
+                )
+            )
+    return tuple(pages)
+
+
+def pdf_text(path: Path) -> str:
+    return "\n".join(page.text for page in pdf_pages(path))
+
+
+def text_pdfs(corpus: Path) -> list[dict[str, Any]]:
+    """The manifest entries of the PDFs with a text layer on every page: the six Word twins."""
+    pdfs = [d for d in manifest(corpus, "pdf") if not d["image_pages"]]
+    assert [d["file"] for d in pdfs] == [f"{name}.pdf" for name in PDF_TWINS]
+    return pdfs
+
+
+def footer_of(number: int, count: int) -> str:
+    return f"Page {number} of {count} \N{MIDDLE DOT} Confidential"
+
+
+def word_first_row(path: Path) -> list[str]:
+    """The cells of the first row of the first table of a Word file."""
+    with zipfile.ZipFile(path) as package:
+        root = etree.fromstring(package.read("word/document.xml"))
+    row = root.find(".//w:tbl/w:tr", NS)
+    assert row is not None
+    return [
+        "".join(t.text or "" for t in cell.iter(f"{{{W}}}t")) for cell in row.findall("w:tc", NS)
+    ]
+
+
+def spec_of(name: str) -> ContractSpec:
+    planned = next(p for p in CATALOGUE if p.name == name)
+    return build_spec(
+        planned.seed,
+        planned.kind,
+        planned.features,
+        parties=planned.parties,
+        project=planned.project,
+        bare_amount=planned.bare_amount,
+    )
+
+
+def test_pdf_corpus(corpus: Path) -> None:
+    man = json.loads((corpus / "manifest.json").read_text())
+    pdfs = [d for d in man if d["format"] == "pdf"]
+    assert len(pdfs) >= 8 and sum(1 for d in pdfs if d["image_pages"]) >= 2
+
+
+def test_text_pdf_has_text_and_running_header(corpus: Path) -> None:
+    pages = [page.text for page in pdf_pages(corpus / "supply-01.pdf")]
+    assert len(pages) >= 3 and all("Confidential" in t for t in pages)
+
+
+def test_scanned_pdf_has_no_text(corpus: Path) -> None:
+    with pdfplumber.open(corpus / "scanned-01.pdf") as pdf:
+        assert len(pdf.pages) >= 3
+        assert all(not (p.extract_text() or "").strip() for p in pdf.pages)
+
+
+def test_pdf_manifest_entries(corpus: Path) -> None:
+    entries = json.loads((corpus / "manifest.json").read_text())
+    # The Word entries come first and are the same as before; the PDF entries follow them.
+    formats = [d["format"] for d in entries]
+    first_pdf = formats.index("pdf")
+    assert set(formats[:first_pdf]) == {"docx"} and set(formats[first_pdf:]) == {"pdf"}
+    pdfs = manifest(corpus, "pdf")
+    assert [d["file"] for d in pdfs] == [
+        *(f"{name}.pdf" for name in PDF_TWINS),
+        "scanned-01.pdf",
+        "mixed-01.pdf",
+    ]
+    word = {d["file"]: d for d in manifest(corpus)}
+    for d in pdfs:
+        assert set(d) == {"file", "format", "features", "truth", "source", "image_pages"}, d
+        assert (corpus / d["file"]).is_file() and d["features"] == sorted(d["features"])
+        assert d["truth"] == f"{d['source']}.truth.json" and (corpus / d["truth"]).is_file()
+        if d["image_pages"]:
+            continue
+        # A text PDF has the features of its Word twin that a PDF can have.
+        assert d["source"] == d["file"].removesuffix(".pdf")
+        assert d["features"] == sorted(set(word[f"{d['source']}.docx"]["features"]) & PDF_FEATURES)
+        assert {"header_footer", "table"} <= set(d["features"])
+    scanned, mixed = pdfs[-2:]
+    pages = len(pdf_pages(corpus / "scanned-01.pdf"))
+    assert (scanned["source"], scanned["features"]) == ("supply-01", ["scanned"])
+    assert scanned["image_pages"] == list(range(1, pages + 1)) and pages >= 3
+    assert (mixed["source"], mixed["features"]) == ("dpa-01", ["mixed"])
+    assert mixed["image_pages"] == [2]
+
+
+def test_pdf_twins_share_the_truth_of_their_word_file(corpus: Path) -> None:
+    word = {d["file"]: d["truth"] for d in manifest(corpus)}
+    assert len(manifest(corpus, "pdf")) == 8
+    for d in manifest(corpus, "pdf"):
+        assert d["truth"] == word[f"{d['source']}.docx"], d["file"]
+    # No truth file of their own: a truth file for each Word file, and no more.
+    assert len(list(corpus.glob("*.truth.json"))) == len(word)
+    special_spaces = "[\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}\N{THIN SPACE}]"
+    for name in PDF_TWINS:
+        for t in json.loads((corpus / f"{name}.truth.json").read_text()):
+            assert not t.get("only_in_deletion") and not t.get("hidden"), (name, t["value"])
+            assert not re.search(special_spaces, "".join([t["value"], *t["variants"]])), name
+
+
+def test_every_truth_value_and_variant_is_in_the_text_of_the_text_pdfs(corpus: Path) -> None:
+    for d in text_pdfs(corpus):
+        text = normalize(pdf_text(corpus / d["file"]))
+        for t in json.loads((corpus / d["truth"]).read_text()):
+            for form in [t["value"], *t["variants"]]:
+                assert normalize(form) in text, (d["file"], form)
+
+
+def test_no_occurrence_of_a_value_is_cut_in_the_text_pdfs(corpus: Path) -> None:
+    """Every place a Word file writes a value or variant, its PDF writes it whole.
+
+    A line break only adds a space, which ``normalize`` drops; a page break would put the header
+    and the footer in the middle of the value, so it would not be found.
+    """
+    for d in text_pdfs(corpus):
+        pdf = normalize(pdf_text(corpus / d["file"]))
+        word = normalize("\n".join(p.visible for p in paras(corpus / f"{d['source']}.docx")))
+        for t in json.loads((corpus / d["truth"]).read_text()):
+            for form in [t["value"], *t["variants"]]:
+                assert pdf.count(normalize(form)) >= word.count(normalize(form)), (d["file"], form)
+
+
+def test_text_pdfs_have_the_running_header_and_footer_on_every_page(corpus: Path) -> None:
+    for d in text_pdfs(corpus):
+        header = part_text(corpus / f"{d['source']}.docx", "word/header1.xml")
+        pages = pdf_pages(corpus / d["file"])
+        assert " / " in header and " \N{EM DASH} " in header
+        for number, page in enumerate(pages, start=1):
+            lines = page.text.splitlines()
+            assert lines[0] == header, (d["file"], number)
+            assert lines[-1] == footer_of(number, len(pages)), (d["file"], number)
+
+
+def test_headings_in_the_text_pdfs_are_larger_than_the_body_text(corpus: Path) -> None:
+    for d in text_pdfs(corpus):
+        pages = pdf_pages(corpus / d["file"])
+        larger = [line for page in pages for line in page.larger_lines]
+        assert all(page.median_size == 10 for page in pages), d["file"]  # the body text
+        assert len(larger) >= 8, d["file"]
+        # Only headings are larger, and the contract's headings are upper case.
+        assert all(line == line.upper() for line in larger), (d["file"], larger)
+        assert len(pages[0].larger_lines) >= 2 and pages[0].larger_lines[0].endswith("AGREEMENT")
+
+
+def test_text_pdfs_have_the_features_they_claim_and_no_others(corpus: Path) -> None:
+    for d in text_pdfs(corpus):
+        word = corpus / f"{d['source']}.docx"
+        pages = pdf_pages(corpus / d["file"])
+        text = pdf_text(corpus / d["file"])
+        # header_footer: see the test of the running header; table: as many as the Word file,
+        # with the same first row.
+        tables = [table for page in pages for table in page.tables]
+        assert len(tables) == _read(word, "word/document.xml").count("<w:tbl>")
+        assert list(tables[0][0]) == word_first_row(word), d["file"]
+        # image: the logo and signature of the Word file, as pictures.
+        pictures = [size for page in pages for size in page.images]
+        assert len(pictures) == sum(n.startswith("word/media/") for n in _names(word)), d["file"]
+        assert (len(pictures) > 0) == ("image" in d["features"]), d["file"]
+        # footnotes: a "NOTES" block holding each of them.
+        notes = [p.visible for p in paras(word) if p.part == "word/footnotes.xml" and p.visible]
+        assert text.splitlines().count("NOTES") == (1 if notes else 0), d["file"]
+        assert all(normalize(note) in normalize(text) for note in notes), d["file"]
+        assert bool(notes) == ("footnotes" in d["features"]), d["file"]
+        # thirty_pages: a long text.
+        assert (words(text) >= 12_000) == ("thirty_pages" in d["features"]), d["file"]
+
+
+def test_scanned_pdf_is_one_picture_to_a_page(corpus: Path) -> None:
+    pages = pdf_pages(corpus / "scanned-01.pdf")
+    assert len(pages) >= 3
+    for number, page in enumerate(pages, start=1):
+        assert page.text == "" and page.median_size == 0, number  # no text layer at all
+        assert page.images == (SCAN_SIZE,) and page.covered > 0.99, number
+
+
+def test_mixed_pdf_has_one_picture_page_between_pages_of_text(corpus: Path) -> None:
+    pages = pdf_pages(corpus / "mixed-01.pdf")
+    assert len(pages) >= 4
+    assert pages[1].text == "" and pages[1].images == (SCAN_SIZE,) and pages[1].covered > 0.99
+    header = part_text(corpus / "dpa-01.docx", "word/header1.xml")
+    for number, page in enumerate(pages, start=1):
+        if number != 2:
+            lines = page.text.splitlines()
+            assert lines[0] == header and lines[-1] == footer_of(number, len(pages))
+    # What the picture holds is not in the text layer: the IBAN is only on page 2, the BIC is not.
+    text = normalize(pdf_text(corpus / "mixed-01.pdf"))
+    truth = truth_of(corpus, "dpa-01.docx")
+    ibans = [t["value"] for t in truth if t["type"] == "IBAN"]
+    bics = [t["value"] for t in truth if t["type"] == "ID" and _BIC_SHAPE.fullmatch(t["value"])]
+    assert ibans and not any(normalize(iban) in text for iban in ibans)
+    assert bics and all(normalize(bic) in text for bic in bics)
+
+
+def test_pdf_writers_say_what_they_cannot_show(tmp_path: Path) -> None:
+    # The narrow no-break space of some numbers is not in WinAnsi, which Helvetica uses.
+    with pytest.raises(ValueError, match="not in WinAnsi"):
+        write_pdf(spec_of("services-04"), tmp_path / "services-04.pdf")
+    with pytest.raises(TypeError, match="TextBox"):
+        write_pdf(spec_of("services-03"), tmp_path / "services-03.pdf")
+    with pytest.raises(ValueError, match="no page 9"):
+        write_mixed_pdf(spec_of("supply-01"), tmp_path / "supply-01.pdf", image_page=9)
 
 
 # --------------------------------------------------------------------------------------------
