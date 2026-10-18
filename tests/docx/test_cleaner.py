@@ -37,6 +37,10 @@ _MORE = {
     "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture",
     "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
     "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    "wpg": "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+    "cx": "http://schemas.microsoft.com/office/drawing/2014/chartex",
+    "w14": "http://schemas.microsoft.com/office/word/2010/wordml",
+    "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
 }
 DECLARATIONS = XMLNS + "".join(f' xmlns:{prefix}="{uri}"' for prefix, uri in _MORE.items())
 
@@ -120,6 +124,14 @@ def package(
 def everywhere(pkg: DocxPackage) -> bytes:
     """Every byte of every part."""
     return b"\n".join(pkg.raw(name) for name in pkg.names())
+
+
+def saved_bytes(pkg: DocxPackage, tmp_path: Path) -> bytes:
+    """Every byte of the file ``pkg`` saves to: what an AI tool would be given."""
+    path = tmp_path / "saved.docx"
+    pkg.save(path)
+    with zipfile.ZipFile(path) as archive:
+        return b"\n".join(archive.read(name) for name in archive.namelist())
 
 
 def document(pkg: DocxPackage, name: str = "word/document.xml") -> bytes:
@@ -710,6 +722,61 @@ def test_a_hidden_picture_leaves_no_note_and_no_file() -> None:
     assert_consistent(pkg)
 
 
+ADDRESS = "zeta.counsel@zeta-holdings.example"
+
+
+def test_hidden_text_in_a_link_takes_the_link_with_it(tmp_path: Path) -> None:
+    # Word turns a typed e-mail address into a link, so a hidden drafting note can be one. The runs
+    # go; the link around them goes too, or its target stays in the relationships.
+    link = (
+        '<w:hyperlink r:id="rId1" w:history="1"><w:r><w:rPr><w:vanish/></w:rPr>'
+        f"<w:t>{ADDRESS}</w:t></w:r></w:hyperlink>"
+    )
+    pkg = package(para(run("Contact "), link), rels=[(HYPERLINK, f"mailto:{ADDRESS}", "External")])
+    rep = clean(pkg)
+    assert rep.hidden_runs == 1 and text_of(pkg) == "Contact "
+    assert ADDRESS.encode() not in saved_bytes(pkg, tmp_path)
+    assert b"hyperlink" not in document(pkg) and "word/_rels/document.xml.rels" not in pkg.names()
+    assert_consistent(pkg)
+
+
+def test_hidden_text_in_a_simple_field_takes_the_field_with_it(tmp_path: Path) -> None:
+    hidden = (
+        f'<w:fldSimple w:instr=" HYPERLINK &quot;mailto:{ADDRESS}&quot; ">'
+        f"<w:r><w:rPr><w:vanish/></w:rPr><w:t>{ADDRESS}</w:t></w:r></w:fldSimple>"
+    )
+    pkg = package(para(run("Contact "), hidden))
+    rep = clean(pkg)
+    assert rep.hidden_runs == 1 and text_of(pkg) == "Contact "
+    assert ADDRESS.encode() not in saved_bytes(pkg, tmp_path)
+    assert b"fldSimple" not in document(pkg)
+
+
+def test_a_link_in_a_field_goes_when_nothing_visible_is_left_in_either() -> None:
+    nested = (
+        '<w:hyperlink r:id="rId1"><w:bookmarkStart w:id="4" w:name="note"/><w:fldSimple w:instr=" PAGE ">'
+        "<w:r><w:rPr><w:vanish/></w:rPr><w:t>7</w:t></w:r></w:fldSimple></w:hyperlink>"
+    )
+    pkg = package(
+        para(run("Page "), nested), rels=[(HYPERLINK, "https://secret.example/", "External")]
+    )
+    clean(pkg)
+    assert text_of(pkg) == "Page "
+    assert b"secret.example" not in everywhere(pkg) and b"hyperlink" not in document(pkg)
+    assert b"bookmarkStart" in document(pkg)  # what else was in the link stays where it was
+
+
+def test_a_link_that_also_holds_visible_text_keeps_its_target() -> None:
+    mixed = (
+        '<w:hyperlink r:id="rId1"><w:r><w:rPr><w:vanish/></w:rPr><w:t>note</w:t></w:r>'
+        f"{run('portal')}</w:hyperlink>"
+    )
+    pkg = package(para(mixed), rels=[(HYPERLINK, "https://portal.example/", "External")])
+    assert clean(pkg).hidden_runs == 1
+    assert text_of(pkg) == "portal" and b"portal.example" in everywhere(pkg)
+    assert_consistent(pkg)
+
+
 # ---- runs outside any paragraph (ruling R24) -----------------------------------------------------
 
 
@@ -903,6 +970,28 @@ def test_a_field_that_starts_in_one_paragraph_and_ends_in_the_next() -> None:
     assert text_of(pkg) == "one\ntwo" and b"fldChar" not in document(pkg)
 
 
+@pytest.mark.parametrize(
+    "nested", [' QUOTE "Mary" ', " DOCVARIABLE ClientName "], ids=["a QUOTE field", "a DOCVARIABLE"]
+)
+def test_a_field_in_the_instruction_of_a_flattened_field_goes_with_it(nested: str) -> None:
+    # Everything between begin and separate is the instruction. A field in it, with its result,
+    # must not turn into body text when the field around it becomes plain text.
+    outer = (
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        "<w:r><w:instrText> DOCPROPERTY </w:instrText></w:r>"
+        + field(nested, run("Mary Major"))
+        + '<w:r><w:instrText xml:space="preserve"> </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        + run("Result")
+        + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+    pkg = package(para(run("A "), outer, run(" B")))
+    rep = clean(pkg)
+    assert rep.fields_flattened == 1  # the nested one is part of the instruction, not of the text
+    assert text_of(pkg) == "A Result B"
+    assert b"Mary Major" not in everywhere(pkg) and b"fldChar" not in document(pkg)
+
+
 def test_other_fields_are_left_alone() -> None:
     body = para(
         run("Page "),
@@ -1048,6 +1137,60 @@ def test_the_title_and_tag_of_a_content_control_go(corpus: Path, tmp_path: Path)
     assert kept.find(f"{w}alias") is None and kept.find(f"{w}tag") is None
     assert kept.find(f"{w}id").get(f"{w}val") == "4711"  # the control can still be told apart
     assert extract_text(reopened).text.startswith("Zeta Holdings Ltd")  # and keeps its text
+
+
+def test_alt_text_and_names_of_grouped_shapes_go() -> None:
+    def box(number: int, text: str, extra: str) -> str:
+        return (
+            f'<wps:wsp><wps:cNvPr id="{number}" name="Zeta box {number}"{extra}/>'
+            '<wps:cNvSpPr txBox="1"/><wps:spPr/><wps:txbx><w:txbxContent>'
+            f"{para(run(text))}</w:txbxContent></wps:txbx></wps:wsp>"
+        )
+
+    group = (
+        '<w:drawing><wp:anchor><wp:docPr id="1" name="Group 1"/><a:graphic>'
+        '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">'
+        '<wpg:wgp><wpg:cNvPr id="2" name="Zeta group"/>'
+        + box(3, "One", ' descr="Prices for Zeta"')
+        + box(4, "Two", ' title="Zeta tip"')
+        + "</wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing>"
+    )
+    pkg = package(para(f"<w:r>{group}</w:r>"))
+    rep = clean(pkg)
+    properties = pkg.xml("word/document.xml").xpath(
+        "//wp:docPr | //*[local-name()='cNvPr']", namespaces=NS
+    )
+    assert [p.get("name") for p in properties] == ["Shape1", "Shape2", "Shape3", "Shape4"]
+    assert rep.attributes_cleared == 6  # four names, one description, one title
+    assert b"Zeta" not in everywhere(pkg)
+    assert text_of(pkg).splitlines()[1:] == ["One", "Two"]  # the boxes keep their text
+
+
+def test_alt_text_of_a_vml_text_box_goes() -> None:
+    box = (
+        '<w:r><w:pict><v:shape id="Text Box 2" type="#_x0000_t202" alt="Pricing for Zeta" '
+        'title="Zeta tip"><v:textbox><w:txbxContent>'
+        f"{para(run('Box'))}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>"
+    )
+    pkg = package(para(box))
+    rep = clean(pkg)
+    assert rep.attributes_cleared == 2 and "Box" in text_of(pkg)
+    assert b"Zeta" not in everywhere(pkg)
+    assert pkg.xml("word/document.xml").find(".//v:shape", NS).get("id") == "Text Box 2"
+
+
+def test_the_data_binding_of_a_word_2013_control_goes_like_the_older_one() -> None:
+    store = "{11111111-2222-3333-4444-555555555555}"
+    controls = (
+        f'<w:sdt><w:sdtPr><w:dataBinding w:xpath="/c/n" w:storeItemID="{store}"/></w:sdtPr>'
+        f"<w:sdtContent>{para(run('Old'))}</w:sdtContent></w:sdt>"
+        f'<w:sdt><w:sdtPr><w15:dataBinding w15:xpath="/c/n" w15:storeItemID="{store}"/></w:sdtPr>'
+        f"<w:sdtContent>{para(run('New'))}</w:sdtContent></w:sdt>"
+    )
+    pkg = package(controls)
+    clean(pkg)
+    assert b"dataBinding" not in everywhere(pkg) and b"storeItemID" not in everywhere(pkg)
+    assert text_of(pkg) == "Old\nNew"  # the controls keep their text
 
 
 def test_form_field_data_goes_and_the_field_stays() -> None:
@@ -1377,6 +1520,173 @@ def test_a_picture_with_a_vml_fallback_is_one_picture() -> None:
     assert_consistent(pkg)
 
 
+SIGNED = "Signed for Zeta Holdings by Mary Major"
+
+
+def picture_group(rid: str = "rId1") -> str:
+    """A w:drawing: a group of a text box and a picture."""
+    return (
+        '<w:drawing><wp:anchor><wp:docPr id="5" name="Group 5" descr="Signature block"/><a:graphic>'
+        '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">'
+        '<wpg:wgp><wps:wsp><wps:cNvPr id="6" name="Text Box 6" descr="Signed by Mary"/>'
+        f"<wps:txbx><w:txbxContent>{para(run(SIGNED))}</w:txbxContent></wps:txbx></wps:wsp>"
+        '<pic:pic><pic:nvPicPr><pic:cNvPr id="7" name="Picture 7" descr="Signature of Mary Major"/>'
+        f'<pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{rid}"/></pic:blipFill>'
+        "<pic:spPr/></pic:pic></wpg:wgp></a:graphicData></a:graphic></wp:anchor></w:drawing>"
+    )
+
+
+def vml_picture_group(rid: str = "rId1") -> str:
+    """A w:pict: a VML group of a picture and a text box."""
+    return (
+        '<w:pict><v:group id="Group 1" coordsize="100,100"><v:shape id="Picture 2" '
+        f'type="#_x0000_t75" alt="Signature of Mary Major"><v:imagedata r:id="{rid}" o:title=""/>'
+        '</v:shape><v:shape id="Text Box 3" type="#_x0000_t202" alt="Signed by Mary"><v:textbox>'
+        f"<w:txbxContent>{para(run(SIGNED))}</w:txbxContent></v:textbox></v:shape></v:group></w:pict>"
+    )
+
+
+def picture_filled_text_box(rid: str = "rId1", text: str = SIGNED) -> str:
+    """A w:drawing: a text box whose fill is a picture."""
+    inside = (
+        f"<wps:txbx><w:txbxContent>{para(run(text))}</w:txbxContent></wps:txbx>" if text else ""
+    )
+    return (
+        '<w:drawing><wp:anchor><wp:docPr id="8" name="Box 8"/><a:graphic>'
+        '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        '<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"/>'
+        f'<a:blipFill><a:blip r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>'
+        f"</wps:spPr>{inside}<wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"
+    )
+
+
+def with_signature_picture(shape: str) -> DocxPackage:
+    return package(
+        para(f"<w:r>{shape}</w:r>"),
+        rels=[(IMAGE, "media/sign.png")],
+        parts={"word/media/sign.png": b"PNG of a signature"},
+    )
+
+
+def assert_only_the_picture_went(pkg: DocxPackage, rep: CleanReport) -> None:
+    """What the three shapes below have in common: the text stays, the picture is a note beside it."""
+    assert rep.images == 1 and rep.objects == 0
+    assert text_of(pkg).splitlines() == [IMAGE_NOTE, SIGNED]  # the note, then the text box
+    assert not [n for n in pkg.names() if "media" in n]
+    assert b"Signature of Mary Major" not in everywhere(pkg) and b"r:embed" not in document(pkg)
+    assert_consistent(pkg)
+    assert clean(pkg) == CleanReport()  # and nothing is left that a second clean would find
+
+
+def test_a_group_of_a_picture_and_a_text_box_loses_only_the_picture() -> None:
+    pkg = with_signature_picture(picture_group())
+    rep = clean(pkg)
+    assert_only_the_picture_went(pkg, rep)
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//pic:pic", NS) is None and root.find(".//wps:txbx", NS) is not None
+
+
+def test_a_vml_group_of_a_picture_and_a_text_box_loses_only_the_picture() -> None:
+    pkg = with_signature_picture(vml_picture_group())
+    rep = clean(pkg)
+    assert_only_the_picture_went(pkg, rep)
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//v:imagedata", NS) is None and root.find(".//v:textbox", NS) is not None
+    assert len(root.findall(".//v:shape", NS)) == 1  # the picture's shape is gone, the box's is not
+
+
+def test_a_text_box_with_a_picture_fill_loses_only_the_fill() -> None:
+    pkg = with_signature_picture(picture_filled_text_box())
+    rep = clean(pkg)
+    assert_only_the_picture_went(pkg, rep)
+    root = pkg.xml("word/document.xml")
+    assert (
+        root.find(".//a:blipFill", NS) is None and root.find(".//wps:spPr/a:noFill", NS) is not None
+    )
+
+
+def test_a_shape_with_a_picture_fill_and_no_text_is_a_picture() -> None:
+    pkg = with_signature_picture(picture_filled_text_box(text=""))
+    rep = clean(pkg)
+    assert rep.images == 1 and text_of(pkg) == IMAGE_NOTE
+    assert not [n for n in pkg.names() if "media" in n]
+    assert_consistent(pkg)
+
+
+CHART_EX = "http://schemas.microsoft.com/office/2014/relationships/chartEx"
+
+
+def test_a_word_2016_chart_is_a_picture_with_its_parts() -> None:
+    chart = (
+        '<mc:AlternateContent><mc:Choice Requires="cx1"><w:drawing><wp:inline>'
+        '<wp:docPr id="9" name="Chart 9" descr="Waterfall of Zeta Holdings revenue"/><a:graphic>'
+        '<a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex">'
+        '<cx:chart r:id="rId1"/></a:graphicData></a:graphic></wp:inline></w:drawing></mc:Choice>'
+        "<mc:Fallback><w:pict><v:rect><v:textbox><w:txbxContent>"
+        f"{para(run('This chart is not available in your version of Word.'))}"
+        "</w:txbxContent></v:textbox></v:rect></w:pict></mc:Fallback></mc:AlternateContent>"
+    )
+    pkg = package(
+        para(f"<w:r>{chart}</w:r>"),
+        rels=[(CHART_EX, "charts/chartEx1.xml")],
+        parts={
+            "word/charts/chartEx1.xml": b"<cx:chartSpace xmlns:cx='urn:cx'>Zeta revenue</cx:chartSpace>",
+            "word/charts/_rels/chartEx1.xml.rels": rels_xml(
+                [(f"{REL}/package", "../embeddings/Microsoft_Excel_Sheet1.xlsx")]
+            ),
+            "word/embeddings/Microsoft_Excel_Sheet1.xlsx": b"PK-workbook",
+        },
+    )
+    rep = clean(pkg)
+    assert rep.images == 1 and rep.fallbacks_removed == 1
+    assert text_of(pkg) == IMAGE_NOTE
+    assert pkg.names() == ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]
+    assert b"Zeta" not in everywhere(pkg)
+    assert_consistent(pkg)
+
+
+def test_an_ink_drawing_is_a_picture_and_its_part_goes() -> None:
+    # Word keeps the strokes in an InkML part that the document relates to as custom XML.
+    ink = (
+        '<w:drawing><wp:inline><wp:docPr id="1" name="Ink 1"/><a:graphic><a:graphicData '
+        'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingInk">'
+        '<w14:contentPart bwMode="auto" r:id="rId1"><w14:nvContentPartPr><w14:cNvContentPartPr/>'
+        "</w14:nvContentPartPr></w14:contentPart></a:graphicData></a:graphic></wp:inline></w:drawing>"
+    )
+    pkg = package(
+        para(run("Initialled "), f"<w:r>{ink}</w:r>"),
+        rels=[(CUSTOM_XML, "ink/ink1.xml")],
+        parts={"word/ink/ink1.xml": b"<inkml>strokes of Mary Major</inkml>"},
+        types={"word/ink/ink1.xml": "application/inkml+xml"},
+    )
+    rep = clean(pkg)
+    assert rep.images == 1 and text_of(pkg) == f"Initialled {IMAGE_NOTE}"
+    assert pkg.names() == ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]
+    assert_consistent(pkg)
+
+
+@pytest.mark.parametrize(
+    ("relationship", "target"),
+    [(f"{REL}/package", "embeddings/widget.bin"), (CUSTOM_XML, "ink/widget.xml")],
+    ids=["a swept folder", "a custom XML relationship"],
+)
+def test_a_part_that_the_text_still_refers_to_is_never_removed(
+    relationship: str, target: str
+) -> None:
+    # An element this cleaner does not know refers to a part that it removes otherwise (by its
+    # folder, or by its relationship type): the part stays, so the reference still leads somewhere
+    # and the file stays whole.
+    unknown = '<w:r><ex:widget xmlns:ex="urn:example" r:id="rId1"/></w:r>'
+    pkg = package(
+        para(unknown),
+        rels=[(relationship, target)],
+        parts={f"word/{target}": b"<widget/>"},
+    )
+    clean(pkg)
+    assert f"word/{target}" in pkg.names()
+    assert_consistent(pkg)
+
+
 # ---- the two copies of a text box (ruling R16) ---------------------------------------------------
 
 
@@ -1407,7 +1717,7 @@ _CORE = (
     "<dc:title>Supply Agreement - Acme / Beta</dc:title><dc:subject>Packaging</dc:subject>"
     "<dc:creator>Jane Doe</dc:creator><cp:keywords>acme; beta</cp:keywords>"
     "<dc:description>Agreed with John</dc:description><cp:lastModifiedBy>John Roe</cp:lastModifiedBy>"
-    "<cp:revision>18</cp:revision>"
+    "<dc:identifier>DMS-4711</dc:identifier><cp:version>7.2</cp:version><cp:revision>18</cp:revision>"
     '<dcterms:created xsi:type="dcterms:W3CDTF">2026-03-01T10:01:00Z</dcterms:created>'
     '<dcterms:modified xsi:type="dcterms:W3CDTF">2026-04-16T13:54:00Z</dcterms:modified>'
     "<cp:category>Contracts</cp:category><cp:contentStatus>Final draft</cp:contentStatus>"
@@ -1439,6 +1749,7 @@ _CUSTOM = (
 CORE_CLEARED = (  # in the order the plan lists them
     *("dc:creator", "cp:lastModifiedBy", "dc:title", "dc:subject"),
     *("cp:keywords", "dc:description", "cp:category", "cp:contentStatus"),
+    *("dc:identifier", "cp:version"),
 )
 
 
@@ -1550,6 +1861,29 @@ def test_properties_that_are_missing_or_already_empty_are_fine() -> None:
     )
 
 
+def test_core_properties_are_blanked_whatever_they_hold() -> None:
+    # A property can have child elements (keywords may hold cp:value) and a name can repeat.
+    core = (
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+        "<dc:creator>Jane Doe</dc:creator><dc:creator>Second Author</dc:creator>"
+        "<cp:keywords>acme <cp:value>Zeta Holdings</cp:value> deal</cp:keywords>"
+        "<dc:identifier>DMS-4711/Zeta</dc:identifier><cp:version>7.2 Zeta draft</cp:version>"
+        "<cp:revision>3</cp:revision></cp:coreProperties>"
+    )
+    pkg = package(
+        package_rels=[(CORE_REL, "docProps/core.xml")], parts={"docProps/core.xml": core.encode()}
+    )
+    rep = clean(pkg, now=NOW)
+    for stale in (b"Zeta", b"Jane", b"Second", b"acme", b"deal", b"DMS", b"7.2"):
+        assert stale not in pkg.raw("docProps/core.xml"), stale
+    root = pkg.xml("docProps/core.xml")
+    assert [e.text for e in root.findall("dc:creator", NS)] == [None, None]
+    assert len(root.find("cp:keywords", NS)) == 0  # no child is left either
+    assert root.findtext("cp:revision", namespaces=NS) == "3"
+    assert rep.properties_cleared == ["dc:creator", "cp:keywords", "dc:identifier", "cp:version"]
+
+
 def test_the_picture_of_the_first_page_goes() -> None:
     pkg = package(
         package_rels=[(THUMBNAIL, "docProps/thumbnail.jpeg")],
@@ -1562,7 +1896,11 @@ def test_the_picture_of_the_first_page_goes() -> None:
 
 
 def test_printer_settings_and_signatures_go() -> None:
+    section = (
+        '<w:sectPr><w:printerSettings r:id="rId1"/><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>'
+    )
     pkg = package(
+        f"<w:p/>{section}",
         rels=[(f"{REL}/printerSettings", "printerSettings/printerSettings1.bin")],
         package_rels=[(f"{SIGNATURES}/origin", "_xmlsignatures/origin.sigs")],
         parts={
@@ -1577,6 +1915,8 @@ def test_printer_settings_and_signatures_go() -> None:
     rep = clean(pkg)
     assert pkg.names() == ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]
     assert len(rep.parts_removed) == 5
+    assert b"printerSettings" not in everywhere(pkg)  # the element that named the part goes too
+    assert pkg.xml("word/document.xml").find(".//w:pgSz", NS) is not None  # the section stays
     assert_consistent(pkg)
 
 
