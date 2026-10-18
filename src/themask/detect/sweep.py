@@ -5,24 +5,37 @@ value (ignoring case, however it is spaced), and adds each occurrence that nothi
 its group as a finding with source "sweep" and score 1.0. Longer variants go first, across all
 groups, so "Acme Supplies" is found whole before "Acme" is looked for.
 
-An occurrence is never taken when it overlaps a finding of any group or a placeholder already in
-the text (a placeholder inside a placeholder would break both), and never when it runs from one
-line into the next: a replacement must lie within one paragraph, and the analysis joins the files
-of a case with line breaks. A variant that is blank, or shorter than two letters or digits once
-normalised, is not searched for at all: it would be found all over the text.
+An occurrence that holds shorter findings with room to spare takes them over (ruling R35): they
+leave their groups and the whole occurrence joins the sweeping group, so "Project Falcon" swept
+over the model's "Falcon" gives one replacement and one group. A group whose findings are all
+taken over is left with none, for the caller to drop. The owner's decisions are never taken
+over; the occurrence is skipped instead: a finding of the always-hide list or of the owner's own
+selection, a finding of a ``fixed`` group (the case's key), and a finding or a group the owner
+switched off.
+
+Otherwise an occurrence is never taken when it overlaps a finding of any group (the same span, or
+only part of it), or a placeholder already in the text (a placeholder inside a placeholder would
+break both), and never when it runs from one line into the next: a replacement must lie within
+one paragraph, and the analysis joins the files of a case with line breaks. A variant that is
+blank, or shorter than two letters or digits once normalised, is not searched for at all: it
+would be found all over the text.
 """
 
 from __future__ import annotations
 
-from bisect import bisect_left, insort
-from collections.abc import Iterable
+from bisect import bisect_left, bisect_right, insort
+from collections.abc import Collection, Iterable
+from dataclasses import dataclass
 
-from themask.model import Finding, Group
+from themask.model import Finding, FindingSource, Group
 from themask.placeholders import find_placeholders
 from themask.textnorm import flexible_pattern, normalize
 
 # A variant needs at least this many letters or digits, once normalised, to be searched for.
 MIN_VARIANT_LENGTH = 2
+
+# What the owner chose: a finding from these sources is never taken over by the sweep.
+OWNER_SOURCES: frozenset[FindingSource] = frozenset({"list", "user"})
 
 # The characters that end a line or a paragraph: no finding may hold one.
 LINE_BREAKS = frozenset("\n\r\f\v\x1c\x1d\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}")
@@ -81,16 +94,90 @@ def occurrences(text: str, variant: str, taken: Spans) -> list[tuple[int, int]]:
     return found
 
 
-def sweep(text: str, groups: list[Group]) -> None:
+@dataclass(eq=False)
+class _Place:
+    """A finding where it stands, with its group."""
+
+    finding: Finding
+    group: Group
+
+
+class _Places:
+    """The findings of the groups, in order of where they start."""
+
+    def __init__(self, groups: list[Group], fixed: Collection[Group]) -> None:
+        self._fixed = {id(group) for group in fixed}
+        places = [_Place(f, group) for group in groups for f in group.findings]
+        self._places = sorted(places, key=lambda place: place.finding.start)
+        self._starts = [place.finding.start for place in self._places]
+        self._longest = max((p.finding.end - p.finding.start for p in self._places), default=0)
+
+    def overlapping(self, start: int, end: int) -> list[_Place]:
+        """The findings that share a character with ``start``-``end``."""
+        found = []
+        index = bisect_left(self._starts, end) - 1
+        while index >= 0 and self._starts[index] + self._longest > start:
+            place = self._places[index]
+            if place.finding.end > start:
+                found.append(place)
+            index -= 1
+        return found
+
+    def may_take_over(self, place: _Place, start: int, end: int) -> bool:
+        """Whether an occurrence at ``start``-``end`` may take over ``place``: it holds the
+        finding with room to spare, and the finding is not the owner's decision.
+        """
+        finding, group = place.finding, place.group
+        holds = (
+            start <= finding.start
+            and finding.end <= end
+            and finding.end - finding.start < end - start
+        )
+        return holds and not (
+            finding.source in OWNER_SOURCES
+            or id(group) in self._fixed
+            or not group.enabled
+            or _index(group, finding) in group.disabled
+        )
+
+    def take_over(self, place: _Place) -> None:
+        """Take ``place``'s finding out of its group and out of the places."""
+        index = bisect_left(self._starts, place.finding.start)
+        while self._places[index] is not place:
+            index += 1
+        del self._places[index]
+        del self._starts[index]
+        _remove(place.group, place.finding)
+
+    def add(self, finding: Finding, group: Group) -> None:
+        index = bisect_right(self._starts, finding.start)
+        self._places.insert(index, _Place(finding, group))
+        self._starts.insert(index, finding.start)
+        self._longest = max(self._longest, finding.end - finding.start)
+
+
+def _index(group: Group, finding: Finding) -> int:
+    """Where ``finding`` (this very object) stands in ``group.findings``."""
+    return next(i for i, found in enumerate(group.findings) if found is finding)
+
+
+def _remove(group: Group, finding: Finding) -> None:
+    """Take ``finding`` out of ``group``, keeping the indexes of its switched-off occurrences."""
+    index = _index(group, finding)
+    del group.findings[index]
+    group.disabled = {i - (i > index) for i in group.disabled if i != index}
+
+
+def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None:
     """Add to ``groups`` every further occurrence in ``text`` of their variants (see the module).
 
-    New findings are appended to each group's findings, so the ones already there keep their
-    places (and the indexes a review keeps of them). Sweeping again adds nothing.
+    ``fixed`` are groups whose findings are never taken over: the pipeline passes the groups of
+    the case's key. New findings are appended to each group's findings, so the ones already there
+    keep their order (a finding taken over leaves its group, and the indexes of the occurrences
+    switched off follow). Sweeping again adds nothing.
     """
-    taken = Spans(
-        [(f.start, f.end) for group in groups for f in group.findings]
-        + [(p.start, p.end) for p in find_placeholders(text)]
-    )
+    places = _Places(groups, fixed)
+    placeholders = Spans((p.start, p.end) for p in find_placeholders(text))
     variants = sorted(
         (
             (variant, index)
@@ -102,5 +189,23 @@ def sweep(text: str, groups: list[Group]) -> None:
     )
     for variant, index in variants:
         group = groups[index]
-        for start, end in occurrences(text, variant, taken):
-            group.findings.append(Finding(group.type, start, end, text[start:end], 1.0, "sweep"))
+        pattern = flexible_pattern(variant)
+        position = 0
+        while (match := pattern.search(text, position)) is not None:
+            start, end = match.span()
+            inside = places.overlapping(start, end)
+            refused = (
+                start == end
+                or crosses_a_line(text, start, end)
+                or placeholders.overlaps(start, end)
+                or not all(places.may_take_over(place, start, end) for place in inside)
+            )
+            if refused:
+                position = start + 1  # a match that starts inside this one may still fit
+                continue
+            for place in inside:
+                places.take_over(place)
+            finding = Finding(group.type, start, end, text[start:end], 1.0, "sweep")
+            group.findings.append(finding)
+            places.add(finding, group)
+            position = end

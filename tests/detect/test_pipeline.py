@@ -244,6 +244,77 @@ def test_a_date_the_model_took_for_a_person_stays(lists):
     assert [g.canonical for g in a.groups] == ["Jane Doe"]
 
 
+# --- The sweep takes over a shorter find it holds (ruling R35) -----------------------------------
+
+
+class FixedEngine:
+    """An engine that reports exactly the findings it was given, wherever they stand."""
+
+    def __init__(self, *found):
+        self.found = found
+
+    def analyze(self, text):
+        return [f for f in self.found if text[f.start : f.end] == f.text]
+
+
+FALCON = "Project Falcon starts now; Project Falcon ends later."
+
+
+def model_find(kind, needle, last=False, score=0.6):
+    start = FALCON.rindex(needle) if last else FALCON.index(needle)
+    return Finding(kind, start, start + len(needle), needle, score, "model")
+
+
+def test_one_code_name_found_two_ways_is_one_group(lists):
+    # The model finds "Falcon" inside the first "Project Falcon" and "Project Falcon" later on.
+    engine = FixedEngine(model_find(C, "Falcon"), model_find(C, "Project Falcon", last=True))
+    a = analyze(one(FALCON), engine, lists)
+    (g,) = a.groups
+    assert g.type == C and g.canonical == "Project Falcon" and g.placeholder == "[COMPANY_1]"
+    assert [(f.text, f.start) for f in g.findings] == [
+        ("Project Falcon", 0),
+        ("Project Falcon", FALCON.rindex("Project Falcon")),
+    ]
+    assert_one_replacement_each(a)
+
+
+def test_the_falcon_text_with_the_real_engine(engine, lists):
+    t = (
+        "Acme Supplies Ltd and Northwind Trading B.V. appoint John Smith. Project Falcon starts"
+        " now; Project Falcon ends later. Acme signs."
+    )
+    a = analyze(one(t), engine, lists)
+    falcons = [g for g in a.groups if "falcon" in normalize(g.canonical)]
+    (g,) = falcons
+    assert g.type == C and [f.text for f in g.findings] == ["Project Falcon", "Project Falcon"]
+    assert not any(f.text == "Falcon" for f in all_findings(a))
+    assert_one_replacement_each(a)
+
+
+def test_the_owners_always_hide_find_is_never_taken_over(lists):
+    lists.add_always("Falcon")
+    engine = FixedEngine(model_find(C, "Project Falcon", last=True))
+    a = analyze(one(FALCON), engine, lists)
+    by = {g.canonical: g for g in a.groups}
+    assert [(f.text, f.start) for f in by["Falcon"].findings] == [
+        ("Falcon", FALCON.index("Falcon"))
+    ]
+    assert by["Falcon"].placeholder == "[CUSTOM_1]" and by["Falcon"].findings[0].source == "list"
+    assert [f.start for f in by["Project Falcon"].findings] == [FALCON.rindex("Project Falcon")]
+    assert_one_replacement_each(a)
+
+
+def test_a_case_entry_is_never_taken_over(lists):
+    seed = [KeyEntry("[CUSTOM_4]", CUSTOM, "Falcon", [])]
+    engine = FixedEngine(model_find(C, "Project Falcon", last=True))
+    a = analyze(one(FALCON), engine, lists, seed_entries=seed)
+    by = {g.canonical: g for g in a.groups}
+    assert by["Falcon"].placeholder == "[CUSTOM_4]"
+    assert [f.start for f in by["Falcon"].findings] == [FALCON.index("Falcon")]
+    assert by["Project Falcon"].placeholder == "[COMPANY_1]"
+    assert_one_replacement_each(a)
+
+
 # --- The owner's always-hide lists ---------------------------------------------------------------
 
 
@@ -348,10 +419,16 @@ def test_numbering_per_type_in_order_of_first_appearance(lists):
     assert all(g.findings == sorted(g.findings, key=lambda f: f.start) for g in a.groups)
 
 
-def test_a_swept_occurrence_counts_as_the_first_appearance(lists):
+def test_a_short_form_swept_near_the_top_makes_that_value_number_1(lists):
+    # Ruling R34: the engine finds Northwind B.V. first, but the sweep finds "Acme" (of Acme
+    # Supplies Ltd) at the very top, so Acme is the first company the masked text shows.
     t = "Acme pays Jane Doe. Northwind B.V. and Acme Supplies Ltd sign."
     fake = FakeEngine((C, "Acme Supplies Ltd", 0.95, "rule"), (C, "Northwind B.V.", 0.95, "rule"))
     a = analyze(one(t), fake, lists)
+    first = a.groups[0]
+    assert first.canonical == "Acme Supplies Ltd" and first.placeholder == "[COMPANY_1]"
+    assert (first.findings[0].text, first.findings[0].start) == ("Acme", 0)
+    assert first.findings[0].source == "sweep"
     by = {g.canonical: g.placeholder for g in a.groups}
     assert by == {"Acme Supplies Ltd": "[COMPANY_1]", "Northwind B.V.": "[COMPANY_2]"}
 

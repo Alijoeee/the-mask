@@ -22,7 +22,9 @@ back to its file. ``analyze`` runs the whole analysis on it:
    lists and the case's key) come first, then the type in this order: IBAN, EMAIL, URL, PHONE,
    ID, AMOUNT, PERCENT, QUANTITY, PERSON, COMPANY, ADDRESS, CUSTOM; then the higher score.
 5. The findings are grouped (``grouping``) and every other occurrence of each group's variants
-   is swept in (``sweep``).
+   is swept in (``sweep``). An occurrence that holds a shorter finding takes it over ("Project
+   Falcon" over the model's "Falcon"), unless that finding is the owner's (an always-hide match,
+   the case's key); a group left with no findings is dropped.
 6. The groups are numbered per type in order of first appearance, counting what the sweep
    found, after any placeholder the text holds already and after the case's key.
 
@@ -170,8 +172,8 @@ def analyze(
     found += _seed_matches(text, seeds, placeholders)
 
     groups = group_findings(_one_per_place(found), text, seeds=seeds, keep=keep)
-    sweep(text, groups)
-    groups = [g for g in groups if g.findings]
+    sweep(text, groups, fixed=seeds)
+    groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
     groups.sort(key=lambda g: g.findings[0].start)

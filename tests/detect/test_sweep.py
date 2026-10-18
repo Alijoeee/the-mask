@@ -96,3 +96,96 @@ def test_sweep_twice_adds_nothing_and_keeps_the_order():
     assert g.findings == first
     assert first[0].text == "Acme Supplies Ltd"  # what was there stays where it was (index 0)
     assert sorted(f.start for f in first[1:]) == [0, txt.rindex("Acme")]
+
+
+# --- A longer occurrence takes over a shorter find it holds (ruling R35) -----------------------
+
+
+def L(t, needle, txt, last=False):
+    """A find of the owner's always-hide list."""
+    s = txt.rindex(needle) if last else txt.index(needle)
+    return Finding(t, s, s + len(needle), needle, 1.0, "list")
+
+
+def test_a_longer_occurrence_takes_over_a_shorter_find():
+    txt = "Project Falcon starts now; Project Falcon ends later."
+    whole = G(C, ["Project Falcon"], F(C, "Project Falcon", txt, last=True, score=0.6))
+    part = G(C, ["Falcon"], F(C, "Falcon", txt, score=0.6))
+    sweep(txt, [whole, part])
+    assert sorted(f.start for f in whole.findings) == [0, txt.rindex("Project Falcon")]
+    assert part.findings == []  # left with nothing: the caller drops the group
+
+
+def test_a_group_takes_over_its_own_shorter_find():
+    txt = "Acme Supplies Ltd signs."
+    g = G(C, ["Acme Supplies Ltd", "Acme"], F(C, "Acme", txt))
+    sweep(txt, [g])
+    assert texts(g) == ["Acme Supplies Ltd"]
+
+
+def test_every_find_inside_is_taken_over_at_once():
+    txt = "Carter Logistics Ltd signs; Carter Logistics Ltd pays."
+    company = G(C, ["Carter Logistics Ltd"], F(C, "Carter Logistics Ltd", txt, last=True))
+    person = G(P, ["Carter"], F(P, "Carter", txt))
+    rest = G(C, ["Logistics Ltd"], F(C, "Logistics Ltd", txt))
+    sweep(txt, [company, person, rest])
+    assert [f.start for f in sorted(company.findings, key=lambda f: f.start)] == [0, 28]
+    assert person.findings == [] and rest.findings == []
+
+
+def test_the_owners_list_is_never_taken_over():
+    txt = "Project Falcon starts now; Project Falcon ends later."
+    whole = G(C, ["Project Falcon"], F(C, "Project Falcon", txt, last=True, score=0.6))
+    listed = G(PlaceholderType.CUSTOM, ["Falcon"], L(PlaceholderType.CUSTOM, "Falcon", txt))
+    sweep(txt, [whole, listed])
+    assert texts(whole) == ["Project Falcon"] and whole.findings[0].start > 0
+    assert texts(listed) == ["Falcon"] and listed.findings[0].source == "list"
+
+
+def test_a_fixed_group_is_never_taken_over():
+    txt = "Project Falcon starts now; Project Falcon ends later."
+    whole = G(C, ["Project Falcon"], F(C, "Project Falcon", txt, last=True, score=0.6))
+    seeded = G(PlaceholderType.CUSTOM, ["Falcon"], F(PlaceholderType.CUSTOM, "Falcon", txt))
+    sweep(txt, [whole, seeded], fixed=[seeded])
+    assert texts(whole) == ["Project Falcon"] and texts(seeded) == ["Falcon"]
+
+
+def test_what_the_owner_switched_off_is_never_taken_over():
+    txt = "Project Falcon starts; Project Falcon ends; Project Falcon again."
+    first = txt.index("Falcon")
+    second = txt.index("Falcon", first + 1)
+    whole = G(C, ["Project Falcon"], F(C, "Project Falcon", txt, last=True))
+    occurrence_off = G(C, ["Falcon"], Finding(C, first, first + 6, "Falcon", 0.6, "model"))
+    occurrence_off.disabled = {0}
+    group_off = G(P, ["Falcon"], Finding(P, second, second + 6, "Falcon", 0.9, "model"))
+    group_off.enabled = False
+    sweep(txt, [whole, occurrence_off, group_off])
+    assert texts(whole) == ["Project Falcon"] and whole.findings[0].start == txt.rindex("Project")
+    assert texts(occurrence_off) == ["Falcon"] and occurrence_off.disabled == {0}
+    assert texts(group_off) == ["Falcon"]
+
+
+def test_equal_or_partial_overlaps_keep_the_find_in_place():
+    txt = "ACME LTD signs. Acme Ltd pays. Project Falcon starts."
+    same = G(C, ["Acme Ltd"], F(C, "Acme Ltd", txt))
+    other = G(C, ["ACME LTD"], F(C, "ACME LTD", txt))
+    partial = G(C, ["Falcon starts"], F(C, "Falcon starts", txt))
+    whole = G(C, ["Project Falcon"])
+    sweep(txt, [same, other, partial, whole])
+    assert texts(other) == ["ACME LTD"] and texts(same) == ["Acme Ltd"]
+    assert texts(partial) == ["Falcon starts"] and whole.findings == []
+
+
+def test_taking_over_keeps_the_switched_off_indexes_right():
+    txt = "Falcon one. Project Falcon two. Falcon three."
+    whole = G(C, ["Project Falcon"])
+    part = G(C, ["Falcon"])
+    part.findings = [
+        Finding(C, 0, 6, "Falcon", 0.6, "model"),
+        Finding(C, 20, 26, "Falcon", 0.6, "model"),
+        Finding(C, 32, 38, "Falcon", 0.6, "model"),
+    ]
+    part.disabled = {2}
+    sweep(txt, [whole, part])
+    assert [f.start for f in part.findings] == [0, 32] and part.disabled == {1}
+    assert [f.start for f in whole.findings] == [12]
