@@ -2,10 +2,10 @@
 
     uv run python -m tools.make_corpus [out_dir]
 
-writes 20 contracts and the annexes three of them come with, a ``.truth.json`` beside each Word
-file listing every secret in it, and ``manifest.json`` listing the files and their features
-(default folder: ``tests/corpus/generated/``, which git ignores). The same files come out every
-time. ``tests/corpus/README.md`` describes the corpus; the tests get it from the ``corpus``
+writes 25 contracts and the annexes three of them come with (28 Word files), a ``.truth.json``
+beside each Word file listing every secret in it, and ``manifest.json`` listing the files and their
+features (default folder: ``tests/corpus/generated/``, which git ignores). The same files come out
+every time. ``tests/corpus/README.md`` describes the corpus; the tests get it from the ``corpus``
 fixture.
 """
 

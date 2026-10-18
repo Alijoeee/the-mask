@@ -27,10 +27,11 @@ A truth file is a JSON list of `{"type", "value", "variants"}`, `type` being a p
 (`PERSON`, `COMPANY`, `AMOUNT`, ...). `value` is the fullest form and `variants` the other forms
 the document uses ("Northwind", "Mr Smith", "J. Smith", an IBAN without spaces), each written
 exactly as in the document; the file is plain ASCII, so a no-break space in a number shows as
-` `. Two flags appear only when true: `"only_in_deletion"` (the value is only in tracked-deleted
+`\u00a0`. Two flags appear only when true: `"only_in_deletion"` (the value is only in tracked-deleted
 text) and `"hidden"` (only in hidden text). Dates, durations ("30 days"), clause numbers,
 governing law ("England and Wales"), defined terms and bare currency codes are never secrets.
-"Project Falcon" in `supply-08` is listed as `CUSTOM`.
+"Project Falcon" in `supply-08` is not a truth item: it is plain text, the term later tests
+add by hand as one the owner always hides.
 
 ## Features
 

@@ -2,9 +2,10 @@
 
 Every company name here is invented. Web and e-mail domains end in ``.example``, which is reserved
 for examples and never belongs to anyone. UK telephone numbers come from Ofcom's ranges set aside
-for drama; other numbers are random but valid in form. VAT numbers pass the check digits of
-``stdnum.eu.vat`` (checked by the tests); IBANs are built by ``schwifty`` for real bank codes so that
-their check digits and BICs are right, with random account numbers.
+for drama; other numbers are random but valid in form. VAT numbers pass ``stdnum.eu.vat``; IBANs
+are built by ``schwifty`` for real bank codes, so their check digits and BICs are right, with
+random account numbers. ``test_numbers_pass_their_own_checks`` checks the IBANs, BICs, VAT and
+telephone numbers of every truth file with these same libraries.
 """
 
 from __future__ import annotations

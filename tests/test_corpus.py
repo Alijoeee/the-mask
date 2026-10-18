@@ -18,7 +18,10 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
+import phonenumbers
 from lxml import etree
+from schwifty import BIC, IBAN
+from stdnum.eu import vat
 
 from themask.placeholders import find_placeholders
 from themask.textnorm import flexible_pattern, normalize
@@ -362,11 +365,43 @@ def test_truth_items_are_well_formed(corpus: Path) -> None:
         seen = set()
         for t in truth_of(corpus, doc["file"]):
             assert set(t) <= {"type", "value", "variants", "only_in_deletion", "hidden"}, t
-            assert t["type"] in ALL_TYPES | {"CUSTOM"} and t["value"].strip() == t["value"], t
+            assert t["type"] in ALL_TYPES and t["value"].strip() == t["value"], t
             assert t.get("only_in_deletion", True) is True and t.get("hidden", True) is True, t
             assert t["value"] not in t["variants"] and len(set(t["variants"])) == len(t["variants"])
             assert (t["type"], t["value"]) not in seen, t
             seen.add((t["type"], t["value"]))
+
+
+_BIC_SHAPE = re.compile(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?")
+
+
+def test_numbers_pass_their_own_checks(corpus: Path) -> None:
+    """IBANs, BICs, VAT and telephone numbers are valid, by the libraries that check them."""
+    checked: Counter[str] = Counter()
+    for p in corpus.glob("*.truth.json"):
+        truth = json.loads(p.read_text(encoding="utf-8"))
+        ibans = [IBAN(t["value"]) for t in truth if t["type"] == "IBAN"]  # raises if not valid
+        banks = {str(iban.bic).removesuffix("XXX") for iban in ibans}
+        for t in truth:
+            value, variants = t["value"], t["variants"]
+            if t["type"] == "IBAN":
+                assert all(IBAN(v).compact == IBAN(value).compact for v in variants), t
+                checked["IBAN"] += 1
+            elif t["type"] == "ID" and _BIC_SHAPE.fullmatch(value):
+                assert str(BIC(value)) == value and value in banks, (p.name, value)  # the IBAN's
+                checked["BIC"] += 1
+            elif (
+                t["type"] == "ID" and value[:2].lower() in vat.MEMBER_STATES and value[2].isdigit()
+            ):
+                assert vat.is_valid(value), (p.name, value)
+                checked["VAT"] += 1
+            elif t["type"] == "PHONE":
+                number = phonenumbers.parse(value, None)
+                region = phonenumbers.region_code_for_number(number)
+                assert phonenumbers.is_valid_number(number), (p.name, value)
+                assert all(phonenumbers.parse(v, region) == number for v in variants), t
+                checked["PHONE"] += 1
+    assert min(checked[kind] for kind in ("IBAN", "BIC", "VAT", "PHONE")) > 0, checked
 
 
 def test_truth_files_are_ascii(corpus: Path) -> None:
@@ -546,8 +581,11 @@ def test_supply_06_acme_in_header_footer_and_footnotes(corpus: Path) -> None:
 
 
 def test_supply_08_project_falcon_twice(corpus: Path) -> None:
+    # Plain text, not a secret of the truth: later tasks hide it by hand as a user-added term.
     path = corpus / "supply-08.docx"
     assert "\n".join(p.visible for p in paras(path)).count("Project Falcon") == 2
+    truth = truth_of(corpus, "supply-08.docx")
+    assert not any("Falcon" in form for t in truth for form in [t["value"], *t["variants"]])
 
 
 def test_services_01_first_email_is_a_mailto_link(corpus: Path) -> None:
