@@ -2,7 +2,7 @@
 
 import uuid
 
-from themask.detect.sweep import sweep
+from themask.detect.sweep import is_bare_name, stands_as_a_name, sweep
 from themask.model import Finding, Group, PlaceholderType
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
@@ -213,3 +213,42 @@ def test_a_word_is_whole_in_any_script():
     sweep(txt, [gul, smith])
     assert [f.start for f in gul.findings] == [txt.index("Gül ")]
     assert [f.start for f in smith.findings] == [txt.rindex("Smith")]
+
+
+# --- Ruling R50: a person's bare name is swept only where it stands as a name -----------------
+
+
+def test_a_persons_bare_name_is_swept_only_as_a_name():
+    txt = "Mill shall attend. The Mill is old; a Mill too; the mill-race; MILL signs."
+    person = G(P, ["Laura Mill", "Mill"])
+    sweep(txt, [person])
+    assert [f.start for f in person.findings] == [0, txt.index("MILL")]
+
+
+def test_other_variants_are_swept_wherever_they_stand():
+    txt = "Mill shall attend. The Mill is old."
+    company = G(C, ["Mill"])
+    sweep(txt, [company])
+    assert len(company.findings) == 2
+
+
+def test_what_is_a_bare_name():
+    assert is_bare_name(P, "Smith") and is_bare_name(P, "van der Berg")
+    assert not is_bare_name(P, "Mr Smith") and not is_bare_name(P, "John Smith")
+    assert not is_bare_name(C, "Acme")
+
+
+def test_what_stands_as_a_name():
+    txt = "Smith signs; the Smith file; such Smith; an Ali; smith; Van der Berg; van der Berg."
+    for needle, expected in [
+        ("Smith signs", True),
+        ("Smith file", False),
+        ("Smith;", False),
+        ("Ali", False),
+        ("smith", False),
+        ("Van der Berg", True),
+        ("van der Berg.", True),
+    ]:
+        start = txt.index(needle)
+        word = needle.rstrip(";. ").replace(" signs", "").replace(" file", "")
+        assert stands_as_a_name(txt, start, start + len(word)) is expected, needle

@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from themask.detect.grouping import group_findings
+from themask.detect.grouping import SurnamePolicy, group_findings
 from themask.model import Finding, Group, PlaceholderType
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
@@ -97,6 +97,42 @@ def test_a_defined_surname_two_people_share_is_checked():
     gs = by_canonical(group_findings(fs, txt, aliases={"Smith"}))
     assert "Smith" not in gs["John Smith"].variants | gs["Jane Smith"].variants
     assert gs["Smith"].needs_check and len(gs["Smith"].findings) == 2
+
+
+SURNAMES = SurnamePolicy(
+    allowed=lambda form: form != "Never", only_one=lambda form: form == "Price"
+)
+
+
+def test_a_bare_surname_is_its_persons_variant():
+    # Ruling R50: the last word, and for a name with particles all that follows the first name.
+    txt = "Jane van der Berg and Katie Price sign."
+    fs = [F(P, "Jane van der Berg", txt), F(P, "Katie Price", txt)]
+    gs = by_canonical(group_findings(fs, txt, surnames=SURNAMES))
+    assert {"Berg", "van der Berg"} <= gs["Jane van der Berg"].variants
+    assert "Price" in gs["Katie Price"].variants
+    assert "Berg" not in by_canonical(group_findings(fs, txt))["Jane van der Berg"].variants
+
+
+def test_a_bare_surname_is_never_one_the_policy_refuses():
+    txt = "Tom Never signs."
+    (g,) = group_findings([F(P, "Tom Never", txt)], txt, surnames=SURNAMES)
+    assert "Never" not in g.variants
+
+
+def test_a_default_word_two_people_end_with_belongs_to_no_one():
+    txt = "Katie Price and Tom Price sign. Price attends."
+    fs = [F(P, "Katie Price", txt), F(P, "Tom Price", txt)]
+    gs = group_findings(fs, txt, surnames=SURNAMES)
+    assert len(gs) == 2 and all("Price" not in g.variants for g in gs)
+
+
+def test_a_surname_two_people_share_is_checked_where_it_stands_as_a_name():
+    txt = "John Smith and Jane Smith sign. Smith attends; the Smith file stays."
+    fs = [F(P, "John Smith", txt), F(P, "Jane Smith", txt)]
+    gs = by_canonical(group_findings(fs, txt, surnames=SURNAMES))
+    (found,) = gs["Smith"].findings
+    assert found.start == txt.index("Smith attends") and gs["Smith"].needs_check
 
 
 def test_a_shared_short_form_in_the_text_gets_a_group_of_its_own():

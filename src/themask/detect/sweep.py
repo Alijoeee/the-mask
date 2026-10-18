@@ -4,7 +4,9 @@
 value (ignoring case, however it is spaced), and adds each occurrence that nothing covers yet to
 its group as a finding with source "sweep" and score 1.0. Longer variants go first, across all
 groups, so "Acme Supplies" is found whole before "Acme" is looked for. A group the owner switched
-off sweeps nothing.
+off sweeps nothing. A person's bare name ("Smith", "van der Berg") is swept only where it stands
+as a name: capitalised, and not after a determiner, so "the Mill" and "the Price" stay as they
+are (ruling R50); the leak check must look for such a variant the same way.
 
 An occurrence that holds shorter findings with room to spare takes them over (ruling R35): they
 leave their groups and the whole occurrence joins the sweeping group, so "Project Falcon" swept
@@ -24,13 +26,14 @@ not searched for at all: it would be found all over the text.
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_left, bisect_right, insort
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
-from themask.model import Finding, FindingSource, Group
+from themask.model import Finding, FindingSource, Group, PlaceholderType
 from themask.placeholders import PlaceholderMatch, find_placeholders
-from themask.textnorm import flexible_pattern, normalize
+from themask.textnorm import HONORIFICS, NAME_PARTICLES, flexible_pattern, normalize
 
 # A variant needs at least this many letters or digits, once normalised, to be searched for.
 MIN_VARIANT_LENGTH = 2
@@ -40,6 +43,42 @@ OWNER_SOURCES: frozenset[FindingSource] = frozenset({"list", "user"})
 
 # The characters that end a line or a paragraph: no finding may hold one.
 LINE_BREAKS = frozenset("\n\r\f\v\x1c\x1d\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}")
+
+
+# A word one of these stands before is a word, not a person's name: "the Price", "a Mill".
+DETERMINERS = frozenset({"the", "such", "this", "that", "any", "each", "no", "a", "an"})
+
+_HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
+_LETTERS = re.compile(r"[^\W\d_]+")
+
+
+def is_bare_name(kind: PlaceholderType, variant: str) -> bool:
+    """Whether ``variant`` of a group of type ``kind`` is a person's bare name: one word ("Smith",
+    "Price") or a surname with its particles ("van der Berg"), with no honorific (ruling R50).
+    """
+    words = variant.split()
+    if kind is not PlaceholderType.PERSON or not words or normalize(words[0]) in _HONORIFIC_KEYS:
+        return False
+    return len(words) == 1 or words[0].casefold() in NAME_PARTICLES
+
+
+def after_a_determiner(text: str, start: int) -> bool:
+    """Whether the word before ``start``, on its line, is one of the ``DETERMINERS``; the
+    particles of a surname do not count, so "Berg" of "the van der Berg file" follows "the".
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    words = _LETTERS.findall(text, max(line_start, start - 60), start)
+    while words and words[-1].casefold() in NAME_PARTICLES:
+        words.pop()
+    return bool(words) and words[-1].casefold() in DETERMINERS
+
+
+def stands_as_a_name(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]``, a person's bare name, stands there as a name (ruling R50):
+    capitalised (its particles aside: "van der Berg"), and not after a determiner ("the Mill").
+    """
+    words = [word for word in text[start:end].split() if word.casefold() not in NAME_PARTICLES]
+    return all(word[:1].isupper() for word in words) and not after_a_determiner(text, start)
 
 
 def existing_placeholders(text: str) -> list[PlaceholderMatch]:
@@ -83,9 +122,12 @@ class Spans:
         insort(self._spans, (start, end))
 
 
-def occurrences(text: str, variant: str, taken: Spans) -> list[tuple[int, int]]:
+def occurrences(
+    text: str, variant: str, taken: Spans, *, as_a_name: bool = False
+) -> list[tuple[int, int]]:
     """Where ``variant`` stands in ``text`` within one line and outside the ``taken`` stretches,
-    in text order; each occurrence found is taken too.
+    in text order; each occurrence found is taken too. With ``as_a_name``, only where it stands
+    as a name (``stands_as_a_name``).
 
     A match that is refused does not hide one that starts inside it: the search goes on from the
     character after the refused match's start.
@@ -95,7 +137,8 @@ def occurrences(text: str, variant: str, taken: Spans) -> list[tuple[int, int]]:
     position = 0
     while (match := pattern.search(text, position)) is not None:
         start, end = match.span()
-        if start == end or crosses_a_line(text, start, end) or taken.overlaps(start, end):
+        refused = start == end or crosses_a_line(text, start, end) or taken.overlaps(start, end)
+        if refused or (as_a_name and not stands_as_a_name(text, start, end)):
             position = start + 1
             continue
         taken.add(start, end)
@@ -203,6 +246,7 @@ def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None
     )
     for variant, index in variants:
         group = groups[index]
+        as_a_name = is_bare_name(group.type, variant)
         pattern = flexible_pattern(variant)
         position = 0
         while (match := pattern.search(text, position)) is not None:
@@ -212,6 +256,7 @@ def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
+                or (as_a_name and not stands_as_a_name(text, start, end))
                 or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
             if refused:

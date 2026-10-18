@@ -116,6 +116,13 @@ HONORIFICS: tuple[str, ...] = (
     "Frau",
 )
 
+# The small words a surname may start with: "van der Berg", "de la Cruz", "von Bülow". Compare
+# ignoring case.
+NAME_PARTICLES: frozenset[str] = frozenset(
+    {"van", "der", "den", "de", "del", "della", "di", "da", "du", "la", "le", "von", "zu"}
+    | {"ter", "ten", "bin", "al", "el", "y"}
+)
+
 # --------------------------------------------------------------------------------------------
 # normalize
 # --------------------------------------------------------------------------------------------

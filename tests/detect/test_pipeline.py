@@ -402,7 +402,7 @@ def test_a_surname_that_is_a_default_term_stays_hidden(lists, t, full, word):
     (g,) = a.groups
     assert g.canonical == full and [f.text for f in g.findings] == [full, word]
     assert g.needs_check
-    assert word not in g.variants  # the word itself is never swept through the document
+    assert word in g.variants  # ruling R50: swept, but only where it stands as a name
 
 
 def test_a_default_term_after_a_determiner_stays_visible(lists):
@@ -426,6 +426,92 @@ def test_a_default_term_with_an_honorific_is_flagged(engine, lists):
     a = analyze(one("Katie Price signs for the Supplier. Ms Price shall attend."), engine, lists)
     (g,) = a.groups
     assert [f.text for f in g.findings] == ["Katie Price", "Ms Price"] and g.needs_check
+
+
+# --- Ruling R50: a person's bare surname is swept where it stands as a name (real engine) ---------
+
+LAURA_MILL = (
+    'Laura Mill manages the old factory (the "Mill"). The Mill shall be maintained by the'
+    " Supplier. Mill shall attend every inspection."
+)
+LAURA_MILL_MASKED = (
+    '[PERSON_1] manages the old factory (the "Mill"). The Mill shall be maintained by the'
+    " Supplier. [PERSON_1] shall attend every inspection."
+)
+
+
+@pytest.mark.parametrize(
+    "t,expected,flagged",
+    [
+        (
+            "Katie Price signs for the Supplier. Price shall attend.",
+            "[PERSON_1] signs for the Supplier. [PERSON_1] shall attend.",
+            True,  # "Price" is a default never-hide word
+        ),
+        (
+            "Jo Banks signs for the Buyer. Banks shall be notified.",
+            "[PERSON_1] signs for the Buyer. [PERSON_1] shall be notified.",
+            True,
+        ),
+        (
+            "Katie Smith signs. Smith shall attend.",
+            "[PERSON_1] signs. [PERSON_1] shall attend.",
+            False,
+        ),
+        (
+            "Katie Price signs for the Supplier. The Price shall be paid.",
+            "[PERSON_1] signs for the Supplier. The Price shall be paid.",
+            False,  # after a determiner the word is the price
+        ),
+        (LAURA_MILL, LAURA_MILL_MASKED, True),  # "Mill" is a term the document defines
+        (
+            "Jane van der Berg signs for the Supplier; van der Berg shall report monthly.",
+            "[PERSON_1] signs for the Supplier; [PERSON_1] shall report monthly.",
+            False,
+        ),
+    ],
+)
+def test_a_persons_bare_surname_is_hidden_where_it_names_them(engine, lists, t, expected, flagged):
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == expected
+    (person,) = [g for g in a.groups if g.type == P]
+    assert person.needs_check == flagged
+
+
+def test_the_owners_never_hide_list_keeps_a_surname_visible(engine, lists):
+    lists.add_never("Price")
+    a = analyze(one("Katie Price signs for the Supplier. Price shall attend."), engine, lists)
+    assert masked(a) == "[PERSON_1] signs for the Supplier. Price shall attend."
+
+
+def test_a_surname_two_people_share_is_a_group_to_check(engine, lists):
+    t = "John Smith and Jane Smith sign for the Buyer. Smith shall attend."
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "[PERSON_1] and [PERSON_2] sign for the Buyer. [PERSON_3] shall attend."
+    assert [g.needs_check for g in a.groups] == [False, False, True]
+
+
+def test_a_default_word_two_people_share_stays_visible(engine, lists):
+    # Ruling R42's attribution: a default never-hide word only for one person alone.
+    t = "Katie Price and Tom Price sign for the Buyer. Price shall attend."
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "[PERSON_1] and [PERSON_2] sign for the Buyer. Price shall attend."
+
+
+def test_a_surname_with_particles_is_swept_as_a_name(lists):
+    # The model finds a bare "van der Berg" on its own; this stub does not, so the sweep must.
+    t = "Jane van der Berg signs; van der Berg shall report; the van der Berg file is closed."
+    a = analyze(one(t), FixedEngine(person_at(t, "Jane van der Berg")), lists)
+    assert (
+        masked(a) == "[PERSON_1] signs; [PERSON_1] shall report; the van der Berg file is closed."
+    )
+
+
+def test_a_case_entrys_bare_surname_stays_a_name(lists):
+    seed = [KeyEntry("[PERSON_4]", P, "Katie Price", ["Price"])]
+    t = "Price shall attend; the Price is fixed."
+    a = analyze(one(t), FakeEngine(), lists, seed_entries=seed)
+    assert masked(a) == "[PERSON_4] shall attend; the Price is fixed."
 
 
 def test_a_rule_name_with_its_legal_form_keeps_its_end(engine, lists):

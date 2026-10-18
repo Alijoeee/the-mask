@@ -24,7 +24,12 @@ back to its file. ``analyze`` runs the whole analysis on it:
 5. The findings are grouped (``grouping``) and every other occurrence of each group's variants
    is swept in (``sweep``). An occurrence that holds a shorter finding takes it over ("Project
    Falcon" over the model's "Falcon"), unless that finding is the owner's (an always-hide match,
-   the case's key); a group left with no findings is dropped.
+   the case's key); a group left with no findings is dropped. A person's bare surname ("Smith"
+   of Katie Smith, "van der Berg") is one of the person's variants, swept only where it stands
+   as a name: capitalised and not after a determiner (ruling R50). A surname that is also an
+   ordinary word of the contract ("Price", "Mill" defined as a term, a COMMON_WORDS word) marks
+   the group for checking where it is swept, and a default never-hide word is swept only when
+   one person found alone ends with it; the owner's never-hide list always wins.
 6. The groups are numbered per type in order of first appearance, counting what the sweep
    found, after any placeholder the text holds already and after the case's key.
 
@@ -35,7 +40,6 @@ does not occur in the new text is left out of the result (the case's key keeps i
 
 from __future__ import annotations
 
-import re
 import uuid
 from bisect import bisect_right
 from collections import defaultdict
@@ -44,7 +48,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
-from themask.detect.grouping import PersonName, group_findings
+from themask.detect.grouping import PersonName, SurnamePolicy, group_findings
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -52,18 +56,22 @@ from themask.detect.lists import (
     is_default_term,
     never_hide_check,
     on_never_hide_list,
+    term_key,
 )
 from themask.detect.sweep import (
     LINE_BREAKS,
     Spans,
+    after_a_determiner,
     existing_placeholders,
+    is_bare_name,
     is_searchable,
     occurrences,
+    stands_as_a_name,
     sweep,
 )
 from themask.model import Analysis, Finding, Group, KeyEntry, PlaceholderType
 from themask.placeholders import PLACEHOLDER_RE, PlaceholderMatch, format_placeholder
-from themask.textnorm import has_legal_form, normalize, strip_legal_form, variants_of
+from themask.textnorm import COMMON_WORDS, has_legal_form, normalize, strip_legal_form, variants_of
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
@@ -100,8 +108,7 @@ _OWNERS = frozenset({"list", "sweep"})
 SCORE_MARGIN = 0.1
 # A contract rule's name with its legal form, at least this sure, keeps its end (ruling R45).
 RULE_NAME_SCORE = 0.9
-# A default never-hide word after one of these is the word, not a person's surname (ruling R42).
-_DETERMINERS = frozenset({"the", "such", "this", "that", "any", "each", "no"})
+_COMMON_WORDS = frozenset(word.casefold() for word in COMMON_WORDS)
 
 # What may stand at the edge of a finding without being part of the value: spaces, quotes, an
 # ellipsis, list and sentence marks. A full stop stays ("B.V.", "Inc."), and so does a bracket
@@ -180,27 +187,44 @@ def analyze(
         return is_searchable(form) and not never_hidden(form) and not common
 
     surnames = _surnames_kept(found, text, user_lists, case)
+    defined = {term_key(term) for term in case.defined_terms}
     found = [
         f
         for f in found
-        if (f.start, f.end) in surnames or not (never_hidden(f.text) or _names_nobody(f))
+        if (f.start, f.end) in surnames
+        or not (never_hidden(f.text) or _names_nobody(f) or _term_not_a_name(f, text, defined))
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
     _keep_shared_variants_out(seeds)
     found += _seed_matches(text, seeds, placeholders)
 
+    policy = SurnamePolicy(
+        allowed=lambda form: not on_never_hide_list(form, user_lists, case),
+        only_one=is_default_term,
+    )
     groups = group_findings(
-        _one_per_place(found), text, seeds=seeds, keep=keep, aliases=case.defined_terms
+        _one_per_place(found),
+        text,
+        seeds=seeds,
+        keep=keep,
+        aliases=case.defined_terms,
+        surnames=policy,
     )
     for group in groups:
-        # A never-hide word kept at one place as a surname (ruling R42) is not swept elsewhere.
-        group.variants = {v for v in group.variants if not never_hidden(v)}
+        # No never-hide word is swept, but a person's bare name, which the sweep takes only
+        # where it stands as a name (rulings R42, R50).
+        group.variants = {
+            v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
+        }
     sweep(text, groups, fixed=seeds)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
-        if any((f.start, f.end) in surnames for f in group.findings):
+        if any((f.start, f.end) in surnames for f in group.findings) or any(
+            f.source == "sweep" and is_bare_name(group.type, f.text) and _ordinary(f.text, defined)
+            for f in group.findings
+        ):
             group.needs_check = True
     groups.sort(key=lambda g: g.findings[0].start)
     _number(groups, seed_entries or [], placeholders)
@@ -310,6 +334,33 @@ def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bo
     return names
 
 
+def _term_not_a_name(finding: Finding, text: str, defined: set[str]) -> bool:
+    """Whether ``finding`` is a person's bare name that is a term the document defines but does
+    not stand there as a name: "the Mill" stays the term although Laura Mill shares the word
+    (ruling R50: names beat terms only where the word stands as a name).
+    """
+    return (
+        is_bare_name(finding.type, finding.text)
+        and term_key(finding.text) in defined
+        and not stands_as_a_name(text, finding.start, finding.end)
+    )
+
+
+def _ordinary(word: str, defined: set[str]) -> bool:
+    """Whether a person's bare name is also an ordinary word of the contract: a default
+    never-hide word, one of COMMON_WORDS, a term the document defines (``defined``, as term
+    keys), or a single word of the contract's own. Swept as a name, it marks its group for
+    checking (ruling R50).
+    """
+    single_contract_word = len(word.split()) == 1 and is_contract_wording(word)
+    return (
+        is_default_term(word)
+        or word.casefold() in _COMMON_WORDS
+        or term_key(word) in defined
+        or single_contract_word
+    )
+
+
 def _surnames_kept(
     found: list[Finding], text: str, user: UserLists, case: CaseLists
 ) -> set[tuple[int, int]]:
@@ -336,20 +387,10 @@ def _surnames_kept(
             and not on_never_hide_list(word, user, case)
             and not on_never_hide_list(finding.text, user, case)
             and len(full_names.get(person.last, ())) == 1
-            and not _after_a_determiner(text, finding.start)
+            and not after_a_determiner(text, finding.start)
         ):
             spans.add((finding.start, finding.end))
     return spans
-
-
-_WORD = re.compile(r"[^\W\d_]+")
-
-
-def _after_a_determiner(text: str, start: int) -> bool:
-    """Whether the word before ``start``, on its line, is a determiner ("the", "no" ...)."""
-    line_start = text.rfind("\n", 0, start) + 1
-    words = _WORD.findall(text, max(line_start, start - 40), start)
-    return bool(words) and words[-1].casefold() in _DETERMINERS
 
 
 # --- The case's key -------------------------------------------------------------------------
@@ -382,7 +423,8 @@ def _seed_matches(
     )
     found = []
     for variant, seed in variants:
-        for start, end in occurrences(text, variant, taken):
+        as_a_name = is_bare_name(seed.type, variant)
+        for start, end in occurrences(text, variant, taken, as_a_name=as_a_name):
             found.append(Finding(seed.type, start, end, text[start:end], 1.0, "sweep"))
     return found
 
