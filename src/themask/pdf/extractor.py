@@ -22,9 +22,10 @@ Nothing else of the PDF is read: not its properties, annotations, form fields or
 report's notes say, page by page, where unreadable characters or rotated text were left out.
 
 Pages left out. A page whose text is mostly glyph codes has no real text, and is left out. So is a
-page with a picture whose text, once the running headers and footers (below) are taken out, all
-lies in its top and bottom bands: a scanned page, whatever is stamped on it (page or Bates
-numbers). Both are listed in the report as image-only pages. A PDF in which no page keeps
+page that has nothing left to read once the running headers and footers (below) are taken out,
+but a picture; and a page whose pictures cover at least half of it and whose text then all lies in
+its top and bottom bands: a scanned page, whatever is stamped on it (page or Bates numbers). Both
+are listed in the report as image-only pages. A PDF in which no page keeps
 anything to read is refused with ``ScannedPdfError``. A PDF that cannot be opened is refused
 too: with ``ProtectedFileError`` when it asks for a password (or is encrypted in a way pdfminer
 cannot undo), and with ``UnsupportedFileError`` when it is not a PDF or is damaged or cut short.
@@ -47,13 +48,16 @@ supported.
 
 Running headers and footers: a line in the top or bottom 12 % of its page whose text, normalised,
 is found there on at least 60 % of the pages with text, and on two pages or more, is a running
-line. A line shaped like a heading (bold, or larger than the page's text) is compared whole, so
-that "SCHEDULE 1" and "SCHEDULE 2" stay two lines while a running title in bold repeats. Any
-other line is compared without its digits when it numbers its page: when it has the word "page"
+line. Each line is counted by its whole text and, when it numbers its page, also by that text
+without its digits, and it is a running line when either repeats: when it has the word "page"
 ("Page 3 of 24"), is a number of one to four digits (a bare "3"), or holds the page's own number
-on its own ("Pagina 3 van 24" or "Supply Agreement – 3" on page 3). The first occurrence of a
-running line is kept, among the first blocks of the document, and all the others are removed:
-the first ``len(report.repeated_lines_removed)`` blocks are the running lines, one each.
+on its own ("Pagina 3 van 24" or "Supply Agreement – 3" on page 3). So "Supply Agreement dated
+1 March 2026", which holds the number of page 1, still repeats whole. A line shaped like a
+heading (bold, or larger than the page's text) is counted by its whole text only, so that
+"SCHEDULE 1" and "SCHEDULE 2" stay two lines while a running title in bold repeats. The first
+occurrence of a running line is kept, among the first blocks of the document, and all the others
+are removed: the first ``len(report.repeated_lines_removed)`` blocks are the running lines, one
+each.
 """
 
 from __future__ import annotations
@@ -106,6 +110,7 @@ _OPTIONAL = "OC"  # the marked-content tag of optional content
 _OFF = LIT("OFF")
 _LAYER, _MEMBERSHIP = LIT("OCG"), LIT("OCMD")
 _CELL_BAND = 10.0  # points: table cells are looked up by bands of the page this high
+_SCAN_COVER = 0.5  # pictures covering this share of a page, or more, make it a scanned page
 # What a Word file cannot hold: control characters but tab, line feed and carriage return; lone
 # surrogates; U+FFFE and U+FFFF.
 _NOT_IN_WORD = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
@@ -191,6 +196,7 @@ class _Page:
     text_size: float  # the median size of the characters read outside tables
     items: list[_Line | _Table]  # in reading order
     pictures: bool  # it shows a picture
+    scan: bool  # its pictures cover at least half of it
     codes: bool  # its text is mostly glyph codes: it has no real text
     notes: list[str]  # what else was left out of it, in plain words
     layers: set[str]  # the hidden layers whose text was left out of it
@@ -217,7 +223,7 @@ def extract_blocks(pdf: Path) -> tuple[list[Block], PdfReport]:
         raise _refusal(error) from error
     running = _take_running_lines([page for page in pages if page.items])
     for page in pages:
-        if page.pictures and all(_stamped(item, page) for item in page.items):
+        if page.scan and all(_stamped(item, page) for item in page.items):
             page.items = []  # a scanned page: what is stamped on it is no content
     if not any(page.items for page in pages):
         raise ScannedPdfError(SCANNED_PDF_MESSAGE)
@@ -262,16 +268,18 @@ def _read(page: Page, off: dict[int, str]) -> _Page:
     """
     chars = page.chars
     hidden, layers = _hidden_chars(page, off) if off else (set(), set())
-    left_out = hidden | _copies(chars)
+    # A copy of a hidden character is no copy: the hidden one is not read, so this one stays.
+    left_out = hidden | _copies([char for char in chars if id(char) not in hidden])
     rotated = sum(1 for char in chars if id(char) not in left_out and not _level(char))
     shown = page.filter(_shown(left_out))
     pictures = bool(shown.images)
+    scan = _covered(shown.images, page.bbox) >= _SCAN_COVER
     codes = sum(1 for char in shown.chars if _GLYPH_CODE.fullmatch(char["text"]))
     letters = sum(1 for char in shown.chars if not char["text"].isspace()) - codes
     notes = [f"page {page.page_number}: rotated text left out"] if rotated else []
     number, height = page.page_number, float(page.height)
     if codes > letters:  # mostly glyph codes: no real text
-        return _Page(number, height, 0.0, [], pictures, True, notes, layers)
+        return _Page(number, height, 0.0, [], pictures, scan, True, notes, layers)
     if codes:
         unreadable = "1 unreadable character" if codes == 1 else f"{codes} unreadable characters"
         notes.insert(0, f"page {page.page_number}: {unreadable} left out")
@@ -291,7 +299,21 @@ def _read(page: Page, off: dict[int, str]) -> _Page:
         if any(any(row) for row in rows):
             items.append(_Table(table.bbox[1], table.bbox[0], rows))
     items.sort(key=lambda item: (item.top, item.x0))
-    return _Page(number, height, text_size, items, pictures, False, notes, layers)
+    return _Page(number, height, text_size, items, pictures, scan, False, notes, layers)
+
+
+def _covered(images: list[dict[str, Any]], bbox: tuple[float, float, float, float]) -> float:
+    """The share of the page ``bbox`` that ``images`` cover (their areas added up, on the page)."""
+    left, top, right, bottom = bbox
+    area = (right - left) * (bottom - top)
+    if area <= 0:
+        return 0.0
+    covered = sum(
+        max(0.0, min(image["x1"], right) - max(image["x0"], left))
+        * max(0.0, min(image["bottom"], bottom) - max(image["top"], top))
+        for image in images
+    )
+    return min(float(covered) / area, 1.0)
 
 
 def _copies(chars: list[dict[str, Any]]) -> set[int]:
@@ -407,13 +429,17 @@ def _layers_off(document: PDFDocument) -> dict[int, str]:
 
 
 def _references(value: object) -> list[PDFObjRef]:
-    """The object references in the array ``value``: none when it is missing."""
+    """The object references in the array ``value``: none when it is missing. A null in it, or a
+    reference to no object, counts for nothing, as the PDF format has it."""
     items = resolve1(value)
     if items is None:
         return []
-    if not isinstance(items, list) or not all(isinstance(item, PDFObjRef) for item in items):
+    if not isinstance(items, list):
         raise _LayersUnreadable
-    return items
+    refs = [item for item in items if item is not None and resolve1(item) is not None]
+    if not all(isinstance(item, PDFObjRef) for item in refs):
+        raise _LayersUnreadable
+    return refs
 
 
 _Hiding = tuple[bool, frozenset[str]]  # hidden by default, and the layers off by default it uses
@@ -438,8 +464,12 @@ def _hiding(content: object, off: dict[int, str]) -> _Hiding:
     if content.get("VE") is not None:
         shown, used = _expression(content["VE"], off)
         return not shown, used
-    groups = resolve1(content.get("OCGs"))
-    refs = [groups] if isinstance(groups, PDFObjRef) else _references(content.get("OCGs"))
+    groups = content.get("OCGs")  # one layer's reference, or an array of them
+    refs: list[PDFObjRef]
+    if isinstance(groups, PDFObjRef) and isinstance(resolve1(groups), dict):
+        refs = [groups]
+    else:
+        refs = _references(groups)
     if not refs:
         return _SHOWN  # a membership of no layer does not hide anything
     states = [ref.objid not in off for ref in refs]  # on by default
@@ -594,7 +624,8 @@ def _take_running_lines(pages: list[_Page]) -> list[Block]:
     found: dict[str, set[int]] = {}
     for page in pages:
         for line in _band_lines(page):
-            found.setdefault(_running_key(line, page), set()).add(page.number)
+            for key in _running_keys(line, page):
+                found.setdefault(key, set()).add(page.number)
     running = {
         key
         for key, numbers in found.items()
@@ -602,11 +633,13 @@ def _take_running_lines(pages: list[_Page]) -> list[Block]:
     }
     kept: dict[str, Block] = {}
     for page in pages:
-        taken = [line for line in _band_lines(page) if _running_key(line, page) in running]
-        for line in taken:
-            kind: BlockKind = "heading" if _is_heading(line, page) else "paragraph"
-            block = Block(kind, line.text, None, page.number, line.size)
-            kept.setdefault(_running_key(line, page), block)
+        taken = []
+        for line in _band_lines(page):
+            match = next((key for key in _running_keys(line, page) if key in running), None)
+            if match is not None:
+                taken.append(line)
+                kind: BlockKind = "heading" if _is_heading(line, page) else "paragraph"
+                kept.setdefault(match, Block(kind, line.text, None, page.number, line.size))
         gone = {id(line) for line in taken}
         page.items = [item for item in page.items if id(item) not in gone]
     return list(kept.values())
@@ -628,13 +661,14 @@ def _stamped(item: _Line | _Table, page: _Page) -> bool:
     return isinstance(item, _Line) and _in_band(item, page)
 
 
-def _running_key(line: _Line, page: _Page) -> str:
-    """What the copies of a running line have in common (see the module notes)."""
-    key = normalize(line.text)
+def _running_keys(line: _Line, page: _Page) -> tuple[str, ...]:
+    """What the copies of a running line can have in common: its whole normalised text and, when
+    it numbers its page and is not shaped like a heading, that text without its digits."""
+    whole = normalize(line.text)
     shaped_like_a_heading = line.bold or line.size > page.text_size
     if not shaped_like_a_heading and _numbers_the_page(line.text, page.number):
-        return _DIGITS.sub("", key)
-    return key
+        return whole, _DIGITS.sub("", whole)
+    return (whole,)
 
 
 def _numbers_the_page(text: str, number: int) -> bool:

@@ -6,12 +6,14 @@ and mixed-01 (page 2 a picture). The corpus PDFs are typeset from the same contr
 twins, so the paragraphs read from a PDF can be checked against the Word file's, one for one.
 Small PDFs made by ``make_pdf`` cover what the corpus does not have: bare page numbers and
 footers that number pages in other words, a running title in bold, numbered headings at the tops
-of pages, scans stamped with page or Bates numbers, a PDF without any text, headings told by their
-weight, body text in 12 pt, paragraphs set close together, text drawn twice, lines that end in a
-hyphen, a table with text beside a short row, a dense table, and PDFs that are locked or damaged.
-PDFs written by hand (``hand_pdf``) have text in layers, hidden or shown, nested in other marked
-content or in a form XObject, layers that cannot be read, and glyphs without Unicode. supply-01
-typeset again with a watermark shows that rotated text is left out.
+of pages, a header that holds a page's number, scans stamped with page or Bates numbers, a page
+with a small signature picture, a PDF without any text, headings told by their weight, body text
+in 12 pt, paragraphs set close together, text drawn twice, lines that end in a hyphen, a table
+with text beside a short row, a dense table, and PDFs that are locked or damaged. PDFs written by
+hand (``hand_pdf``) have text in layers, hidden or shown, nested in other marked content or in a
+form XObject, in memberships of layers, visible text drawn where hidden text is, layers that
+cannot be read, and glyphs without Unicode. supply-01 typeset again with a watermark shows that
+rotated text is left out.
 """
 
 from __future__ import annotations
@@ -25,7 +27,17 @@ from typing import Any
 import docx
 import pytest
 
-from tests.fixtures.pdf import LAYER, PICTURE, Line, MakePdf, Page, Picture, Rule, hand_pdf
+from tests.fixtures.pdf import (
+    LAYER,
+    PICTURE,
+    Graphic,
+    Line,
+    MakePdf,
+    Page,
+    Picture,
+    Rule,
+    hand_pdf,
+)
 from themask.errors import ProtectedFileError, ScannedPdfError, UnsupportedFileError
 from themask.pdf.extractor import LAYERS_MESSAGE, SCANNED_PDF_MESSAGE, extract_blocks
 
@@ -146,6 +158,26 @@ def test_a_running_title_in_bold_is_a_running_line(make_pdf: MakePdf) -> None:
     assert report.repeated_lines_removed == ["NORTHWIND SUPPLY AGREEMENT", "Page 1 of 3"]
     joined = "\n".join(b.text for b in blocks)
     assert joined.count("NORTHWIND SUPPLY AGREEMENT") == 1 and joined.count("Page") == 1
+
+
+def test_a_running_header_holding_the_number_of_a_page_repeats_whole(make_pdf: MakePdf) -> None:
+    """ "Supply Agreement dated 1 March 2026" holds the number of page 1; it repeats whole."""
+    header = "Supply Agreement dated 1 March 2026"
+    pages: list[Page] = [
+        [
+            Line(40, header, size=9),
+            Line(120, f"Clause {n}. The Buyer shall pay within 30 days."),
+            Line(812, f"Page {n} of 3", size=9),
+        ]
+        for n in (1, 2, 3)
+    ]
+    blocks, report = extract_blocks(make_pdf("dated.pdf", pages))
+    assert report.repeated_lines_removed == [header, "Page 1 of 3"]
+    assert [b.text for b in blocks] == [
+        header,
+        "Page 1 of 3",
+        *(f"Clause {n}. The Buyer shall pay within 30 days." for n in (1, 2, 3)),
+    ]
 
 
 def test_a_line_on_one_page_only_is_no_running_line(make_pdf: MakePdf) -> None:
@@ -281,6 +313,38 @@ def test_a_scan_stamped_with_a_bates_number_between_text_pages_is_listed(
     ]
 
 
+def test_a_small_picture_does_not_make_a_page_a_scan(make_pdf: MakePdf) -> None:
+    """The last page of a contract: two lines of a clause in its top band, over a signature."""
+    pages: list[Page] = [
+        [
+            *(
+                Line(
+                    84 + 14 * k, f"Clause {n}.{k + 1} The Supplier shall deliver the Goods on time."
+                )
+                for k in range(12)
+            ),
+            Line(812, f"Page {n} of 3"),
+        ]
+        for n in (1, 2)
+    ]
+    pages.append(
+        [
+            Line(84, "12.3 This Agreement may be signed in counterparts, each an original,"),
+            Line(98, "by Northwind Trading B.V. and Thamesgate Ltd."),
+            Graphic(72, 250, 222, 300),
+            Line(812, "Page 3 of 3"),
+        ]
+    )
+    blocks, report = extract_blocks(make_pdf("signature.pdf", pages))
+    assert report.image_only_pages == []
+    assert [b.text for b in blocks if b.page == 3] == [
+        (
+            "12.3 This Agreement may be signed in counterparts, each an original, by Northwind"
+            " Trading B.V. and Thamesgate Ltd."
+        )
+    ]
+
+
 def test_a_pdf_of_glyph_codes_only_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ScannedPdfError):
         extract_blocks(hand_pdf(tmp_path / "codes.pdf", [CODES]))
@@ -366,9 +430,46 @@ def test_text_in_a_shown_layer_is_kept_while_another_is_hidden(tmp_path: Path) -
     assert (report.image_only_pages, report.hidden_layers) == ([], [])
 
 
-@pytest.mark.parametrize(("membership", "read"), [("md1", False), ("md2", True)])
+def _drawn(text: bytes, *, hidden: bool = False) -> bytes:
+    """A content stream drawing ``text`` 700 pt up the page, in the layer /oc1 when ``hidden``."""
+    drawn = b"BT /F1 10 Tf 72 700 Td (%s) Tj ET\n" % text
+    return b"/OC /oc1 BDC " + drawn + b"EMC\n" if hidden else drawn
+
+
+@pytest.mark.parametrize(
+    ("content", "read"),
+    [
+        (
+            _drawn(b"EUR 2,000,000", hidden=True) + _drawn(b"EUR 1,000,000"),
+            "EUR 1,000,000",
+        ),
+        (
+            _drawn(b"Northwind Trading B.V.", hidden=True) + _drawn(b"Northwind Trading B.V."),
+            "Northwind Trading B.V.",
+        ),
+        (
+            _drawn(b"Northwind Trading B.V.") + _drawn(b"Northwind Trading B.V.", hidden=True),
+            "Northwind Trading B.V.",
+        ),
+    ],
+    ids=["other-text-over-hidden", "hidden-copy-first", "hidden-copy-after"],
+)
+def test_visible_text_drawn_where_hidden_text_is_kept(
+    tmp_path: Path, content: bytes, read: str
+) -> None:
+    """Visible text over hidden text in the same font and place is no copy of the hidden one."""
+    pdf = hand_pdf(tmp_path / "overlay.pdf", [content + CLAUSE], layers=LAYER_OFF)
+    blocks, report = extract_blocks(pdf)
+    assert [b.text for b in blocks] == [read, "Visible clause text."]
+    assert report.hidden_layers == [LAYER]
+
+
+@pytest.mark.parametrize(
+    ("membership", "read"), [("md1", False), ("md2", True), ("md3", False), ("md4", False)]
+)
 def test_text_in_a_membership_of_layers(tmp_path: Path, membership: str, read: bool) -> None:
-    """/md1 shows its content when both layers are on (not by default), /md2 when either is."""
+    """/md1 shows its content when both layers are on (not by default), /md2 when either is;
+    /md3 and /md4 when /oc1 is, named by one reference and in an array with a null."""
     note = b"/OC /%s BDC BT /F1 10 Tf 72 700 Td (Member note.) Tj ET EMC\n" % membership.encode()
     pdf = hand_pdf(tmp_path / "member.pdf", [note + CLAUSE], layers=LAYER_OFF)
     blocks, report = extract_blocks(pdf)

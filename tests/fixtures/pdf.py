@@ -4,9 +4,10 @@
 left edge, in Helvetica (Helvetica-Bold when ``bold``) or, when ``embedded``, in Bitstream Vera Sans
 embedded as a TrueType font. An embedded font comes with a map from its codes to Unicode, which is
 how a real PDF can hand a reader characters such as NUL, which a Word file cannot hold. A ``Rule``
-draws a straight line, as the ruling of a table does. A page can also be a ``Picture``: a picture
-filling the page, as a scanned page is, with lines drawn over it, as a page number stamped on a
-scan; ``PICTURE`` is one without lines. A page with nothing on it is blank.
+draws a straight line, as the ruling of a table does, and a ``Graphic`` a small picture, as a
+signature or a logo is. A page can also be a ``Picture``: a picture filling the page, as a scanned
+page is, with lines drawn over it, as a page number stamped on a scan; ``PICTURE`` is one without
+lines. A page with nothing on it is blank.
 
 With a ``user_password`` the PDF is encrypted and asks for that password before it opens; with
 only an ``owner_password`` it is encrypted too but opens without one (the owner's password only
@@ -51,6 +52,17 @@ class Rule:
 
 
 @dataclass(frozen=True)
+class Graphic:
+    """A small picture filling the box from (``x0``, ``top``) to (``x1``, ``bottom``), in points
+    from the top left, as a signature is."""
+
+    x0: float
+    top: float
+    x1: float
+    bottom: float
+
+
+@dataclass(frozen=True)
 class Picture:
     """A page that is a picture, with ``lines`` of text drawn over it."""
 
@@ -58,7 +70,7 @@ class Picture:
 
 
 PICTURE = Picture()
-Page = Sequence[Line | Rule] | Picture
+Page = Sequence[Line | Rule | Graphic] | Picture
 
 
 class MakePdf(Protocol):
@@ -82,7 +94,7 @@ def make_pdf(tmp_path: Path) -> MakePdf:
         # Imported here, not at the top: this module is loaded as a plugin for the whole suite,
         # and reportlab and Pillow are only needed by the tests that make a PDF.
         import reportlab
-        from PIL import Image
+        from PIL import Image as Bitmap
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.pdfencrypt import StandardEncryption
         from reportlab.lib.utils import ImageReader
@@ -97,16 +109,26 @@ def make_pdf(tmp_path: Path) -> MakePdf:
         locked = user_password or owner_password
         encrypt = StandardEncryption(user_password, owner_password, canCopy=0) if locked else None
         canvas = Canvas(str(path), pagesize=A4, invariant=1, encrypt=encrypt)
+
+        def bitmap(shade: int) -> ImageReader:
+            png = io.BytesIO()
+            Bitmap.new("L", (124, 175), shade).save(png, "PNG")
+            return ImageReader(io.BytesIO(png.getvalue()))
+
         for page in pages:
-            items: Sequence[Line | Rule] = page.lines if isinstance(page, Picture) else page
+            items: Sequence[Line | Rule | Graphic] = (
+                page.lines if isinstance(page, Picture) else page
+            )
             if isinstance(page, Picture):
-                png = io.BytesIO()
-                Image.new("L", (124, 175), 200).save(png, "PNG")
-                canvas.drawImage(ImageReader(io.BytesIO(png.getvalue())), 0, 0, width, height)
+                canvas.drawImage(bitmap(200), 0, 0, width, height)
             for item in items:
                 if isinstance(item, Rule):
                     canvas.setLineWidth(0.5)
                     canvas.line(item.x0, height - item.top, item.x1, height - item.bottom)
+                    continue
+                if isinstance(item, Graphic):
+                    size = (item.x1 - item.x0, item.bottom - item.top)
+                    canvas.drawImage(bitmap(90), item.x0, height - item.bottom, *size)
                     continue
                 font = "Vera" if item.embedded else "Helvetica-Bold" if item.bold else "Helvetica"
                 canvas.setFont(font, item.size)
@@ -145,11 +167,15 @@ _OBJECTS = [
     # of them are on, and when any of them is.
     b"<< /Type /OCMD /OCGs [3 0 R 4 0 R] /P /AllOn >>",
     b"<< /Type /OCMD /OCGs [3 0 R 4 0 R] /P /AnyOn >>",
+    # 11 and 12: /md3 and /md4, memberships of /oc1 alone, written as the PDF format allows: one
+    # reference instead of an array, and an array with a null in it.
+    b"<< /Type /OCMD /OCGs 3 0 R >>",
+    b"<< /Type /OCMD /OCGs [3 0 R null] >>",
 ]
-_FORM = 11  # the form XObject /Fx, whose own /OC puts it in the layer /oc1
+_FORM = 13  # the form XObject /Fx, whose own /OC puts it in the layer /oc1
 _RESOURCES = (
-    b"<< /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /Fx 11 0 R >>"
-    b" /Properties << /oc1 3 0 R /oc2 4 0 R /md1 9 0 R /md2 10 0 R >> >>"
+    b"<< /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /Fx 13 0 R >> /Properties"
+    b" << /oc1 3 0 R /oc2 4 0 R /md1 9 0 R /md2 10 0 R /md3 11 0 R /md4 12 0 R >> >>"
 )
 
 
@@ -164,8 +190,8 @@ def hand_pdf(
     """Write a PDF with one A4 page for each content stream in ``contents``; returns ``path``.
 
     The pages can use the fonts /F1 (Helvetica) and /F2 (glyph codes only), the layers /oc1
-    (``LAYER``) and /oc2 (``SHOWN_LAYER``), the memberships /md1 and /md2 of both, and the form
-    XObject /Fx, which draws ``form`` and belongs to /oc1. ``layers`` is the default
+    (``LAYER``) and /oc2 (``SHOWN_LAYER``), the memberships /md1 and /md2 of both and /md3 and
+    /md4 of /oc1 alone, and the form XObject /Fx, which draws ``form`` and belongs to /oc1. ``layers`` is the default
     configuration of the layers (the /D dictionary of the catalog's /OCProperties); without it
     the PDF has no layers. ``catalog`` is written into the catalog as it is.
     """
