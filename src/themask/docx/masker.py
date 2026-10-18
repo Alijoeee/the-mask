@@ -27,6 +27,11 @@ shorter value, such as the "5" of "5%", is in too many addresses and names to me
 there (ruling R27). It is still replaced where it stands in an instruction, so a reference such
 as ``REF SAP_Section`` becomes ``REF [COMPANY_1]_Section`` and no longer finds its bookmark.
 
+A case of several files shares one key, and one file's addresses, instructions and bookmark names
+can hold a value that only another file's text shows. ``apply_mask`` takes the key's values out
+of those places as well (``entries``, ruling R82), as if the plan replaced them, under the same
+rules; the text that is read changes only where the plan says.
+
 ``insert_banner`` puts the note for the AI at the top of the document. ``new_case_code`` and
 ``neutral_name`` give the masked file a name that says nothing about the parties.
 """
@@ -37,7 +42,7 @@ import codecs
 import random
 import re
 from bisect import bisect_right
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from urllib.parse import unquote
 
@@ -47,7 +52,7 @@ from themask.docx.package import NS, RELS_NS, DocxPackage
 from themask.docx.reader import DocText, Segment, TextNode, paragraph_nodes
 from themask.docx.restorer import replace_in_paragraph
 from themask.instruction import BANNER_TEXT
-from themask.model import MaskPlan
+from themask.model import KeyEntry, MaskPlan
 from themask.placeholders import PLACEHOLDER_RE
 from themask.textnorm import flexible_pattern, normalize
 
@@ -216,7 +221,9 @@ class MaskReport:
     bookmarks_renamed: int
 
 
-def apply_mask(pkg: DocxPackage, doc_text: DocText, plan: MaskPlan) -> MaskReport:
+def apply_mask(
+    pkg: DocxPackage, doc_text: DocText, plan: MaskPlan, *, entries: Sequence[KeyEntry] = ()
+) -> MaskReport:
     """Writes the plan's placeholders into ``pkg`` and takes the replaced values out elsewhere.
 
     ``doc_text`` must be what ``extract_text(pkg)`` gave for this very package object, in the
@@ -224,12 +231,17 @@ def apply_mask(pkg: DocxPackage, doc_text: DocText, plan: MaskPlan) -> MaskRepor
     own paragraph elements, and the plan's positions count in its text. A copy of the package
     (``pkg.copy()``) has paragraphs of its own, so its text has to be read again.
 
+    ``entries`` is the key of the case the file belongs to (ruling R82). Each value and variant
+    of an entry is taken out of the link addresses, the field instructions and the bookmark names
+    like a value the plan replaces, with the entry's placeholder, also where this file's text
+    never shows it; the text itself is changed only by the plan.
+
     Raises ValueError, before anything changes, when a replacement does not lie inside one
     paragraph (the analysis never plans one across paragraphs), when a paragraph it changes is
     not one of this package's, or when that paragraph no longer reads as it did.
     """
     edits = _paragraph_edits(pkg, doc_text, plan)
-    values = _values(doc_text, plan)
+    values = _values(doc_text, plan, entries)
     finder = _ValueFinder(values)
     names = _names_to_change(pkg, finder)
     instructions = _Instructions(values, names, finder)
@@ -336,13 +348,19 @@ def _check_segment(pkg: DocxPackage, doc_text: DocText, segment: Segment) -> Non
         raise ValueError("A paragraph has changed since the text map was read; read it again.")
 
 
-def _values(doc_text: DocText, plan: MaskPlan) -> dict[str, str]:
-    """Each replaced value as the text writes it, with the placeholder of its first replacement."""
+def _values(doc_text: DocText, plan: MaskPlan, entries: Iterable[KeyEntry]) -> dict[str, str]:
+    """Each replaced value as the text writes it, with the placeholder of its first replacement;
+    then each value and variant of ``entries`` that is not among them, with its entry's.
+    """
     values: dict[str, str] = {}
     for r in plan.replacements:
         value = doc_text.text[r.start : r.end]
         if value.strip():
             values.setdefault(value, r.placeholder)
+    for entry in entries:
+        for form in (entry.value, *entry.variants):
+            if form.strip():
+                values.setdefault(form, entry.placeholder)
     return values
 
 

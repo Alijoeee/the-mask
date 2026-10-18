@@ -14,11 +14,16 @@ marked for checking; a job title is no name; and a finding never runs from one l
 nor across a tab into the next field of a form.
 Overlapping findings are kept, for the analysis pipeline to decide between, except that a rule's
 finding replaces the model's on the same span.
+
+Each call writes one line to the log: the number of characters, the number of findings and the
+seconds it took, never a word of the text (logging_setup.py has the rule).
 """
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from dataclasses import replace
 from importlib import resources
 from pathlib import Path
@@ -36,6 +41,8 @@ from themask.detect.contract_rules import apply_rules, is_contract_wording, is_j
 from themask.detect.patterns import contract_recognizers
 from themask.model import Finding, FindingSource, PlaceholderType
 from themask.textnorm import COMMON_WORDS, has_legal_form, normalize, variants_of
+
+_LOG = logging.getLogger(__name__)
 
 # A finding scored below this is too unlikely to show the owner.
 MIN_SCORE = 0.3
@@ -180,13 +187,22 @@ class Engine:
         """Every value in ``text`` that may be confidential, in text order.
 
         The analyzer's findings and the contract rules' are merged as the module docstring says.
-        Overlapping findings are kept, for the analysis pipeline to decide between.
+        Overlapping findings are kept, for the analysis pipeline to decide between. The log gets
+        one line: the characters, the findings and the seconds, never the text or a value.
         """
+        started = time.perf_counter()
         rules, terms = apply_rules(text)
         findings = rules + _checked_by_rules(text, self._presidio_findings(text), rules, terms)
-        return sorted(
+        kept = sorted(
             (f for f in findings if f.score >= MIN_SCORE), key=lambda f: (f.start, f.end, f.type)
         )
+        _LOG.info(
+            "analyze characters=%d findings=%d seconds=%.2f",
+            len(text),
+            len(kept),
+            time.perf_counter() - started,
+        )
+        return kept
 
     def _presidio_findings(self, text: str) -> list[Finding]:
         """What Presidio's analyzer finds, as findings; a value found twice is kept once."""
