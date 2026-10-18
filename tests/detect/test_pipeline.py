@@ -535,6 +535,105 @@ def test_a_nationality_without_a_person_of_that_name_stays(engine, lists):
     assert a.groups == []
 
 
+# --- Ruling R54: a bare surname only where it stands alone as a name (real engine) -----------------
+
+
+# The reviewer's N1 texts: the term or heading stays, a standalone surname is hidden.
+TERMS_AND_HEADINGS = [
+    (
+        "Doris Day signs for the Supplier. Delivery is due on the next Business Day after the order. Day shall attend.",
+        "[PERSON_1] signs for the Supplier. Delivery is due on the next Business Day after the order. [PERSON_1] shall attend.",
+    ),
+    (
+        "Tom House signs for the Buyer, a company registered at Companies House. House shall attend.",
+        "[PERSON_1] signs for the Buyer, a company registered at Companies House. [PERSON_1] shall attend.",
+    ),
+    (
+        "Hugh Grant signs for the Licensor.\n2. GRANT OF LICENCE\nGrant shall attend.",
+        "[PERSON_1] signs for the Licensor.\n2. GRANT OF LICENCE\n[PERSON_1] shall attend.",
+    ),
+    (
+        "Tom Long signs for the Buyer.\nLong Stop Date: 30 June 2026.\nLong shall attend.",
+        "[PERSON_1] signs for the Buyer.\nLong Stop Date: 30 June 2026.\n[PERSON_1] shall attend.",
+    ),
+    (
+        "Ann Court signs for the Buyer. Disputes go to the High Court of Justice in London. Court shall attend.",
+        "[PERSON_1] signs for the Buyer. Disputes go to the High Court of Justice in London. [PERSON_1] shall attend.",
+    ),
+    (
+        "Ann Terms signs for the Licensor. Use of the site follows our Terms of Use. Terms shall attend.",
+        "[PERSON_1] signs for the Licensor. Use of the site follows our Terms of Use. [PERSON_1] shall attend.",
+    ),
+    (
+        "Rob Bond signs for the Supplier. The Supplier shall provide a Performance Bond. Bond shall attend.",
+        "[PERSON_1] signs for the Supplier. The Supplier shall provide a Performance Bond. [PERSON_1] shall attend.",
+    ),
+    (
+        "Katie Price, Director of Sales, signs. Price, Director, shall attend.",
+        "[PERSON_1], Director of Sales, signs. [PERSON_1], Director, shall attend.",
+    ),
+]
+
+
+@pytest.mark.parametrize("t,expected", TERMS_AND_HEADINGS)
+def test_a_surname_inside_a_term_or_heading_stays(engine, lists, t, expected):
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == expected
+
+
+def test_a_surname_form_the_model_took_for_a_company_follows_the_guard_too(engine, lists):
+    # Reviewer's N2: the model reports COMPANY "Lodge" (0.6); "The Lodge" is the defined term.
+    t = 'Sam Lodge manages the site (the "Lodge"). The Lodge shall be kept open daily. Lodge shall attend.'
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        '[PERSON_1] manages the site (the "Lodge"). The Lodge shall be kept open daily.'
+        " [PERSON_1] shall attend."
+    )
+
+
+def test_a_surname_that_is_another_persons_first_name_is_checked(engine, lists):
+    # Reviewer's N4
+    t = "Sarah James and James Wilson sign for the Buyer. James shall attend."
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "[PERSON_1] and [PERSON_2] sign for the Buyer. [PERSON_3] shall attend."
+    assert [g.needs_check for g in a.groups] == [False, False, True]
+
+
+def test_a_month_surname_beside_a_number_is_a_date(lists):
+    # Reviewer's N5 (the model reads only "Theresa" here, so a stub reports the full name)
+    t = "Theresa May signs. This Agreement is dated 1 May 2026. May shall attend."
+    a = analyze(one(t), FixedEngine(person_at(t, "Theresa May")), lists)
+    assert (
+        masked(a)
+        == "[PERSON_1] signs. This Agreement is dated 1 May 2026. [PERSON_1] shall attend."
+    )
+    assert a.groups[0].needs_check
+
+
+# --- Ruling R55: parties that are people, people that are companies (real engine) -------------
+
+
+def test_a_party_shortened_to_its_surname_is_a_person(engine, lists):
+    # Reviewer's O1: the parties rule types John Smith as a company.
+    t = (
+        'This Agreement is made between Acme Supplies Ltd and John Smith ("Smith"). Smith shall'
+        " provide the Services."
+    )
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        'This Agreement is made between [COMPANY_1] and [PERSON_1] ("[PERSON_1]"). [PERSON_1]'
+        " shall provide the Services."
+    )
+
+
+def test_a_company_name_without_its_legal_form_joins_the_company(engine, lists):
+    # Reviewer's O3: the model types "Gıda Sanayi" as a person.
+    a = analyze(
+        one("Gıda Sanayi A.Ş. signs the order. Gıda Sanayi invoices monthly."), engine, lists
+    )
+    assert masked(a) == "[COMPANY_1] signs the order. [COMPANY_1] invoices monthly."
+
+
 def test_a_rule_name_with_its_legal_form_keeps_its_end(engine, lists):
     # Ruling R45 (and R46 for the passport number): the model ran on into "Passport".
     t = "Name: Jane Doe, for Acme Supplies Ltd. Passport number: 534412786."

@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from themask.detect.sweep import is_bare_name, stands_as_a_name, sweep
 from themask.model import Finding, Group, PlaceholderType
 
@@ -209,7 +211,7 @@ def test_a_group_switched_off_neither_sweeps_nor_takes_over():
 def test_a_word_is_whole_in_any_script():
     # Raised minor M5: "Gül" is not found inside "Gülşen", nor "Smith" inside "Smithé".
     txt = "Gülşen Gül signs; Smithé and Smith attend."
-    gul, smith = G(P, ["Gül"]), G(P, ["Smith"])
+    gul, smith = G(C, ["Gül"]), G(C, ["Smith"])  # companies: no name test, only word edges
     sweep(txt, [gul, smith])
     assert [f.start for f in gul.findings] == [txt.index("Gül ")]
     assert [f.start for f in smith.findings] == [txt.rindex("Smith")]
@@ -252,3 +254,38 @@ def test_what_stands_as_a_name():
         start = txt.index(needle)
         word = needle.rstrip(";. ").replace(" signs", "").replace(" file", "")
         assert stands_as_a_name(txt, start, start + len(word)) is expected, needle
+
+
+# --- Ruling R54: the name stands alone ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,word,expected",
+    [
+        ("Delivery is due on the next Business Day after the order.", "Day", False),
+        ("Day shall attend.", "Day", True),
+        ("registered at Companies House. House shall attend.", "House", False),
+        ("2. GRANT OF LICENCE", "GRANT", False),
+        ("Long Stop Date: 30 June 2026.", "Long", False),
+        ("Disputes go to the High Court of Justice in London.", "Court", False),
+        ("Use of the site follows our Terms of Use.", "Terms", False),
+        ("The Supplier shall provide a Performance Bond.", "Bond", False),
+        ("This Agreement is dated 1 May 2026.", "May", False),
+        ("Payment is due by May 30, 2026.", "May", False),
+        ("May shall attend.", "May", True),
+        ("Signed on 1 June 2026. May shall attend.", "May", True),  # a full stop parts them
+        ("Price, Director of Sales, shall attend.", "Price", True),  # the comma separates
+        ("as agreed, Mr Price shall attend.", "Price", True),  # an honorific is the name's
+    ],
+)
+def test_a_name_stands_alone(text, word, expected):
+    start = text.index(word)
+    assert stands_as_a_name(text, start, start + len(word)) is expected
+
+
+def test_a_name_is_not_part_of_a_term_of_the_callers_lists():
+    text = "Deliveries pass the old Gate of Honour daily. Gate shall attend."
+    start = text.index("Gate")
+    assert stands_as_a_name(text, start, start + 4)  # the defaults know no "Gate of Honour"
+    terms = {"gate of honour"}
+    assert not stands_as_a_name(text, start, start + 4, lambda phrase: phrase.casefold() in terms)

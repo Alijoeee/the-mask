@@ -79,7 +79,9 @@ _DOCUMENT_WORDS = _terms(
     Day, Working Day, Month, Year, Quarter, Week, Contract Year, Service Levels, Service Level,
     Service Credits, KPI, Key Performance Indicators, Change Control, Change Request, Project,
     Programme, Purpose, Permitted Purpose, Scope, Forecast, Minimum Order Quantity, MOQ, Operative
-    Provisions, Agreed Terms, General, Miscellaneous, Pricing, Invoicing, Duration, Commencement
+    Provisions, Agreed Terms, General, Miscellaneous, Pricing, Invoicing, Duration, Commencement,
+    Terms of Use, Terms and Conditions, General Terms and Conditions, Long Stop Date, Bank Holiday,
+    Public Holiday, Performance Bond, Parent Company Guarantee, Grant of Licence, Licence, Licences
     """
 )
 # Legal vocabulary, and the delivery terms (Incoterms) a supply contract quotes.
@@ -114,7 +116,8 @@ _PUBLIC_BODIES = _terms(
     Revenue and Customs, HMRC, Companies House, Chamber of Commerce, Netherlands Chamber of
     Commerce, Kamer van Koophandel, KvK, Handelsregister, International Chamber of Commerce, ICC,
     London Court of International Arbitration, LCIA, Netherlands Arbitration Institute, Financial
-    Conduct Authority, FCA, Competition and Markets Authority, CMA
+    Conduct Authority, FCA, Competition and Markets Authority, CMA, High Court, High Court of
+    Justice, Court of Appeal, Supreme Court, County Court, Commercial Court, District Court
     """
 )
 _MONTHS = _terms(
@@ -328,6 +331,11 @@ def never_hide_check(
         return defined.has(key) and key not in name_keys
 
     return check
+
+
+def is_month(text: str) -> bool:
+    """Whether ``text`` is the name of a month ("May", "MARCH")."""
+    return term_key(text) in _MONTH_KEYS
 
 
 def is_default_term(text: str) -> bool:

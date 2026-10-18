@@ -135,6 +135,36 @@ def test_a_surname_two_people_share_is_checked_where_it_stands_as_a_name():
     assert found.start == txt.index("Smith attends") and gs["Smith"].needs_check
 
 
+def test_a_surname_that_is_another_persons_first_name_fits_neither():
+    # Ruling R54 (reviewer's N4)
+    txt = "Sarah James and James Wilson sign. James shall attend."
+    fs = [F(P, "Sarah James", txt), F(P, "James Wilson", txt), F(P, "James", txt, last=True)]
+    gs = by_canonical(group_findings(fs, txt, surnames=SURNAMES))
+    assert gs["James"].needs_check and len(gs["James"].findings) == 1
+    assert "James" not in gs["Sarah James"].variants
+
+
+def test_a_word_that_joins_a_person_as_their_surname_must_stand_as_a_name():
+    # Ruling R54 (reviewer's N2): the model's company "Lodge" after "the" is the term.
+    txt = "Sam Lodge manages the site. The Lodge is open. Lodge shall attend."
+    the_lodge = txt.index("The Lodge") + 4
+    fs = [
+        F(P, "Sam Lodge", txt),
+        Finding(C, the_lodge, the_lodge + 5, "Lodge", 0.6, "model"),
+        F(C, "Lodge", txt, last=True, score=0.6),
+    ]
+    (g,) = group_findings(fs, txt)
+    assert [f.start for f in g.findings] == [0, txt.rindex("Lodge")]
+
+
+def test_a_person_named_like_a_company_without_its_legal_form_joins_it():
+    # Ruling R55 (reviewer's O3)
+    txt = "Gıda Sanayi A.Ş. signs. Gıda Sanayi invoices."
+    fs = [F(C, "Gıda Sanayi A.Ş.", txt, score=0.95), F(P, "Gıda Sanayi", txt, last=True)]
+    (g,) = group_findings(fs, txt)
+    assert g.type == C and len(g.findings) == 2
+
+
 def test_a_shared_short_form_in_the_text_gets_a_group_of_its_own():
     txt = "John Smith and Jane Smith sign. J. Smith attends."
     gs = by_canonical(group_findings([F(P, "John Smith", txt), F(P, "Jane Smith", txt)], txt))

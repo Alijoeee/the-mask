@@ -40,6 +40,7 @@ does not occur in the new text is left out of the result (the case's key keeps i
 
 from __future__ import annotations
 
+import re
 import uuid
 from bisect import bisect_right
 from collections import defaultdict
@@ -61,7 +62,6 @@ from themask.detect.lists import (
 from themask.detect.sweep import (
     LINE_BREAKS,
     Spans,
-    after_a_determiner,
     existing_placeholders,
     is_bare_name,
     is_searchable,
@@ -175,9 +175,11 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
+    found = _people_among_parties(found, text)
     seeds = [_seed(entry) for entry in seed_entries or []]
 
-    names = _names(found, seeds, never_hide_check(user_lists, case))
+    is_term = never_hide_check(user_lists, case)  # what a person's bare name may be part of
+    names = _names(found, seeds, is_term)
     never_hidden = never_hide_check(user_lists, case, names=names)
 
     def keep(form: str) -> bool:
@@ -186,22 +188,22 @@ def analyze(
         common = len(form.split()) == 1 and is_contract_wording(form)
         return is_searchable(form) and not never_hidden(form) and not common
 
-    surnames = _surnames_kept(found, text, user_lists, case)
+    surnames = _surnames_kept(found, text, user_lists, case, is_term)
     defined = {term_key(term) for term in case.defined_terms}
     found = [
         f
         for f in found
-        if (f.start, f.end) in surnames
-        or not (never_hidden(f.text) or _names_nobody(f) or _term_not_a_name(f, text, defined))
+        if (f.start, f.end) in surnames or not (never_hidden(f.text) or _names_nobody(f))
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
     _keep_shared_variants_out(seeds)
-    found += _seed_matches(text, seeds, placeholders)
+    found += _seed_matches(text, seeds, placeholders, is_term)
 
     policy = SurnamePolicy(
         allowed=lambda form: not on_never_hide_list(form, user_lists, case),
         only_one=is_default_term,
+        is_term=is_term,
     )
     groups = group_findings(
         _one_per_place(found),
@@ -217,13 +219,12 @@ def analyze(
         group.variants = {
             v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
         }
-    sweep(text, groups, fixed=seeds)
+    sweep(text, groups, fixed=seeds, is_term=is_term)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
         if any((f.start, f.end) in surnames for f in group.findings) or any(
-            f.source == "sweep" and is_bare_name(group.type, f.text) and _ordinary(f.text, defined)
-            for f in group.findings
+            is_bare_name(group.type, f.text) and _ordinary(f.text, defined) for f in group.findings
         ):
             group.needs_check = True
     groups.sort(key=lambda g: g.findings[0].start)
@@ -334,16 +335,47 @@ def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bo
     return names
 
 
-def _term_not_a_name(finding: Finding, text: str, defined: set[str]) -> bool:
-    """Whether ``finding`` is a person's bare name that is a term the document defines but does
-    not stand there as a name: "the Mill" stays the term although Laura Mill shares the word
-    (ruling R50: names beat terms only where the word stands as a name).
+# Words that make a name a company's: COMMON_WORDS, and these ("Kestrel Foods", "Oak Ventures").
+_COMPANY_WORDS = frozenset(word.casefold() for word in COMMON_WORDS) | frozenset(
+    {"foods", "food", "ventures", "associates", "partnership", "bank", "insurance", "media"}
+    | {"properties", "engineering", "construction", "energy", "pharma", "healthcare", "retail"}
+)
+_OPEN_QUOTES = "\"'\N{LEFT DOUBLE QUOTATION MARK}\N{LEFT SINGLE QUOTATION MARK}"
+_CLOSE_QUOTES = "\"'\N{RIGHT DOUBLE QUOTATION MARK}\N{RIGHT SINGLE QUOTATION MARK}"
+
+
+def _people_among_parties(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` with the parties a contract rule took for companies that are people (ruling
+    R55): two or three capitalised words, no legal form and no company word, whose short name,
+    defined in the bracket straight after them, is their last word. People are shortened to their
+    surname and companies to their first word: 'John Smith ("Smith")' is a person.
     """
-    return (
-        is_bare_name(finding.type, finding.text)
-        and term_key(finding.text) in defined
-        and not stands_as_a_name(text, finding.start, finding.end)
+    people = []
+    for finding in found:
+        words = finding.text.split()
+        if (
+            finding.type is PlaceholderType.COMPANY
+            and finding.source == "rule"
+            and len(words) in (2, 3)
+            and all(word[:1].isupper() for word in words)
+            and not has_legal_form(finding.text)
+            and not any(word.casefold().strip(".,") in _COMPANY_WORDS for word in words)
+            and _defined_as(text, finding.end, words[-1])
+        ):
+            finding = replace(finding, type=PlaceholderType.PERSON)
+        people.append(finding)
+    return people
+
+
+def _defined_as(text: str, end: int, word: str) -> bool:
+    """Whether a bracket straight after ``end`` defines ``word`` as a short name: ' ("Smith")',
+    ' (the "Smith")'.
+    """
+    bracket = re.compile(
+        rf"\s*\(\s*[^()\n]{{0,40}}?[{_OPEN_QUOTES}]\s*{re.escape(word)}\s*[{_CLOSE_QUOTES}]",
+        re.IGNORECASE,
     )
+    return bracket.match(text, end) is not None
 
 
 def _ordinary(word: str, defined: set[str]) -> bool:
@@ -362,13 +394,17 @@ def _ordinary(word: str, defined: set[str]) -> bool:
 
 
 def _surnames_kept(
-    found: list[Finding], text: str, user: UserLists, case: CaseLists
+    found: list[Finding],
+    text: str,
+    user: UserLists,
+    case: CaseLists,
+    is_term: Callable[[str], bool],
 ) -> set[tuple[int, int]]:
     """The spans of the people found as one capitalised word, after an honorific or not, that is
     a default never-hide term ("Price", "Ms Banks"), where that word is a surname all the same
-    (ruling R42): exactly one full name found ends with it, and no determiner stands before it
-    ("the Price" is the price). The owner's own never-hide lists always win. These stay hidden,
-    and their groups are marked for checking.
+    (ruling R42): exactly one full name found ends with it, and it stands as a name
+    (``stands_as_a_name``: "the Price" is the price, "1 May 2026" a date). The owner's own
+    never-hide lists always win. These stay hidden, and their groups are marked for checking.
     """
     full_names: dict[str, set[str]] = defaultdict(set)
     for finding in found:
@@ -387,7 +423,7 @@ def _surnames_kept(
             and not on_never_hide_list(word, user, case)
             and not on_never_hide_list(finding.text, user, case)
             and len(full_names.get(person.last, ())) == 1
-            and not after_a_determiner(text, finding.start)
+            and stands_as_a_name(text, finding.start, finding.end, is_term)
         ):
             spans.add((finding.start, finding.end))
     return spans
@@ -413,7 +449,10 @@ def _keep_shared_variants_out(seeds: list[Group]) -> None:
 
 
 def _seed_matches(
-    text: str, seeds: list[Group], placeholders: list[PlaceholderMatch]
+    text: str,
+    seeds: list[Group],
+    placeholders: list[PlaceholderMatch],
+    is_term: Callable[[str], bool],
 ) -> list[Finding]:
     """Every occurrence of the seeds' variants, longest first, as sweep findings."""
     taken = Spans((p.start, p.end) for p in placeholders)
@@ -424,7 +463,7 @@ def _seed_matches(
     found = []
     for variant, seed in variants:
         as_a_name = is_bare_name(seed.type, variant)
-        for start, end in occurrences(text, variant, taken, as_a_name=as_a_name):
+        for start, end in occurrences(text, variant, taken, as_a_name=as_a_name, is_term=is_term):
             found.append(Finding(seed.type, start, end, text[start:end], 1.0, "sweep"))
     return found
 

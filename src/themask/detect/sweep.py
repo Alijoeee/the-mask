@@ -28,9 +28,10 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_left, bisect_right, insort
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 
+from themask.detect.lists import is_default_term, is_month
 from themask.model import Finding, FindingSource, Group, PlaceholderType
 from themask.placeholders import PlaceholderMatch, find_placeholders
 from themask.textnorm import HONORIFICS, NAME_PARTICLES, flexible_pattern, normalize
@@ -73,12 +74,116 @@ def after_a_determiner(text: str, start: int) -> bool:
     return bool(words) and words[-1].casefold() in DETERMINERS
 
 
-def stands_as_a_name(text: str, start: int, end: int) -> bool:
+# Spaces within a line: a space, a tab, a non-breaking space, but no line or paragraph break.
+_SPACE = r"[^\S\n\r\f\v\x1c-\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]"
+_WORD = r"[^\W_][\w'\N{RIGHT SINGLE QUOTATION MARK}\-]*"
+_WORD_BEFORE = re.compile(f"({_WORD}){_SPACE}+\\Z")
+_WORD_AFTER = re.compile(f"{_SPACE}+({_WORD})")
+_TOKEN = re.compile(_WORD)
+_ONLY_SPACES = re.compile(f"{_SPACE}+\\Z")
+_INITIAL = re.compile(r"[^\W\d_]\.?")
+_NUMBER = re.compile(r"\d{1,4}(?:st|nd|rd|th)?", re.IGNORECASE)
+# The longest term, in words, that a bare name may be part of ("Contracts Rights Third Parties").
+_LONGEST_TERM = 6
+
+
+def _line(text: str, start: int, end: int) -> tuple[int, int]:
+    """The start and the end of the line that holds ``start``-``end``."""
+    line_end = text.find("\n", end)
+    return text.rfind("\n", 0, start) + 1, len(text) if line_end < 0 else line_end
+
+
+def _belongs_to_the_name(word: str) -> bool:
+    """Whether ``word``, beside a surname, is part of the name: an honorific ("Mr Price"), an
+    initial ("J Price") or a particle ("van Berg").
+    """
+    return (
+        normalize(word) in _HONORIFIC_KEYS
+        or _INITIAL.fullmatch(word) is not None
+        or word.casefold() in NAME_PARTICLES
+    )
+
+
+def _beside_a_capitalised_word(text: str, start: int, end: int) -> bool:
+    """Whether a capitalised word stands right before or after ``start``-``end`` on its line,
+    with nothing but spaces between, that is not part of the name: "Business Day", "Companies
+    House", "Long Stop". A comma or a full stop separates: "Price, Director" is the name alone.
+    """
+    line_start, line_end = _line(text, start, end)
+    neighbours = (
+        _WORD_BEFORE.search(text, line_start, start),
+        _WORD_AFTER.match(text, end, line_end),
+    )
+    return any(
+        found is not None and found[1][:1].isupper() and not _belongs_to_the_name(found[1])
+        for found in neighbours
+    )
+
+
+def _on_a_line_of_capitals(text: str, start: int, end: int) -> bool:
+    """Whether ``start``-``end`` stands on a line whose letters are all capitals: a heading such
+    as "2. GRANT OF LICENCE".
+    """
+    letters = [c for c in text[slice(*_line(text, start, end))] if c.isalpha()]
+    return len(letters) > 1 and all(letter.isupper() for letter in letters)
+
+
+def _month_by_a_number(text: str, start: int, end: int) -> bool:
+    """Whether ``start``-``end`` is a month with a number as the word right before or after it on
+    its line: "1 May 2026", "May 2026", "May 1, 2026".
+    """
+    if not is_month(text[start:end]):
+        return False
+    line_start, line_end = _line(text, start, end)
+    before = text[line_start:start].split()
+    after = text[end:line_end].split()
+    # The end of a sentence parts them ("... 1 June 2026. May shall attend"); a comma does not.
+    words = [before[-1].rstrip(",")] if before and before[-1][-1:] not in ".;:!?" else []
+    words += [after[0].rstrip(".,;:)")] if after else []
+    return any(_NUMBER.fullmatch(word) for word in words)
+
+
+def _part_of_a_term(text: str, start: int, end: int, is_term: Callable[[str], bool]) -> bool:
+    """Whether ``start``-``end`` is part of a longer term, in words that stand on its line with
+    nothing but spaces between them, longest first: "Business Day", "Terms of Use", "Long Stop
+    Date", "High Court of Justice" (``is_term``).
+    """
+    line_start, line_end = _line(text, start, end)
+    run: list[tuple[int, int]] = []
+    runs = [run]
+    for token in _TOKEN.finditer(text, line_start, line_end):
+        if run and _ONLY_SPACES.match(text, run[-1][1], token.start()) is None:
+            run = []
+            runs.append(run)
+        run.append(token.span())
+    for words in runs:
+        inside = [i for i, (first, last) in enumerate(words) if first < end and last > start]
+        if not inside:
+            continue
+        low, high = inside[0], inside[-1]
+        for size in range(min(_LONGEST_TERM, len(words)), high - low + 1, -1):
+            for first in range(max(0, high - size + 1), min(low, len(words) - size) + 1):
+                if is_term(text[words[first][0] : words[first + size - 1][1]]):
+                    return True
+    return False
+
+
+def stands_as_a_name(
+    text: str, start: int, end: int, is_term: Callable[[str], bool] = is_default_term
+) -> bool:
     """Whether ``text[start:end]``, an occurrence of a person's bare name (see ``is_bare_name``),
-    stands there as that person's name (rulings R50, R52): every word of it but the surname's
-    particles is capitalised ("Price", "PRICE", "van der Berg"), and the word before it on its
-    line, particles aside, is none of the ``DETERMINERS`` ("the Price", "a Mill", "the van der
-    Berg file" are the words, not the names).
+    stands there as that person's name and not as a word of the contract (rulings R50, R52,
+    R54). It does when all of these hold:
+
+    * every word of it but the surname's particles is capitalised ("Price", "van der Berg");
+    * the word before it on its line, particles aside, is none of the ``DETERMINERS`` ("the
+      Price", "a Mill", "the van der Berg file" are words of the contract);
+    * no capitalised word stands right beside it with nothing but spaces between, but an
+      honorific, an initial or a particle ("Business Day", "Companies House", "Long Stop");
+    * its line is not all capitals ("2. GRANT OF LICENCE" is a heading);
+    * a month has no number right beside it ("dated 1 May 2026");
+    * it is not part of a longer term (``is_term``, the default never-hide words unless the
+      caller passes its own lists and the document's defined terms): "Terms of Use".
 
     ``text`` is any text the occurrence was found in, a whole document's or one paragraph's
     raw text, and ``start``-``end`` the occurrence's span in it. The sweep takes a bare name
@@ -86,7 +191,15 @@ def stands_as_a_name(text: str, start: int, end: int) -> bool:
     sweep left visible on purpose do not count as leaks.
     """
     words = [word for word in text[start:end].split() if word.casefold() not in NAME_PARTICLES]
-    return all(word[:1].isupper() for word in words) and not after_a_determiner(text, start)
+    if not all(word[:1].isupper() for word in words):
+        return False
+    return not (
+        after_a_determiner(text, start)
+        or _beside_a_capitalised_word(text, start, end)
+        or _on_a_line_of_capitals(text, start, end)
+        or _month_by_a_number(text, start, end)
+        or _part_of_a_term(text, start, end, is_term)
+    )
 
 
 def existing_placeholders(text: str) -> list[PlaceholderMatch]:
@@ -131,11 +244,16 @@ class Spans:
 
 
 def occurrences(
-    text: str, variant: str, taken: Spans, *, as_a_name: bool = False
+    text: str,
+    variant: str,
+    taken: Spans,
+    *,
+    as_a_name: bool = False,
+    is_term: Callable[[str], bool] = is_default_term,
 ) -> list[tuple[int, int]]:
     """Where ``variant`` stands in ``text`` within one line and outside the ``taken`` stretches,
     in text order; each occurrence found is taken too. With ``as_a_name``, only where it stands
-    as a name (``stands_as_a_name``).
+    as a name (``stands_as_a_name`` with ``is_term``).
 
     A match that is refused does not hide one that starts inside it: the search goes on from the
     character after the refused match's start.
@@ -146,7 +264,7 @@ def occurrences(
     while (match := pattern.search(text, position)) is not None:
         start, end = match.span()
         refused = start == end or crosses_a_line(text, start, end) or taken.overlaps(start, end)
-        if refused or (as_a_name and not stands_as_a_name(text, start, end)):
+        if refused or (as_a_name and not stands_as_a_name(text, start, end, is_term)):
             position = start + 1
             continue
         taken.add(start, end)
@@ -232,11 +350,17 @@ def _remove(group: Group, finding: Finding) -> None:
     group.disabled = {i - (i > index) for i in group.disabled if i != index}
 
 
-def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None:
+def sweep(
+    text: str,
+    groups: list[Group],
+    fixed: Collection[Group] = (),
+    is_term: Callable[[str], bool] = is_default_term,
+) -> None:
     """Add to ``groups`` every further occurrence in ``text`` of their variants (see the module).
 
     ``fixed`` are groups whose findings are never taken over: the pipeline passes the groups of
-    the case's key. New findings are appended to each group's findings, so the ones already there
+    the case's key. ``is_term`` tells the terms a person's bare name may be part of
+    (``stands_as_a_name``): the pipeline passes the owner's lists and the defined terms. New findings are appended to each group's findings, so the ones already there
     keep their order (a finding taken over leaves its group, and the indexes of the occurrences
     switched off follow). Sweeping again adds nothing.
     """
@@ -264,7 +388,7 @@ def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
-                or (as_a_name and not stands_as_a_name(text, start, end))
+                or (as_a_name and not stands_as_a_name(text, start, end, is_term))
                 or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
             if refused:

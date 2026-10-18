@@ -65,12 +65,14 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 
+from themask.detect.lists import is_default_term
 from themask.detect.sweep import (
     Spans,
     existing_placeholders,
     is_bare_name,
     is_searchable,
     occurrences,
+    stands_as_a_name,
 )
 from themask.model import Finding, Group, PlaceholderType
 from themask.textnorm import (
@@ -286,13 +288,15 @@ class SurnamePolicy:
 
     ``allowed`` says whether a surname may be swept at all (the owner's never-hide list says no).
     ``only_one`` marks the surnames that are swept only when exactly one person found has them:
-    the default never-hide words ("Price", "Banks"). Any other surname that several people have
-    is a group of its own, to check. Where a surname is swept, the sweep takes it only where it
-    stands as a name (``sweep.stands_as_a_name``).
+    the default never-hide words ("Price", "Banks"). Any other surname that several people have,
+    or that is another person's first name, is a group of its own, to check. Where a surname is
+    swept, the sweep takes it only where it stands as a name (``sweep.stands_as_a_name``, with
+    ``is_term`` for the terms it may be part of).
     """
 
     allowed: Callable[[str], bool]
     only_one: Callable[[str], bool]
+    is_term: Callable[[str], bool] = is_default_term
 
 
 def group_findings(
@@ -322,8 +326,10 @@ def group_findings(
         for key in sorted(bucket.names):
             by_seed_key.setdefault(key, bucket)
 
+    is_term = surnames.is_term if surnames is not None else is_default_term
     pending: dict[PlaceholderType, list[Finding]] = defaultdict(list)
-    for finding in sorted(map(_as_named, findings), key=lambda f: (f.start, f.end)):
+    named = _companies_by_their_name([_as_named(f) for f in findings], seed_buckets)
+    for finding in sorted(named, key=lambda f: (f.start, f.end)):
         seed = by_seed_key.get(normalize(finding.text))
         if seed is not None and _may_join(finding.type, seed.type):
             seed.add(finding)
@@ -336,8 +342,8 @@ def group_findings(
             buckets += _by_value(kind, found)
     people = _people(pending[PERSON], buckets)
     companies = _companies(pending[COMPANY], buckets)
-    _place_people(people, buckets)
-    _place_companies(companies, buckets)
+    _place_people(people, buckets, text, is_term)
+    _place_companies(companies, buckets, text, is_term)
     buckets = [b for b in buckets if b.findings or b.seed is not None]
     aliased = _alias_forms(aliases, buckets)
     buckets += _settle_variants(buckets, text, keep_variant, aliased, surnames)
@@ -357,6 +363,24 @@ def _as_named(finding: Finding) -> Finding:
     if finding.type is PERSON and has_legal_form(finding.text):
         return replace(finding, type=COMPANY)
     return finding
+
+
+def _companies_by_their_name(findings: list[Finding], seeds: list[_Bucket]) -> list[Finding]:
+    """``findings`` with a "person" of two words or more that is a company's name without its
+    legal form made a company (ruling R55): "Gıda Sanayi" beside Gıda Sanayi A.Ş.
+    """
+    stems = {
+        company.stem
+        for company in [_Company.of(f.text) for f in findings if f.type is COMPANY]
+        + [c for seed in seeds for c in seed.companies]
+        if company.form is not None
+    }
+    return [
+        replace(f, type=COMPANY)
+        if f.type is PERSON and len(f.text.split()) > 1 and normalize(_without_the(f.text)) in stems
+        else f
+        for f in findings
+    ]
 
 
 def _may_join(finding_type: PlaceholderType, group_type: PlaceholderType) -> bool:
@@ -415,12 +439,28 @@ def _company_claims(key: str, buckets: list[_Bucket]) -> list[_Bucket]:
     return named or [b for b in buckets if b.type is COMPANY and key in b.first_words]
 
 
-def _place_people(mentions: dict[str, list[Finding]], buckets: list[_Bucket]) -> None:
-    """Each mention joins the one full name it fits; else it is a group of its own."""
+def _place_people(
+    mentions: dict[str, list[Finding]],
+    buckets: list[_Bucket],
+    text: str,
+    is_term: Callable[[str], bool],
+) -> None:
+    """Each mention joins the one full name it fits; else it is a group of its own.
+
+    A bare surname is a mention only where it stands as a name (ruling R54: "the Smith report"
+    and "Business Day" are left out), and one that is also another person's first name ("James"
+    with Sarah James and James Wilson) fits neither of them.
+    """
     for found in mentions.values():
         person = PersonName.of(found[0].text)
         claims = _person_claims(person, buckets)
-        if len(claims) == 1:
+        if claims and is_bare_name(PERSON, found[0].text):
+            found = [f for f in found if stands_as_a_name(text, f.start, f.end, is_term)]
+            if not found:
+                continue
+        others = [bucket for bucket in buckets if bucket not in claims]
+        first_name = person.is_one_word and _is_a_first_name(person.key, others)
+        if len(claims) == 1 and not first_name:
             _join(claims[0], found)
             continue
         if not claims and person.is_one_word and not _is_a_first_name(person.key, buckets):
@@ -429,7 +469,7 @@ def _place_people(mentions: dict[str, list[Finding]], buckets: list[_Bucket]) ->
                 _join(company, found)
                 continue
         # A surname without its full name is always checked; an initial when it fits several.
-        flagged = not person.is_initial or len(claims) > 1
+        flagged = not person.is_initial or len(claims) > 1 or first_name
         buckets.append(_mention(PERSON, found, flagged))
 
 
@@ -479,9 +519,16 @@ def _companies(findings: list[Finding], buckets: list[_Bucket]) -> dict[str, lis
     return mentions
 
 
-def _place_companies(mentions: dict[str, list[Finding]], buckets: list[_Bucket]) -> None:
+def _place_companies(
+    mentions: dict[str, list[Finding]],
+    buckets: list[_Bucket],
+    text: str,
+    is_term: Callable[[str], bool],
+) -> None:
     """Each single word joins the one company it fits, or the one person whose surname it is;
-    else it is a group of its own, to check when it fits several companies.
+    else it is a group of its own, to check when it fits several companies. A word that joins a
+    person as their surname does so only where it stands as a name (ruling R54): the model's
+    "Lodge" in "The Lodge" is the term, and is left out.
     """
     for key, found in mentions.items():
         claims = _company_claims(key, buckets)
@@ -490,9 +537,13 @@ def _place_companies(mentions: dict[str, list[Finding]], buckets: list[_Bucket])
             _join(company, found)
             continue
         if not claims:
-            people = _person_claims(PersonName.of(_without_the(found[0].text)), buckets)
-            if len(people) == 1:
-                _join(people[0], found)
+            person = PersonName.of(_without_the(found[0].text))
+            people = _person_claims(person, buckets)
+            others = [bucket for bucket in buckets if bucket not in people]
+            if len(people) == 1 and not _is_a_first_name(person.key, others):
+                _join(
+                    people[0], [f for f in found if stands_as_a_name(text, f.start, f.end, is_term)]
+                )
                 continue
         bucket = _mention(COMPANY, found, len(claims) > 1)
         bucket.companies.append(_Company.of(found[0].text))
@@ -631,6 +682,12 @@ def _settle_variants(
         derived[bucket] = forms
         for key in forms.keys() - own[bucket]:
             claimants[key].append(bucket)
+    for key in {key for forms in bare.values() for key in forms}:
+        # A surname that is another person's first name fits neither of them (ruling R54).
+        for bucket in buckets:
+            first = bucket.person.first if bucket.person is not None else ""
+            if first == key and bucket not in claimants[key]:
+                claimants[key].append(bucket)
     shared: dict[str, set[str]] = defaultdict(set)
     shared_type: dict[str, PlaceholderType] = {}
     for bucket, forms in derived.items():
@@ -649,7 +706,8 @@ def _settle_variants(
                 # Carter and of Carter Logistics Ltd).
                 people = any(claimant.type is PERSON for claimant in claimants[key])
                 shared_type.setdefault(key, PERSON if people else bucket.type)
-    return _shared_form_groups(buckets, shared, shared_type, text)
+    is_term = surnames.is_term if surnames is not None else is_default_term
+    return _shared_form_groups(buckets, shared, shared_type, text, is_term)
 
 
 def _shared_form_groups(
@@ -657,6 +715,7 @@ def _shared_form_groups(
     shared: dict[str, set[str]],
     shared_type: dict[str, PlaceholderType],
     text: str,
+    is_term: Callable[[str], bool],
 ) -> list[_Bucket]:
     """A group to check for each shared form that stands in ``text`` outside every finding."""
     taken = Spans(
@@ -669,7 +728,8 @@ def _shared_form_groups(
         bucket = _Bucket(kind, flagged=True, variants=set(shared[key]))
         for spelling in sorted(shared[key], key=lambda s: (-len(s), s)):
             as_a_name = is_bare_name(kind, spelling)
-            for start, end in occurrences(text, spelling, taken, as_a_name=as_a_name):
+            spans = occurrences(text, spelling, taken, as_a_name=as_a_name, is_term=is_term)
+            for start, end in spans:
                 bucket.add(Finding(kind, start, end, text[start:end], 1.0, "sweep"))
         if bucket.findings:
             bucket.variants |= {f.text for f in bucket.findings}
