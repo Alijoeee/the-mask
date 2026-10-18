@@ -1,6 +1,9 @@
-"""The temporary entry point: the guard, the log, then the name and version.
+"""The entry point: ``python -m themask`` puts the safeguards in place and opens the window.
 
-``python -m themask`` does only this until the window of Task 20 replaces it.
+The program that runs it in a process of its own does three things differently from a real start,
+so that the test needs neither a screen nor the language model: Qt draws offscreen (the conftest
+sets it), the engine is a stand-in that loads at once, and the event loop returns as soon as it is
+asked to run. Everything else, the start-up included, is the real code.
 """
 
 from __future__ import annotations
@@ -10,10 +13,36 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from themask.about import APP_NAME, VERSION
+import pytest
+
+from themask.about import APP_NAME
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+PROGRAM = """
+import runpy, socket
+from PySide6.QtWidgets import QApplication
+
+import themask.ui.workers as workers
+
+workers.load_default_engine = lambda: object()  # no language model
+
+def run_the_loop(*arguments):
+    windows = [w.windowTitle() for w in QApplication.topLevelWidgets() if w.isVisible()]
+    print("visible windows:", windows)
+    return 0
+
+QApplication.exec = run_the_loop
+try:
+    runpy.run_module("themask", run_name="__main__")
+except SystemExit as stop:
+    print("exit:", stop.code)
+try:
+    socket.create_connection(("127.0.0.1", 9))
+except OSError as error:
+    print(type(error).__name__)
+"""
 
 
 def run_python(data_dir: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -29,26 +58,35 @@ def run_python(data_dir: Path, *arguments: str) -> subprocess.CompletedProcess[s
     )
 
 
-def test_python_m_themask_prints_the_name_and_version(data_dir: Path):
-    result = run_python(data_dir, "-m", "themask")
-
+@pytest.fixture
+def started(data_dir: Path) -> subprocess.CompletedProcess[str]:
+    """The entry point run once, as the program above describes."""
+    result = run_python(data_dir, "-c", PROGRAM)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == f"{APP_NAME} {VERSION}\n"
-    assert result.stderr == ""
+    return result
+
+
+def test_python_m_themask_opens_the_window_and_ends_cleanly(
+    started: subprocess.CompletedProcess[str], data_dir: Path
+) -> None:
+    lines = started.stdout.splitlines()
+    assert f"visible windows: ['{APP_NAME}']" in lines
+    assert "exit: 0" in lines
     assert (data_dir / "logs" / "themask.log").is_file()  # the log was set up
+    assert (data_dir / "cases").is_dir()  # and the data folder made
 
 
-def test_the_entry_point_installs_the_network_guard(data_dir: Path):
-    program = (
-        "import runpy, socket\n"
-        "runpy.run_module('themask', run_name='__main__')\n"
-        "try:\n"
-        "    socket.create_connection(('127.0.0.1', 9))\n"
-        "except OSError as error:\n"
-        "    print(type(error).__name__)\n"
-    )
+def test_the_entry_point_installs_the_network_guard(
+    started: subprocess.CompletedProcess[str],
+) -> None:
+    assert started.stdout.splitlines()[-1] == "NetworkBlockedError"
 
-    result = run_python(data_dir, "-c", program)
 
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [f"{APP_NAME} {VERSION}", "NetworkBlockedError"]
+def test_the_entry_point_prints_nothing_to_the_terminal_of_its_own(
+    started: subprocess.CompletedProcess[str],
+) -> None:
+    assert started.stdout.splitlines() == [
+        f"visible windows: ['{APP_NAME}']",
+        "exit: 0",
+        "NetworkBlockedError",
+    ]
