@@ -18,11 +18,13 @@ Then each text part (the document, the headers, the footers, the notes), in read
 
 3. Runs that are in no paragraph (ruling R24), which the text map cannot see: what accepting or
    rejecting a block-level tracked change leaves behind.
-4. Fields (ruling R22) whose result is the author, user, file name, template or a property turn
-   into the plain text of their current result, so that updating the file cannot overwrite it.
+4. Fields (ruling R22) whose result is the author, user, file name or template, or comes from a
+   property or document variable that is removed (DOCPROPERTY, INFO, TITLE, SUBJECT, KEYWORDS,
+   COMMENTS, DOCVARIABLE ...), turn into the plain text of their current result, so that
+   updating the file cannot replace it by an error.
 5. Text kept in attributes (ruling R19): text watermarks, smart tags, custom XML tags, the items
-   of list content controls, form field data, link tooltips, descriptions of tables and the
-   hidden copy of a VML text box.
+   of list content controls, the title and tag of a content control, form field data, link
+   tooltips, descriptions of tables and the hidden copy of a VML text box.
 6. Hidden text: every run with ``w:vanish`` or ``w:specVanish``.
 7. Pictures, charts, diagrams and embedded objects become a note and their parts go; equations
    (ruling R17) and embedded documents (``w:altChunk``) become a note too. Then the drawings
@@ -99,6 +101,7 @@ _LAST_VALUE, _FF_DATA = _q("w", "lastValue"), _q("w", "ffData")
 _HYPERLINK, _TOOLTIP = _q("w", "hyperlink"), _q("w", "tooltip")
 _TBL_CAPTION, _TBL_DESCRIPTION = _q("w", "tblCaption"), _q("w", "tblDescription")
 _DATA_BINDING = _q("w", "dataBinding")
+_ALIAS, _TAG = _q("w", "alias"), _q("w", "tag")
 _DOC_VARS, _ATTACHED_TEMPLATE = _q("w", "docVars"), _q("w", "attachedTemplate")
 _RSID, _RSIDS, _TRACK_REVISIONS = _q("w", "rsid"), _q("w", "rsids"), _q("w", "trackRevisions")
 _MAIL_MERGE = _q("w", "mailMerge")
@@ -120,17 +123,26 @@ _ALTERNATE, _CHOICE, _FALLBACK = (
 _MC_WRAPPERS = frozenset({_ALTERNATE, _CHOICE, _FALLBACK})
 _GFX_DATA = _q("o", "gfxdata")
 
-# R22: the fields that show who or where the file is from. Word ignores case in a field's name.
-_PERSONAL_FIELDS = frozenset(
+# R22: the fields that show who or where the file is from (author, user, file name, template) and
+# those that read a property or a document variable the cleaner removes. Updating one in the
+# masked file would put an error or nothing where the masked result stands, so each becomes the
+# plain text of its result. Word ignores case in a field's name.
+_FLATTENED_FIELDS = frozenset(
     {
         "AUTHOR",
         "USERNAME",
         "USERINITIALS",
+        "USERADDRESS",
         "LASTSAVEDBY",
         "FILENAME",
         "TEMPLATE",
         "DOCPROPERTY",
         "INFO",
+        "TITLE",
+        "SUBJECT",
+        "KEYWORDS",
+        "COMMENTS",
+        "DOCVARIABLE",
     }
 )
 _FIELD_NAME = re.compile(r"\s*([A-Za-z]+)\b")
@@ -179,8 +191,8 @@ class CleanReport:
     ``altchunks_removed`` the notes put in place of equations and embedded documents, and
     ``attributes_cleared`` the pieces of text kept in attributes that were removed: a tooltip, a
     description, a title, the name of a shape, a text watermark, a smart tag, the items of a
-    list, the data of a form field or the description of a table. ``stray_runs_removed`` counts
-    the runs that were in no paragraph (ruling R24).
+    list, the title or tag of a content control, the data of a form field or the description of a
+    table. ``stray_runs_removed`` counts the runs that were in no paragraph (ruling R24).
     """
 
     comments: int = 0
@@ -239,7 +251,7 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
     return report
 
 
-# ---- comments ---------------------------------------------------------------------------------
+# ---- comments ------------------------------------------------------------------------------------
 
 
 def _remove_comments(pkg: DocxPackage, main: str, texts: list[str], report: CleanReport) -> None:
@@ -283,11 +295,11 @@ def _comment_parts(pkg: DocxPackage, main: str) -> list[str]:
     ]
 
 
-# ---- revision traces ----------------------------------------------------------------------------
+# ---- revision traces -----------------------------------------------------------------------------
 
 
 def _strip_rsids(pkg: DocxPackage, texts: list[str]) -> None:
-    """Takes every ``w:rsid*`` attribute, and the ``w:rsid`` and ``w:rsids`` elements, out of the XML.
+    """Takes every ``w:rsid*`` attribute, and the ``w:rsid`` and ``w:rsids`` elements, out.
 
     They tell which editing session wrote which run: a trace of who worked on the file and when.
     The text parts are read anyway; any other XML part under word/ only when its bytes mention one.
@@ -327,7 +339,7 @@ def _remove_stray_runs(root: etree._Element) -> int:
     return count
 
 
-# ---- fields (ruling R22) --------------------------------------------------------------------------
+# ---- fields (ruling R22) -------------------------------------------------------------------------
 
 
 @dataclass
@@ -341,16 +353,16 @@ class _Field:
     end: etree._Element | None = None
 
 
-def _is_personal(instruction: str) -> bool:
+def _is_flattened(instruction: str) -> bool:
     name = _FIELD_NAME.match(instruction)
-    return name is not None and name.group(1).upper() in _PERSONAL_FIELDS
+    return name is not None and name.group(1).upper() in _FLATTENED_FIELDS
 
 
 def _flatten_fields(root: etree._Element) -> int:
-    """Turns the personal fields into plain text: the result stays, the field around it goes."""
+    """Turns the fields listed in ``_FLATTENED_FIELDS`` into their result as plain text."""
     count = 0
     for simple in _live(root, _FLD_SIMPLE):
-        if _is_personal(simple.get(_INSTR, "")):
+        if _is_flattened(simple.get(_INSTR, "")):
             _unwrap(simple, drop=(_FLD_DATA,))
             count += 1
     stack: list[_Field] = []
@@ -372,7 +384,7 @@ def _flatten_fields(root: etree._Element) -> int:
     # A field never closed is left as it is. So is one inside the instruction of another: its
     # result would become text in the middle of an instruction, which Word reads as code.
     for ended in finished:
-        if ended.in_instruction or not _is_personal("".join(t.text or "" for t in ended.code)):
+        if ended.in_instruction or not _is_flattened("".join(t.text or "" for t in ended.code)):
             continue
         for marker in (ended.begin, *ended.code, ended.separate, ended.end):
             if marker is not None:
@@ -381,7 +393,7 @@ def _flatten_fields(root: etree._Element) -> int:
     return count
 
 
-# ---- text kept in attributes (ruling R19) -----------------------------------------------------------
+# ---- text kept in attributes (ruling R19) --------------------------------------------------------
 
 
 def _clear_attribute_text(root: etree._Element) -> int:
@@ -397,6 +409,11 @@ def _clear_attribute_text(root: etree._Element) -> int:
         control.attrib.pop(_LAST_VALUE, None)
     for data in _live(root, _FF_DATA):
         _remove(data)
+        count += 1
+    # The title and the tag of a content control are free text: a system that assembles the
+    # contract may fill them with a value. The control, its id and its content stay.
+    for label in _live(root, _ALIAS, _TAG):  # w:alias and w:tag exist in w:sdtPr only
+        _remove(label)
         count += 1
     for link in _live(root, _HYPERLINK):
         count += link.attrib.pop(_TOOLTIP, None) is not None
@@ -436,7 +453,7 @@ def _anonymise_shapes(root: etree._Element, numbers: Iterator[int]) -> int:
     return count
 
 
-# ---- hidden text -------------------------------------------------------------------------------------
+# ---- hidden text ---------------------------------------------------------------------------------
 
 
 def _remove_hidden_runs(root: etree._Element) -> int:
@@ -458,7 +475,7 @@ def _is_on(toggle: etree._Element) -> bool:
     return toggle.get(_VAL, "true").casefold() not in {"0", "false", "off"}
 
 
-# ---- pictures, objects, equations and embedded documents (ruling R17) -----------------------------------
+# ---- pictures, objects, equations and embedded documents (ruling R17) ----------------------------
 
 
 def _replace_pictures(root: etree._Element, report: CleanReport) -> None:
@@ -529,11 +546,11 @@ def _in_run(element: etree._Element) -> bool:
     return parent is not None and parent.tag == _R
 
 
-# ---- the second copy of each drawing (ruling R16) -----------------------------------------------------------
+# ---- the second copy of each drawing (ruling R16) ------------------------------------------------
 
 
 def _remove_fallbacks(root: etree._Element) -> int:
-    """Deletes every ``mc:Fallback`` and puts the content of the first ``mc:Choice`` in its place."""
+    """Deletes every ``mc:Fallback``; the first ``mc:Choice`` takes the place of its container."""
     removed = 0
     for alternate in list(root.iter(_ALTERNATE)):
         if not _in_tree(alternate, root):  # it was in a fallback that is gone
@@ -554,7 +571,7 @@ def _remove_fallbacks(root: etree._Element) -> int:
     return removed
 
 
-# ---- file properties, custom XML, the glossary and the settings -------------------------------------------------
+# ---- file properties, custom XML, the glossary and the settings ----------------------------------
 
 
 def _clean_properties(pkg: DocxPackage, stamp: str, report: CleanReport) -> None:
@@ -655,12 +672,12 @@ def _sweep(pkg: DocxPackage) -> None:
             pkg.remove_part(name)
 
 
-# ---- the package: relationships and parts ---------------------------------------------------------------------
+# ---- the package: relationships and parts --------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class _Rel:
-    """A relationship: its element, its id and type, and the part it leads to if the package has it."""
+    """A relationship: its element, id and type, and the part it leads to if the package has it."""
 
     element: etree._Element
     id: str
@@ -708,7 +725,7 @@ def _is_rels(name: str) -> bool:
 
 
 def _source_of(rels_name: str) -> str:
-    """The part a .rels part belongs to: ``word/document.xml`` for ``word/_rels/document.xml.rels``."""
+    """The part a .rels part belongs to: word/document.xml for word/_rels/document.xml.rels."""
     folder = posixpath.dirname(posixpath.dirname(rels_name))
     return posixpath.join(folder, posixpath.basename(rels_name)[: -len(".rels")])
 
@@ -728,7 +745,7 @@ def _referenced(pkg: DocxPackage, name: str) -> bool:
 
 
 def _find_part(pkg: DocxPackage, source: str, suffix: str, default: str) -> str | None:
-    """The part ``source`` relates to with a type ending in ``suffix``, else ``default`` if there."""
+    """The part ``source`` relates to by a type ending in ``suffix``, else ``default`` if any."""
     for rel in _relationships(pkg, source):
         if rel.part is not None and rel.type.casefold().endswith(suffix):
             return rel.part
@@ -799,7 +816,7 @@ def _w3c(now: datetime | None) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# ---- the XML: finding, unwrapping and removing ------------------------------------------------------------------
+# ---- the XML: finding, unwrapping and removing ---------------------------------------------------
 
 
 def _live(root: etree._Element, *tags: str) -> Iterator[etree._Element]:

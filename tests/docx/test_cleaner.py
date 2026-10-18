@@ -67,7 +67,7 @@ VIEWS: tuple[View, ...] = ("accepted", "rejected")
 Row = tuple[str, str] | tuple[str, str, str]  # (type, target) or (type, target, "External")
 
 
-# ---- building small files and checking big ones -----------------------------------------------
+# ---- building small files and checking big ones --------------------------------------------------
 
 
 def part(root: str, content: str = "") -> bytes:
@@ -224,7 +224,7 @@ def with_header(body: str, header: str) -> DocxPackage:
 HIDDEN = "<w:r><w:rPr><w:vanish/></w:rPr><w:t>hidden</w:t></w:r>"
 
 
-# ---- the plan's tests, on the corpus ----------------------------------------------------------
+# ---- the plan's tests, on the corpus -------------------------------------------------------------
 
 
 def test_comments_gone(corpus: Path) -> None:
@@ -299,7 +299,7 @@ def test_file_still_opens_with_python_docx(corpus: Path, tmp_path: Path) -> None
     assert DocxPackage.open(tmp_path / "c.docx").TEXT_PARTS
 
 
-# ---- more on the corpus: where else the values were ------------------------------------------
+# ---- more on the corpus: where else the values were ----------------------------------------------
 
 
 def test_the_template_path_goes_with_its_relationship(corpus: Path) -> None:
@@ -420,7 +420,7 @@ def visible_text(pkg: DocxPackage, view: View) -> str:
     return extract_text(twin, view).text
 
 
-# ---- the report ---------------------------------------------------------------------------------
+# ---- the report ----------------------------------------------------------------------------------
 
 
 def test_the_report_of_a_file_with_nothing_to_clean() -> None:
@@ -439,7 +439,7 @@ def test_parts_removed_are_the_names_gone_in_the_order_of_the_zip(corpus: Path) 
     assert "customXml/_rels/item1.xml.rels" in rep.parts_removed  # its relationships go with it
 
 
-# ---- comments -------------------------------------------------------------------------------------
+# ---- comments ------------------------------------------------------------------------------------
 
 _W15 = "http://schemas.microsoft.com/office/word/2012/wordml"
 _W16CID = "http://schemas.microsoft.com/office/word/2016/wordml/cid"
@@ -550,7 +550,7 @@ def test_comments_in_footnotes_are_stripped_too() -> None:
     assert b"comment" not in document(pkg, "word/footnotes.xml")
 
 
-# ---- revision traces and settings -----------------------------------------------------------------
+# ---- revision traces and settings ----------------------------------------------------------------
 
 
 def test_rsids_are_stripped_from_every_part() -> None:
@@ -653,7 +653,7 @@ def test_settings_without_relationships_or_without_settings_are_fine() -> None:
     assert clean(package()) == CleanReport()  # no settings part at all
 
 
-# ---- hidden text ------------------------------------------------------------------------------------
+# ---- hidden text ---------------------------------------------------------------------------------
 
 
 def test_hidden_runs_are_removed_wherever_they_are() -> None:
@@ -710,7 +710,7 @@ def test_a_hidden_picture_leaves_no_note_and_no_file() -> None:
     assert_consistent(pkg)
 
 
-# ---- runs outside any paragraph (ruling R24) ---------------------------------------------------------------
+# ---- runs outside any paragraph (ruling R24) -----------------------------------------------------
 
 
 def test_runs_outside_any_paragraph_are_removed(corpus: Path, tmp_path: Path) -> None:
@@ -782,7 +782,7 @@ def test_runs_in_paragraphs_and_in_text_boxes_are_not_stray() -> None:
     assert text_of(pkg) == "Body\nBox\nCell"
 
 
-# ---- fields (ruling R22) ------------------------------------------------------------------------
+# ---- fields (ruling R22) -------------------------------------------------------------------------
 
 
 def test_personal_simple_fields_become_plain_text() -> None:
@@ -820,6 +820,32 @@ def test_each_personal_field_is_flattened(instruction: str) -> None:
     simple = f'<w:fldSimple w:instr="{instruction} x"><w:r><w:t>A</w:t></w:r></w:fldSimple>'
     pkg = package(para(simple, field(f" {instruction} y ", run("B"))))
     assert clean(pkg).fields_flattened == 2 and text_of(pkg) == "AB"
+
+
+@pytest.mark.parametrize(
+    "instruction", ["DOCVARIABLE", "TITLE", "SUBJECT", "KEYWORDS", "COMMENTS", "USERADDRESS"]
+)
+def test_each_field_that_reads_what_the_cleaner_removes_is_flattened(instruction: str) -> None:
+    # Ruling R22, extended: these read a document variable or a property the cleaner removes (or the
+    # user's address), so updating one in the masked file would put an error or nothing where the
+    # masked result stands.
+    simple = f'<w:fldSimple w:instr="{instruction} x"><w:r><w:t>A</w:t></w:r></w:fldSimple>'
+    pkg = package(para(simple, field(f" {instruction} y ", run("B"))))
+    assert clean(pkg).fields_flattened == 2 and text_of(pkg) == "AB"
+    assert b"fldSimple" not in document(pkg) and b"fldChar" not in document(pkg)
+
+
+def test_a_field_that_reads_a_removed_document_variable_keeps_its_result_as_text() -> None:
+    variables = '<w:docVars><w:docVar w:name="ClientName" w:val="Acme Ltd"/></w:docVars>'
+    pkg = package(
+        para(run("Client: "), field(r" DOCVARIABLE ClientName \* MERGEFORMAT ", run("Acme Ltd"))),
+        rels=[(SETTINGS_REL, "settings.xml")],
+        parts={"word/settings.xml": part("w:settings", variables)},
+        types={"word/settings.xml": SETTINGS_TYPE},
+    )
+    rep = clean(pkg)
+    assert rep.fields_flattened == 1 and text_of(pkg) == "Client: Acme Ltd"
+    assert b"DOCVARIABLE" not in everywhere(pkg) and b"docVar" not in everywhere(pkg)
 
 
 def test_personal_complex_fields_become_plain_text() -> None:
@@ -925,7 +951,7 @@ def test_a_field_that_is_never_closed_does_no_harm() -> None:
     assert clean(pkg).fields_flattened == 0 and "Joel" in text_of(pkg)
 
 
-# ---- text kept in attributes (ruling R19) -------------------------------------------------------------
+# ---- text kept in attributes (ruling R19) --------------------------------------------------------
 
 _WATERMARK = (
     '<w:r><w:rPr><w:noProof/></w:rPr><w:pict><v:shapetype id="_x0000_t136" coordsize="21600,21600">'
@@ -987,12 +1013,41 @@ def test_the_items_of_a_list_content_control_go_and_its_text_stays() -> None:
         f"<w:sdtContent>{para(run('Pick'))}</w:sdtContent></w:sdt>"
     )
     pkg = package(controls)
-    assert clean(pkg).attributes_cleared == 2
+    assert clean(pkg).attributes_cleared == 3  # the two lists, and the title of the first control
     assert text_of(pkg) == "Acme Ltd\nPick"
-    for gone in (b"listItem", b"Globex", b"Initech", b"lastValue"):
+    for gone in (b"listItem", b"Globex", b"Initech", b"lastValue", b"alias"):
         assert gone not in document(pkg)
     assert pkg.xml("word/document.xml").find(".//w:dropDownList", NS) is not None  # still a list
     assert pkg.xml("word/document.xml").find(".//w:comboBox", NS) is not None
+
+
+def test_the_title_and_tag_of_a_content_control_go(corpus: Path, tmp_path: Path) -> None:
+    # Ruling R19, extended (found by Task 13): w:alias and w:tag are free text, and a document
+    # assembly system may fill them with a value. The control, its id and its text stay.
+    pkg = DocxPackage.open(corpus / "supply-01.docx")
+    w = f"{{{NS['w']}}}"
+    body = pkg.xml("word/document.xml").find(f"{w}body")
+    control = body.makeelement(f"{w}sdt", {})
+    properties = etree.SubElement(control, f"{w}sdtPr")
+    etree.SubElement(properties, f"{w}alias").set(f"{w}val", "Counterparty: Zeta Holdings")
+    etree.SubElement(properties, f"{w}tag").set(f"{w}val", "zeta_holdings_2026")
+    etree.SubElement(properties, f"{w}id").set(f"{w}val", "4711")
+    paragraph = etree.SubElement(etree.SubElement(control, f"{w}sdtContent"), f"{w}p")
+    etree.SubElement(etree.SubElement(paragraph, f"{w}r"), f"{w}t").text = "Zeta Holdings Ltd"
+    body.insert(0, control)
+
+    rep = clean(pkg, now=NOW)
+    assert rep.attributes_cleared == 2  # the title and the tag; the contract has nothing else
+    saved = tmp_path / "cleaned.docx"
+    pkg.save(saved)
+    with zipfile.ZipFile(saved) as archive:
+        everything = b"".join(archive.read(name) for name in archive.namelist())
+    assert b"Counterparty" not in everything and b"zeta_holdings_2026" not in everything
+    reopened = DocxPackage.open(saved)
+    kept = reopened.xml("word/document.xml").find(f".//{w}sdt/{w}sdtPr")
+    assert kept.find(f"{w}alias") is None and kept.find(f"{w}tag") is None
+    assert kept.find(f"{w}id").get(f"{w}val") == "4711"  # the control can still be told apart
+    assert extract_text(reopened).text.startswith("Zeta Holdings Ltd")  # and keeps its text
 
 
 def test_form_field_data_goes_and_the_field_stays() -> None:
@@ -1071,7 +1126,7 @@ def test_the_hidden_copy_of_a_vml_text_box_goes_with_its_text_kept() -> None:
     assert pkg.xml("word/document.xml").find(".//w:pict", NS) is not None  # a text box is kept
 
 
-# ---- equations and embedded content (ruling R17) ------------------------------------------------------
+# ---- equations and embedded content (ruling R17) -------------------------------------------------
 
 
 def test_equations_become_a_note() -> None:
@@ -1110,7 +1165,7 @@ def test_embedded_content_becomes_a_note_and_its_part_goes(target: str, content_
     assert_consistent(pkg)
 
 
-# ---- pictures and embedded objects ------------------------------------------------------------------
+# ---- pictures and embedded objects ---------------------------------------------------------------
 
 
 def test_pictures_in_headers_and_footers_count_too() -> None:
@@ -1322,7 +1377,7 @@ def test_a_picture_with_a_vml_fallback_is_one_picture() -> None:
     assert_consistent(pkg)
 
 
-# ---- the two copies of a text box (ruling R16) ----------------------------------------------------------
+# ---- the two copies of a text box (ruling R16) ---------------------------------------------------
 
 
 def test_an_alternate_content_with_only_a_fallback_is_removed_whole() -> None:
@@ -1343,7 +1398,7 @@ def test_of_several_choices_the_first_is_kept() -> None:
     assert text_of(pkg) == "first"
 
 
-# ---- file properties ---------------------------------------------------------------------------------------
+# ---- file properties -----------------------------------------------------------------------------
 
 _CORE = (
     '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
@@ -1525,7 +1580,7 @@ def test_printer_settings_and_signatures_go() -> None:
     assert_consistent(pkg)
 
 
-# ---- custom XML, bindings, glossary --------------------------------------------------------------------------
+# ---- custom XML, bindings, glossary --------------------------------------------------------------
 
 
 def test_custom_xml_parts_and_data_bindings_go() -> None:
