@@ -455,7 +455,7 @@ def _place_people(
         person = PersonName.of(found[0].text)
         claims = _person_claims(person, buckets)
         if claims and is_bare_name(PERSON, found[0].text):
-            found = [f for f in found if stands_as_a_name(text, f.start, f.end, is_term)]
+            found = [f for f in found if _a_name_there(text, f, is_term)]
             if not found:
                 continue
         others = [bucket for bucket in buckets if bucket not in claims]
@@ -471,6 +471,17 @@ def _place_people(
         # A surname without its full name is always checked; an initial when it fits several.
         flagged = not person.is_initial or len(claims) > 1 or first_name
         buckets.append(_mention(PERSON, found, flagged))
+
+
+def _a_name_there(text: str, finding: Finding, is_term: Callable[[str], bool]) -> bool:
+    """Whether ``finding``, a bare name that joins a person as their surname, stands there as a
+    name (ruling R56): the owner's own entries always do, and what the engine reported does
+    unless a determiner stands before it ("the Smith file").
+    """
+    if finding.source in ("list", "user"):
+        return True
+    engine = finding.source != "sweep"
+    return stands_as_a_name(text, finding.start, finding.end, is_term, found_by_engine=engine)
 
 
 def _is_a_first_name(key: str, buckets: list[_Bucket]) -> bool:
@@ -541,9 +552,7 @@ def _place_companies(
             people = _person_claims(person, buckets)
             others = [bucket for bucket in buckets if bucket not in people]
             if len(people) == 1 and not _is_a_first_name(person.key, others):
-                _join(
-                    people[0], [f for f in found if stands_as_a_name(text, f.start, f.end, is_term)]
-                )
+                _join(people[0], [f for f in found if _a_name_there(text, f, is_term)])
                 continue
         bucket = _mention(COMPANY, found, len(claims) > 1)
         bucket.companies.append(_Company.of(found[0].text))
@@ -722,13 +731,20 @@ def _shared_form_groups(
         [(f.start, f.end) for bucket in buckets for f in bucket.findings]
         + [(p.start, p.end) for p in existing_placeholders(text)]
     )
+    names = {normalize(v) for bucket in buckets if bucket.type in _NAMES for v in bucket.variants}
+
+    def is_name(word: str) -> bool:
+        return normalize(word) in names
+
     new = []
     for key in sorted(shared, key=lambda k: (-max(map(len, shared[k])), k)):
         kind = shared_type[key]
         bucket = _Bucket(kind, flagged=True, variants=set(shared[key]))
         for spelling in sorted(shared[key], key=lambda s: (-len(s), s)):
             as_a_name = is_bare_name(kind, spelling)
-            spans = occurrences(text, spelling, taken, as_a_name=as_a_name, is_term=is_term)
+            spans = occurrences(
+                text, spelling, taken, as_a_name=as_a_name, is_term=is_term, is_name=is_name
+            )
             for start, end in spans:
                 bucket.add(Finding(kind, start, end, text[start:end], 1.0, "sweep"))
         if bucket.findings:

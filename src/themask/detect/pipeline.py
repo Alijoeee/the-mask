@@ -198,7 +198,7 @@ def analyze(
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
     _keep_shared_variants_out(seeds)
-    found += _seed_matches(text, seeds, placeholders, is_term)
+    found += _seed_matches(text, seeds, placeholders, is_term, names)
 
     policy = SurnamePolicy(
         allowed=lambda form: not on_never_hide_list(form, user_lists, case),
@@ -403,7 +403,8 @@ def _surnames_kept(
     """The spans of the people found as one capitalised word, after an honorific or not, that is
     a default never-hide term ("Price", "Ms Banks"), where that word is a surname all the same
     (ruling R42): exactly one full name found ends with it, and it stands as a name
-    (``stands_as_a_name``: "the Price" is the price, "1 May 2026" a date). The owner's own
+    (``stands_as_a_name`` for what the engine saw: no determiner before it, ruling R56). The
+    owner's own
     never-hide lists always win. These stay hidden, and their groups are marked for checking.
     """
     full_names: dict[str, set[str]] = defaultdict(set)
@@ -423,7 +424,7 @@ def _surnames_kept(
             and not on_never_hide_list(word, user, case)
             and not on_never_hide_list(finding.text, user, case)
             and len(full_names.get(person.last, ())) == 1
-            and stands_as_a_name(text, finding.start, finding.end, is_term)
+            and stands_as_a_name(text, finding.start, finding.end, found_by_engine=True)
         ):
             spans.add((finding.start, finding.end))
     return spans
@@ -453,9 +454,15 @@ def _seed_matches(
     seeds: list[Group],
     placeholders: list[PlaceholderMatch],
     is_term: Callable[[str], bool],
+    names: list[str],
 ) -> list[Finding]:
     """Every occurrence of the seeds' variants, longest first, as sweep findings."""
     taken = Spans((p.start, p.end) for p in placeholders)
+    known = {normalize(name) for name in names}
+
+    def is_name(word: str) -> bool:
+        return normalize(word) in known
+
     variants = sorted(
         ((v, seed) for seed in seeds for v in seed.variants if is_searchable(v)),
         key=lambda pair: (-len(pair[0]), pair[0]),
@@ -463,7 +470,10 @@ def _seed_matches(
     found = []
     for variant, seed in variants:
         as_a_name = is_bare_name(seed.type, variant)
-        for start, end in occurrences(text, variant, taken, as_a_name=as_a_name, is_term=is_term):
+        spans = occurrences(
+            text, variant, taken, as_a_name=as_a_name, is_term=is_term, is_name=is_name
+        )
+        for start, end in spans:
             found.append(Finding(seed.type, start, end, text[start:end], 1.0, "sweep"))
     return found
 

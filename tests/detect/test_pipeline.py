@@ -610,6 +610,116 @@ def test_a_month_surname_beside_a_number_is_a_date(lists):
     assert a.groups[0].needs_check
 
 
+# --- Ruling R56: where the engine saw a name; separators; phrases over a connective -------------
+
+# Real engine. The flag is R42/R50's own: set where the hidden surname is a default word.
+SEEN_AND_SEPARATED = [
+    (
+        "John Smith signs for the Supplier.\nSmith Director",
+        "[PERSON_1] signs for the Supplier.\n[PERSON_1] Director",
+        False,
+    ),
+    (
+        "John Smith signs for the Supplier.\nSigned: ____\nSMITH\nDirector",
+        "[PERSON_1] signs for the Supplier.\nSigned: ____\n[PERSON_1]\nDirector",
+        False,
+    ),
+    (
+        "Katie Price signs for the Supplier.\nDear Price,\nPlease find the order attached.",
+        "[PERSON_1] signs for the Supplier.\nDear [PERSON_1],\nPlease find the order attached.",
+        True,
+    ),
+    # hidden before ruling R56 and still so
+    (
+        "Katie Price signs for the Supplier.\nPrice, Director",
+        "[PERSON_1] signs for the Supplier.\n[PERSON_1], Director",
+        True,
+    ),
+    (
+        "Katie Price signs for the Supplier.\nPrice\nDirector",
+        "[PERSON_1] signs for the Supplier.\n[PERSON_1]\nDirector",
+        True,
+    ),
+    (
+        "John Smith signs for the Supplier.\nYours, Smith",
+        "[PERSON_1] signs for the Supplier.\nYours, [PERSON_1]",
+        False,
+    ),
+    # the reviewer's NB2: a phrase over a lowercase connective stays, the person is still hidden
+    (
+        "Hugh Grant signs for the Licensor.\n2. Grant of Rights\nGrant shall attend.",
+        "[PERSON_1] signs for the Licensor.\n2. Grant of Rights\n[PERSON_1] shall attend.",
+        False,
+    ),
+    (
+        "Ann Power signs for the Buyer.\nPower of Attorney dated 1 March 2026.\nPower shall attend.",
+        "[PERSON_1] signs for the Buyer.\nPower of Attorney dated 1 March 2026.\n[PERSON_1] shall attend.",
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize("t,expected,flagged", SEEN_AND_SEPARATED)
+def test_a_surname_by_a_separator_is_hidden_and_a_phrase_stays(engine, lists, t, expected, flagged):
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == expected
+    (person,) = [g for g in a.groups if g.type == P]
+    assert person.needs_check == flagged
+
+
+def test_names_on_both_sides_of_a_connective_are_both_hidden(engine, lists):
+    t = "Katie Price and John Smith sign for the Buyer. Price and Smith sign the annex."
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        "[PERSON_1] and [PERSON_2] sign for the Buyer. [PERSON_1] and [PERSON_2] sign the annex."
+    )
+
+
+@pytest.mark.parametrize(
+    "t,expected",
+    [
+        (
+            "John Smith signs for the Supplier. Approved by Smith Finance Director.",
+            "[PERSON_1] signs for the Supplier. Approved by [PERSON_1] Finance Director.",
+        ),
+        (
+            "John Smith signs for the Supplier.\nName:\tSmith\tTitle:\tDirector",
+            "[PERSON_1] signs for the Supplier.\nName:\t[PERSON_1]\tTitle:\tDirector",
+        ),
+        (
+            "John Smith signs for the Supplier. Copies go to Smith/Jones.",
+            "[PERSON_1] signs for the Supplier. Copies go to [PERSON_1]/Jones.",
+        ),
+        (
+            "Sue Field signs for the Licensor.\nField of Use: Europe.\nField shall attend.",
+            "[PERSON_1] signs for the Licensor.\nField of Use: Europe.\n[PERSON_1] shall attend.",
+        ),
+    ],
+)
+def test_the_sweep_by_a_separator_where_the_engine_found_only_the_person(lists, t, expected):
+    # Stub: the engine finds the full name only, so these spots are the sweep's.
+    full = t.split(" signs")[0]
+    a = analyze(one(t), FixedEngine(person_at(t, full)), lists)
+    assert masked(a) == expected
+
+
+def test_a_surname_the_engine_found_needs_only_no_determiner(lists):
+    # Ruling R56 (a): where the engine saw a name, only a determiner makes it a word.
+    t = "John Smith signs. Smith Holdings shall deliver; the Smith file is closed."
+    first_bare = t.index("Smith Holdings")
+    the_file = t.index("Smith file")
+    engine = FixedEngine(
+        person_at(t, "John Smith"),
+        Finding(P, first_bare, first_bare + 5, "Smith", 0.85, "model"),
+        Finding(P, the_file, the_file + 5, "Smith", 0.85, "model"),
+    )
+    a = analyze(one(t), engine, lists)
+    assert (
+        masked(a)
+        == "[PERSON_1] signs. [PERSON_1] Holdings shall deliver; the Smith file is closed."
+    )
+
+
 # --- Ruling R55: parties that are people, people that are companies (real engine) -------------
 
 

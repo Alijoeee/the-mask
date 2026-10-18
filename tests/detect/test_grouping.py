@@ -157,6 +157,14 @@ def test_a_word_that_joins_a_person_as_their_surname_must_stand_as_a_name():
     assert [f.start for f in g.findings] == [0, txt.rindex("Lodge")]
 
 
+def test_a_surname_the_engine_found_beside_a_capital_still_joins_its_person():
+    # Ruling R56 (a): the engine saw a name there; only a determiner would make it a word.
+    txt = "John Smith signs. Smith Holdings shall deliver."
+    fs = [F(P, "John Smith", txt), F(P, "Smith", txt, last=True)]
+    (g,) = group_findings(fs, txt)
+    assert [f.text for f in g.findings] == ["John Smith", "Smith"]
+
+
 def test_a_person_named_like_a_company_without_its_legal_form_joins_it():
     # Ruling R55 (reviewer's O3)
     txt = "Gıda Sanayi A.Ş. signs. Gıda Sanayi invoices."

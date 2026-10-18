@@ -284,8 +284,52 @@ def test_a_name_stands_alone(text, word, expected):
 
 
 def test_a_name_is_not_part_of_a_term_of_the_callers_lists():
-    text = "Deliveries pass the old Gate of Honour daily. Gate shall attend."
+    text = "Unload at Gate area only. Gate shall attend."
     start = text.index("Gate")
-    assert stands_as_a_name(text, start, start + 4)  # the defaults know no "Gate of Honour"
-    terms = {"gate of honour"}
+    assert stands_as_a_name(text, start, start + 4)  # the defaults know no "Gate area"
+    terms = {"gate area"}
     assert not stands_as_a_name(text, start, start + 4, lambda phrase: phrase.casefold() in terms)
+
+
+# --- Ruling R56: what the engine saw, separators, phrases over a connective --------------------
+
+
+@pytest.mark.parametrize(
+    "text,word,expected",
+    [
+        ("Dear Price,", "Price", True),  # a salutation separates
+        ("To Smith, for signature", "Smith", True),
+        ("Smith Director", "Smith", True),  # a job title after the name separates
+        ("Approved by Smith Finance Director.", "Smith", True),
+        ("Smith Holdings shall deliver.", "Smith", False),
+        ("Name:\tSmith\tTitle:\tDirector", "Smith", True),  # a tab separates
+        ("Name: Smith Title: Director", "Smith", True),  # so does a label's colon
+        ("SMITH", "SMITH", True),  # a line of the name alone is no heading
+        ("Signed: ____ SMITH", "SMITH", True),
+        ("2. GRANT OF LICENCE", "GRANT", False),
+        ("2. Grant of Rights", "Grant", False),  # a phrase over a lowercase connective
+        ("Power of Attorney dated 1 March 2026.", "Power", False),
+        ("Field of Use: Europe.", "Field", False),
+        ("Rights of Grant apply.", "Grant", False),
+        ("Price and Smith sign.", "Price", False),  # unless the word beyond is a name found
+    ],
+)
+def test_a_swept_name_stands_alone(text, word, expected):
+    start = text.index(word)
+    assert stands_as_a_name(text, start, start + len(word)) is expected
+
+
+def test_a_name_found_beyond_a_connective_is_no_phrase():
+    text = "Price and Smith sign."
+    names = {"price", "smith"}
+    assert stands_as_a_name(text, 0, 5, is_name=lambda word: word.casefold() in names)
+
+
+def test_where_the_engine_saw_a_name_only_a_determiner_counts():
+    text = "Smith Holdings shall deliver; the Smith file; 2. GRANT OF LICENCE; 1 May 2026"
+    for word, after_the, expected in [("Smith", False, True), ("Smith", True, False)]:
+        start = text.index("the Smith") + 4 if after_the else text.index(word)
+        assert stands_as_a_name(text, start, start + len(word), found_by_engine=True) is expected
+    for word in ("GRANT", "May"):
+        start = text.index(word)
+        assert stands_as_a_name(text, start, start + len(word), found_by_engine=True)

@@ -31,6 +31,7 @@ from bisect import bisect_left, bisect_right, insort
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass
 
+from themask.detect.contract_rules import is_job_title
 from themask.detect.lists import is_default_term, is_month
 from themask.model import Finding, FindingSource, Group, PlaceholderType
 from themask.placeholders import PlaceholderMatch, find_placeholders
@@ -76,11 +77,22 @@ def after_a_determiner(text: str, start: int) -> bool:
 
 # Spaces within a line: a space, a tab, a non-breaking space, but no line or paragraph break.
 _SPACE = r"[^\S\n\r\f\v\x1c-\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]"
+# The spaces between two words of one phrase: as _SPACE, but no tab either, which parts the
+# fields of a form ("Name:\tSmith\tTitle:\tDirector").
+_INLINE = r"[^\S\t\n\r\f\v\x1c-\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]"
 _WORD = r"[^\W_][\w'\N{RIGHT SINGLE QUOTATION MARK}\-]*"
-_WORD_BEFORE = re.compile(f"({_WORD}){_SPACE}+\\Z")
-_WORD_AFTER = re.compile(f"{_SPACE}+({_WORD})")
+_WORD_BEFORE = re.compile(f"({_WORD}){_INLINE}+\\Z")
+_WORD_AFTER = re.compile(f"{_INLINE}+({_WORD})(:?)")  # a colon after it makes the word a label
+_AMPERSAND_BEFORE = re.compile(f"&{_INLINE}+\\Z")
+_AMPERSAND_AFTER = re.compile(f"{_INLINE}+&")
 _TOKEN = re.compile(_WORD)
 _ONLY_SPACES = re.compile(f"{_SPACE}+\\Z")
+# A word that opens a letter or a notice before a name parts it from the name: "Dear Price".
+_SALUTATIONS = frozenset({"dear", "attn", "attention", "to", "from", "cc"})
+# The small words that join the words of a title-case phrase: "Grant of Rights", "Smith & Co".
+_CONNECTIVES = frozenset({"of", "and", "for", "to", "in", "on", "the"})
+# How many words after a name are read for the job title that follows it ("Head of Sales").
+_TITLE_WORDS = 4
 _INITIAL = re.compile(r"[^\W\d_]\.?")
 _NUMBER = re.compile(r"\d{1,4}(?:st|nd|rd|th)?", re.IGNORECASE)
 # The longest term, in words, that a bare name may be part of ("Contracts Rights Third Parties").
@@ -104,27 +116,98 @@ def _belongs_to_the_name(word: str) -> bool:
     )
 
 
-def _beside_a_capitalised_word(text: str, start: int, end: int) -> bool:
-    """Whether a capitalised word stands right before or after ``start``-``end`` on its line,
-    with nothing but spaces between, that is not part of the name: "Business Day", "Companies
-    House", "Long Stop". A comma or a full stop separates: "Price, Director" is the name alone.
+def _no_names(word: str) -> bool:
+    return False
+
+
+def _another_word(word: str, is_name: Callable[[str], bool]) -> bool:
+    """Whether ``word``, near a surname, is a capitalised word of a phrase: not part of the name
+    (an honorific, an initial, a particle) and not a name found (``is_name``).
+    """
+    return word[:1].isupper() and not _belongs_to_the_name(word) and not is_name(word)
+
+
+def _phrase_before(text: str, line_start: int, start: int, is_name: Callable[[str], bool]) -> bool:
+    """Whether the words right before ``start`` make a phrase of it: a capitalised word joined by
+    nothing but spaces ("Business Day"), or one across a connective ("Rights of Grant"). A
+    salutation parts them ("Dear Price"), and so does a name found beyond a connective.
+    """
+    found = _WORD_BEFORE.search(text, line_start, start)
+    if found is None:
+        ampersand = _AMPERSAND_BEFORE.search(text, line_start, start)
+        if ampersand is None:
+            return False
+        beyond = _WORD_BEFORE.search(text, line_start, ampersand.start())
+        return beyond is not None and _another_word(beyond[1], is_name)
+    word = found[1]
+    if word.casefold() in _SALUTATIONS or _belongs_to_the_name(word):
+        return False
+    if word.casefold() in _CONNECTIVES:
+        beyond = _WORD_BEFORE.search(text, line_start, found.start())
+        return beyond is not None and _another_word(beyond[1], is_name)
+    return word[:1].isupper()
+
+
+def _a_job_title_at(text: str, position: int, line_end: int) -> bool:
+    """Whether a job title starts at ``position``: "Director", "Finance Director", "Head of
+    Sales" (``contract_rules.is_job_title``).
+    """
+    words: list[str] = []
+    while len(words) < _TITLE_WORDS:
+        found = _TOKEN.match(text, position, line_end)
+        if found is None:
+            break
+        words.append(found.group())
+        spaces = _ONLY_SPACES.match(text, found.end(), found.end() + 1)
+        if spaces is None or text[found.end() : found.end() + 1] == "\t":
+            break
+        position = found.end() + 1
+    if not words or not words[0][:1].isupper():
+        return False  # "of Attorney" is no title, however is_job_title reads "of"
+    return any(is_job_title(" ".join(words[:count])) for count in range(len(words), 0, -1))
+
+
+def _phrase_after(text: str, end: int, line_end: int, is_name: Callable[[str], bool]) -> bool:
+    """Whether the words right after ``end`` make a phrase of it: a capitalised word joined by
+    nothing but spaces ("Long Stop"), or one across a connective ("Grant of Rights", "Power of
+    Attorney"). A job title parts them ("Smith Finance Director"), as does a label's colon
+    ("Smith Title: Director") and a name found beyond a connective ("Price and Smith").
+    """
+    found = _WORD_AFTER.match(text, end, line_end)
+    if found is None:
+        ampersand = _AMPERSAND_AFTER.match(text, end, line_end)
+        if ampersand is None:
+            return False
+        beyond = _WORD_AFTER.match(text, ampersand.end(), line_end)
+        return beyond is not None and _another_word(beyond[1], is_name)
+    word = found[1]
+    if found[2] or _a_job_title_at(text, found.start(1), line_end):
+        return False
+    if word.casefold() in _CONNECTIVES:
+        beyond = _WORD_AFTER.match(text, found.end(1), line_end)
+        return beyond is not None and _another_word(beyond[1], is_name)
+    return word[:1].isupper() and not _belongs_to_the_name(word)
+
+
+def _in_a_phrase(text: str, start: int, end: int, is_name: Callable[[str], bool]) -> bool:
+    """Whether ``start``-``end`` stands in a title-case phrase on its line, as the words right
+    before or after it show: "Business Day", "Companies House", "Grant of Rights" (ruling R56).
     """
     line_start, line_end = _line(text, start, end)
-    neighbours = (
-        _WORD_BEFORE.search(text, line_start, start),
-        _WORD_AFTER.match(text, end, line_end),
-    )
-    return any(
-        found is not None and found[1][:1].isupper() and not _belongs_to_the_name(found[1])
-        for found in neighbours
+    return _phrase_before(text, line_start, start, is_name) or _phrase_after(
+        text, end, line_end, is_name
     )
 
 
 def _on_a_line_of_capitals(text: str, start: int, end: int) -> bool:
     """Whether ``start``-``end`` stands on a line whose letters are all capitals: a heading such
-    as "2. GRANT OF LICENCE".
+    as "2. GRANT OF LICENCE". A line that holds nothing but the name ("SMITH" under a signature
+    line) is a name, not a heading.
     """
-    letters = [c for c in text[slice(*_line(text, start, end))] if c.isalpha()]
+    line_start, line_end = _line(text, start, end)
+    if not any(c.isalpha() for c in text[line_start:start] + text[end:line_end]):
+        return False
+    letters = [c for c in text[line_start:line_end] if c.isalpha()]
     return len(letters) > 1 and all(letter.isupper() for letter in letters)
 
 
@@ -169,18 +252,34 @@ def _part_of_a_term(text: str, start: int, end: int, is_term: Callable[[str], bo
 
 
 def stands_as_a_name(
-    text: str, start: int, end: int, is_term: Callable[[str], bool] = is_default_term
+    text: str,
+    start: int,
+    end: int,
+    is_term: Callable[[str], bool] = is_default_term,
+    *,
+    is_name: Callable[[str], bool] = _no_names,
+    found_by_engine: bool = False,
 ) -> bool:
     """Whether ``text[start:end]``, an occurrence of a person's bare name (see ``is_bare_name``),
     stands there as that person's name and not as a word of the contract (rulings R50, R52,
-    R54). It does when all of these hold:
+    R54, R56).
+
+    With ``found_by_engine`` the engine itself reported a name there, and only a determiner
+    before it makes it a word ("the Smith file"). An occurrence a sweep finds stands as a name
+    when all of these hold:
 
     * every word of it but the surname's particles is capitalised ("Price", "van der Berg");
     * the word before it on its line, particles aside, is none of the ``DETERMINERS`` ("the
       Price", "a Mill", "the van der Berg file" are words of the contract);
-    * no capitalised word stands right beside it with nothing but spaces between, but an
-      honorific, an initial or a particle ("Business Day", "Companies House", "Long Stop");
-    * its line is not all capitals ("2. GRANT OF LICENCE" is a heading);
+    * it is in no title-case phrase on its line: no capitalised word stands right beside it
+      with nothing but spaces between ("Business Day", "Companies House", "Long Stop"), nor one
+      across a connective ("Grant of Rights", "Power of Attorney"). An honorific, an initial
+      or a particle beside it is part of the name ("Mr Price"); a comma, a tab, a salutation
+      before it ("Dear Price") and a job title or a label after it ("Smith Finance Director",
+      "Smith Title:") part it from its neighbours; a name found (``is_name``) beyond a
+      connective is no phrase ("Price and Smith");
+    * its line is not a heading in capitals ("2. GRANT OF LICENCE"); a line that holds nothing
+      but the name is a name ("SMITH" under a signature line);
     * a month has no number right beside it ("dated 1 May 2026");
     * it is not part of a longer term (``is_term``, the default never-hide words unless the
       caller passes its own lists and the document's defined terms): "Terms of Use".
@@ -190,12 +289,14 @@ def stands_as_a_name(
     only where this holds, and the leak check looks for one the same way, so the occurrences a
     sweep left visible on purpose do not count as leaks.
     """
+    if found_by_engine:
+        return not after_a_determiner(text, start)
     words = [word for word in text[start:end].split() if word.casefold() not in NAME_PARTICLES]
     if not all(word[:1].isupper() for word in words):
         return False
     return not (
         after_a_determiner(text, start)
-        or _beside_a_capitalised_word(text, start, end)
+        or _in_a_phrase(text, start, end, is_name)
         or _on_a_line_of_capitals(text, start, end)
         or _month_by_a_number(text, start, end)
         or _part_of_a_term(text, start, end, is_term)
@@ -250,6 +351,7 @@ def occurrences(
     *,
     as_a_name: bool = False,
     is_term: Callable[[str], bool] = is_default_term,
+    is_name: Callable[[str], bool] = _no_names,
 ) -> list[tuple[int, int]]:
     """Where ``variant`` stands in ``text`` within one line and outside the ``taken`` stretches,
     in text order; each occurrence found is taken too. With ``as_a_name``, only where it stands
@@ -264,7 +366,8 @@ def occurrences(
     while (match := pattern.search(text, position)) is not None:
         start, end = match.span()
         refused = start == end or crosses_a_line(text, start, end) or taken.overlaps(start, end)
-        if refused or (as_a_name and not stands_as_a_name(text, start, end, is_term)):
+        named = as_a_name and not stands_as_a_name(text, start, end, is_term, is_name=is_name)
+        if refused or named:
             position = start + 1
             continue
         taken.add(start, end)
@@ -350,6 +453,19 @@ def _remove(group: Group, finding: Finding) -> None:
     group.disabled = {i - (i > index) for i in group.disabled if i != index}
 
 
+def name_test(groups: Iterable[Group]) -> Callable[[str], bool]:
+    """Whether a word is one of the names of ``groups``' people and companies (any variant or
+    form seen): the names a connective does not make a phrase of ("Price and Smith").
+    """
+    names = {
+        normalize(form)
+        for group in groups
+        if group.type in (PlaceholderType.PERSON, PlaceholderType.COMPANY)
+        for form in [*group.variants, *(f.text for f in group.findings)]
+    }
+    return lambda word: normalize(word) in names
+
+
 def sweep(
     text: str,
     groups: list[Group],
@@ -366,6 +482,7 @@ def sweep(
     """
     places = _Places(groups, fixed)
     placeholders = Spans((p.start, p.end) for p in existing_placeholders(text))
+    is_name = name_test(groups)
     variants = sorted(
         (
             (variant, index)
@@ -388,7 +505,7 @@ def sweep(
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
-                or (as_a_name and not stands_as_a_name(text, start, end, is_term))
+                or (as_a_name and not stands_as_a_name(text, start, end, is_term, is_name=is_name))
                 or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
             if refused:
