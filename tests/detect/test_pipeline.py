@@ -667,6 +667,15 @@ def test_a_surname_by_a_separator_is_hidden_and_a_phrase_stays(engine, lists, t,
     assert person.needs_check == flagged
 
 
+def test_a_tab_separated_signature_line_keeps_its_labels(engine, lists):
+    # Ruling R58 (real engine): the model's "Smith\tTitle" is cut at the tab.
+    t = "John Smith signs for the Supplier.\nName:\tSmith\tTitle:\tDirector"
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "[PERSON_1] signs for the Supplier.\nName:\t[PERSON_1]\tTitle:\tDirector"
+    (person,) = a.groups
+    assert not person.needs_check
+
+
 def test_names_on_both_sides_of_a_connective_are_both_hidden(engine, lists):
     t = "Katie Price and John Smith sign for the Buyer. Price and Smith sign the annex."
     a = analyze(one(t), engine, lists)

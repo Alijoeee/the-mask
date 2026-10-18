@@ -979,6 +979,14 @@ def test_model_findings_never_cross_a_line(engine):
     assert {"Northwind Trading B.V.", "Acme Supplies Ltd", "Ms Laura Price"} <= found
 
 
+def test_model_findings_never_cross_a_tab(engine):
+    # Ruling R58: a tab parts the fields of a form, as a line break parts lines.
+    t = "John Smith signs for the Supplier.\nName:\tSmith\tTitle:\tDirector"
+    fs = engine.analyze(t)
+    assert not [f for f in fs if "\t" in f.text]
+    assert "Title" not in texts(fs, t) and "Smith" in texts(fs, t)
+
+
 def test_title_lines_and_job_titles_are_never_findings(engine):
     t = (
         "Name: John Carter\nTitle: Managing Director\nName: Laura Price\n"
