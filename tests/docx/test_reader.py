@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+import zipfile
 from itertools import pairwise
 from pathlib import Path
 
@@ -338,6 +339,25 @@ def test_empty_paragraphs_keep_their_place(make_docx: MakeDocx) -> None:
     assert [(s.start, s.end) for s in dt.segments] == [(0, 0), (1, 2), (3, 3), (4, 4), (5, 6)]
 
 
+def test_a_renamed_header_is_still_read(make_docx: MakeDocx, tmp_path: Path) -> None:
+    # Ruling R18: text parts are found by their content type, so a header that another producer
+    # named word/hdr.xml (its Override and relationship named to match) is read like any other.
+    made = make_docx(p("Body"), parts={"word/header1.xml": p("Renamed header")})
+    renamed = tmp_path / "renamed.docx"
+    with zipfile.ZipFile(made) as source, zipfile.ZipFile(renamed, "w") as target:
+        for name in source.namelist():
+            data = source.read(name).replace(b"/word/header1.xml", b"/word/hdr.xml")
+            data = data.replace(b'Target="header1.xml"', b'Target="hdr.xml"')
+            target.writestr("word/hdr.xml" if name == "word/header1.xml" else name, data)
+    with zipfile.ZipFile(renamed) as package:  # nothing is left under the old name
+        assert "word/header1.xml" not in package.namelist()
+        assert b"header1" not in package.read("[Content_Types].xml")
+        assert b"header1" not in package.read("word/_rels/document.xml.rels")
+    dt = extract_text(DocxPackage.open(renamed))
+    assert dt.text == "Body\nRenamed header"
+    assert [s.part for s in dt.segments] == ["word/document.xml", "word/hdr.xml"]
+
+
 def test_parts_in_order_and_comments_left_out(make_docx: MakeDocx) -> None:
     path = make_docx(
         p("Body"),
@@ -399,6 +419,12 @@ REVISIONS = {
     "numberingChange": "<w:p><w:pPr>"
     + NUMBERED.format(change=f"<w:numberingChange {A} w:original='%1.'/>")
     + "</w:pPr></w:p>",
+    # ruling R18: a table cell inserted, deleted or merged as a tracked change
+    "cellIns": TABLE.format(tbl="", tr="", tc=f"<w:tcPr><w:cellIns {A}/></w:tcPr>"),
+    "cellDel": TABLE.format(tbl="", tr="", tc=f"<w:tcPr><w:cellDel {A}/></w:tcPr>"),
+    "cellMerge": TABLE.format(
+        tbl="", tr="", tc=f"<w:tcPr><w:cellMerge {A} w:vMerge='cont'/></w:tcPr>"
+    ),
 }
 
 

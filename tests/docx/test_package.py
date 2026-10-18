@@ -20,6 +20,20 @@ PROTECTED = "This file is protected or encrypted. Please provide an unprotected 
 COMMENTS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PACKAGE_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
+
+
+def content_types(overrides: dict[str, str], defaults: dict[str, str] | None = None) -> bytes:
+    """A [Content_Types].xml with an Override for each part and a Default for each extension."""
+    every_default = {
+        "rels": "application/vnd.openxmlformats-package.relationships+xml",
+        "xml": "application/xml",
+        **(defaults or {}),
+    }
+    rows = [f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in every_default.items()]
+    rows += [f'<Override PartName="/{n}" ContentType="{t}"/>' for n, t in overrides.items()]
+    types = "http://schemas.openxmlformats.org/package/2006/content-types"
+    return f'<Types xmlns="{types}">{"".join(rows)}</Types>'.encode()
 
 
 # ---- opening ---------------------------------------------------------------------------------
@@ -74,6 +88,19 @@ def test_a_zip_without_a_word_document(tmp_path: Path) -> None:
         package.writestr("xl/workbook.xml", "<workbook/>")
     with pytest.raises(UnsupportedFileError) as e:
         DocxPackage.open(path)
+    assert e.value.user_message == NOT_A_DOCX
+
+
+def test_a_zip_without_content_types(make_docx: MakeDocx, tmp_path: Path) -> None:
+    # Not an Open XML package: nothing would tell which parts hold the text (ruling R18).
+    made = make_docx("<w:p><w:r><w:t>Hello</w:t></w:r></w:p>")
+    stripped = tmp_path / "stripped.docx"
+    with zipfile.ZipFile(made) as source, zipfile.ZipFile(stripped, "w") as target:
+        for name in source.namelist():
+            if name != "[Content_Types].xml":
+                target.writestr(name, source.read(name))
+    with pytest.raises(UnsupportedFileError) as e:
+        DocxPackage.open(stripped)
     assert e.value.user_message == NOT_A_DOCX
 
 
@@ -205,6 +232,63 @@ def test_text_parts_in_order(make_docx: MakeDocx) -> None:
     ]
     pkg.remove_part("word/header2.xml")
     assert "word/header2.xml" not in pkg.TEXT_PARTS
+
+
+def test_text_parts_are_found_by_content_type(make_docx: MakeDocx) -> None:
+    # Ruling R18: the content type decides, not the name, for other producers name parts as they
+    # like. Within each kind the names ending in a number come in numeric order, then the others
+    # in the package's order.
+    header = f"{WML}.header+xml"
+    typed = {
+        "word/hdr-b.xml": header,
+        "word/header12.xml": header,
+        "word/hdr-a.xml": header,
+        "word/header3.xml": header,
+        "word/top.hdr": "",  # a header through the Default for its extension
+        "word/header5.xml": "",  # named like a header but plain XML: not one
+        "word/foot.xml": f"{WML}.footer+xml",
+        "word/end.xml": f"{WML}.endnotes+xml",
+        "word/notes.xml": f"{WML}.footnotes+xml",
+        "word/remarks.xml": f"{WML}.comments+xml",
+        "word/main2.xml": f"{WML}.document.main+xml",
+    }
+    raw = {name: f"<w:hdr {XMLNS}/>".encode() for name in typed}
+    raw["[Content_Types].xml"] = content_types(
+        {"word/document.xml": f"{WML}.document.main+xml"} | {n: t for n, t in typed.items() if t},
+        defaults={"hdr": header},
+    )
+    assert DocxPackage.open(make_docx("<w:p/>", raw=raw)).TEXT_PARTS == [
+        "word/document.xml",
+        "word/main2.xml",
+        "word/header3.xml",
+        "word/header12.xml",
+        "word/hdr-b.xml",
+        "word/hdr-a.xml",
+        "word/top.hdr",
+        "word/foot.xml",
+        "word/notes.xml",
+        "word/end.xml",
+    ]
+
+
+@pytest.mark.parametrize(
+    "main_type",
+    [
+        "application/vnd.ms-word.document.macroEnabled.main+xml",
+        f"{WML}.template.main+xml",
+        "",
+        f"{WML}.header+xml",
+    ],
+    ids=["macro-enabled", "template", "untyped", "typed-as-a-header"],
+)
+def test_the_document_is_always_a_text_part(make_docx: MakeDocx, main_type: str) -> None:
+    # open() has checked that word/document.xml is a Word document, so its text never drops out
+    # of the map, whatever type the package gives it (or none), and it is never read twice.
+    types = content_types({"word/document.xml": main_type} if main_type else {})
+    pkg = DocxPackage.open(
+        make_docx("<w:p><w:r><w:t>Body</w:t></w:r></w:p>", raw={"[Content_Types].xml": types})
+    )
+    assert pkg.TEXT_PARTS == ["word/document.xml"] and extract_text(pkg).text == "Body"
 
 
 def test_namespaces() -> None:

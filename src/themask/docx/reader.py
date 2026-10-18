@@ -13,6 +13,10 @@ like any other text (the cleaner removes it later). A text box is a paragraph of
 where it sits in the document; Word stores each text box twice, as DrawingML in ``mc:Choice`` and
 as VML in ``mc:Fallback``, and only ``mc:Choice`` is read (ruling R16: the cleaner deletes every
 fallback, so no unmasked copy is left behind).
+
+Not read: the text of equations (``m:t`` in OMML) and the content of ``w:altChunk`` parts (HTML or
+RTF a document embeds whole). The cleaner removes both and leaves a visible note in their place
+(ruling R17).
 """
 
 from __future__ import annotations
@@ -87,6 +91,9 @@ _REVISIONS = tuple(
         "trPrChange",
         "tcPrChange",
         "numberingChange",
+        "cellIns",
+        "cellDel",
+        "cellMerge",
     )
 )
 
@@ -158,7 +165,7 @@ def extract_text(pkg: DocxPackage, view: View = "accepted") -> DocText:
 
 
 def has_revisions(pkg: DocxPackage) -> bool:
-    """Whether a text part holds a tracked change of the text or of its formatting."""
+    """Whether a text part holds a tracked change: of the text, its formatting, or a table cell."""
     return any(_contains(pkg.xml(part), _REVISIONS) for part in pkg.TEXT_PARTS)
 
 

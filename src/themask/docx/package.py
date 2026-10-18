@@ -58,6 +58,23 @@ RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 DOCUMENT = "word/document.xml"
 CONTENT_TYPES = "[Content_Types].xml"
 
+# The content types of the parts that hold the document's text (ruling R18: a part is found by
+# its type, not its name). Compared without case, as content types are.
+_WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
+_MAIN_TYPES = frozenset(  # the main document of a .docx, .dotx, .docm and .dotm
+    t.casefold()
+    for t in (
+        f"{_WML}.document.main+xml",
+        f"{_WML}.template.main+xml",
+        "application/vnd.ms-word.document.macroEnabled.main+xml",
+        "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
+    )
+)
+_TEXT_KINDS = tuple(  # after the main document, in this order
+    f"{_WML}.{kind}+xml".casefold() for kind in ("header", "footer", "footnotes", "endnotes")
+)
+_ENDS_IN_A_NUMBER = re.compile(r"([0-9]+)\.[^.]*$")  # the digits before a file's extension
+
 # Every OLE compound file starts with these bytes: an old binary .doc does, and so does a .docx
 # that Word has encrypted with a password. Only the encrypted one has these two streams, whose
 # names its directory stores in UTF-16.
@@ -97,8 +114,9 @@ class DocxPackage:
 
         Raises ProtectedFileError for a file Word has encrypted with a password, and
         UnsupportedFileError for anything else that is not a .docx: an old .doc, a damaged or
-        non-zip file, a zip without a Word document in it, or a "Strict Open XML" document, whose
-        text this package cannot see.
+        non-zip file, a zip without a Word document or without [Content_Types].xml (which tells
+        the text parts apart), or a "Strict Open XML" document, whose text this package cannot
+        see.
         """
         data = path.read_bytes()
         if data.startswith(_COMPOUND_FILE):
@@ -110,7 +128,9 @@ class DocxPackage:
                 parts = {i.filename: archive.read(i) for i in archive.infolist() if not i.is_dir()}
         except _UNREADABLE_ZIP as error:
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE) from error
-        if DOCUMENT not in parts or _root_tag(parts[DOCUMENT]) != f"{{{NS['w']}}}document":
+        if CONTENT_TYPES not in parts or DOCUMENT not in parts:
+            raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
+        if _root_tag(parts[DOCUMENT]) != f"{{{NS['w']}}}document":
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
         return cls(parts, path)
 
@@ -194,16 +214,21 @@ class DocxPackage:
 
     @property
     def TEXT_PARTS(self) -> list[str]:  # upper case: the name the plan gives it
-        """The parts that hold the document's text, in reading order.
+        """The parts that hold the document's text, in reading order, found by content type.
 
-        The document, the headers, the footers (each in numeric order: header2 before header10),
-        the footnotes and the endnotes, those of them the package has. Comments are not among
-        them: they are removed before masking.
+        First ``word/document.xml``, which ``open`` has checked is a Word document, and any other
+        part typed as a main document; then the headers, the footers, the footnotes and the
+        endnotes. Within each kind, the parts whose names end in a number come in numeric order
+        (header2 before header10), then the others in the package's order. Comments are not
+        among them: they are removed before masking.
         """
-        names = self.names()
-        notes = [n for n in ("word/footnotes.xml", "word/endnotes.xml") if n in self._raw]
-        document = [DOCUMENT] if DOCUMENT in self._raw else []
-        return document + _numbered(names, "header") + _numbered(names, "footer") + notes
+        types = self._content_types()
+        others = [n for n in self._raw if n != DOCUMENT]  # so no part is listed twice
+        parts = [DOCUMENT] if DOCUMENT in self._raw else []
+        parts += [n for n in others if types.get(n) in _MAIN_TYPES]
+        for kind in _TEXT_KINDS:
+            parts += _in_number_order([n for n in others if types.get(n) == kind])
+        return parts
 
     def _drop_children(
         self, name: str, doomed: Callable[[etree._Element], list[etree._Element]]
@@ -213,15 +238,45 @@ class DocxPackage:
         A part that loses nothing is left as it was, unparsed if it was unparsed, so its bytes
         are written out unchanged.
         """
-        root = self._trees.get(name)
-        parsed_before = root is not None
-        if root is None:
-            root = _parse(self._raw[name])
+        parsed_before = name in self._trees
+        root = self._tree(name)
         children = doomed(root)
         for child in children:
             root.remove(child)
         if children and not parsed_before:
             self._trees[name] = root
+
+    def _tree(self, name: str) -> etree._Element:
+        """Part ``name`` parsed: its tree if it has one, else a new tree that is not kept."""
+        root = self._trees.get(name)
+        return _parse(self._raw[name]) if root is None else root
+
+    def _content_types(self) -> dict[str, str]:
+        """The content type of each part that has one, in lower case.
+
+        A part's type is its Override in [Content_Types].xml, else the Default for its
+        extension, as the Open Packaging Conventions define it.
+        """
+        if CONTENT_TYPES not in self._raw:
+            return {}
+        table = self._tree(CONTENT_TYPES)
+        overrides = {
+            unquote(o.get("PartName", "").lstrip("/")).casefold(): o.get("ContentType", "")
+            for o in table.iterchildren(f"{{{TYPES_NS}}}Override")
+        }
+        defaults = {
+            d.get("Extension", "").casefold(): d.get("ContentType", "")
+            for d in table.iterchildren(f"{{{TYPES_NS}}}Default")
+        }
+        types: dict[str, str] = {}
+        for name in self._raw:
+            found = overrides.get(unquote(name).casefold())
+            if found is None:
+                file = posixpath.basename(name)
+                found = defaults.get(file.rpartition(".")[2].casefold()) if "." in file else None
+            if found is not None:
+                types[name] = found.strip().casefold()
+        return types
 
 
 def _parse(data: bytes) -> etree._Element:
@@ -297,9 +352,11 @@ def _same_part(target: str | None, name: str) -> bool:
     return target is not None and unquote(target).casefold() == unquote(name).casefold()
 
 
-def _numbered(names: list[str], stem: str) -> list[str]:
-    """The parts ``word/<stem>*.xml`` in numeric order, then any not numbered, by name."""
-    pattern = re.compile(rf"word/{stem}([^/]*)\.xml")
-    found = [(name, m.group(1)) for name in names if (m := pattern.fullmatch(name))]
-    found.sort(key=lambda f: (0, int(f[1]), "") if f[1].isdecimal() else (1, 0, f[1]))
-    return [name for name, _ in found]
+def _in_number_order(names: list[str]) -> list[str]:
+    """``names`` whose file names end in a number, in numeric order, then the rest as they were."""
+
+    def key(name: str) -> tuple[int, int]:
+        number = _ENDS_IN_A_NUMBER.search(posixpath.basename(name))
+        return (0, int(number.group(1))) if number else (1, 0)
+
+    return sorted(names, key=key)  # a stable sort: equal keys keep the package's order
