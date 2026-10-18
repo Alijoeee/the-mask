@@ -1920,6 +1920,37 @@ def test_printer_settings_and_signatures_go() -> None:
     assert_consistent(pkg)
 
 
+# ---- the theme's names (ruling R66) --------------------------------------------------------------
+
+THEME_REL = f"{REL}/theme"
+THEME_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def with_theme(name: str, scheme: str) -> DocxPackage:
+    """A small file whose theme and its three schemes have these names, and a font of its own."""
+    theme = (
+        f'<a:theme xmlns:a="{THEME_NS}" name="{name}"><a:themeElements>'
+        f'<a:clrScheme name="{scheme}"/><a:fontScheme name="{scheme}"><a:majorFont>'
+        '<a:latin typeface="Northwind Sans"/></a:majorFont></a:fontScheme>'
+        f'<a:fmtScheme name="{scheme}"/></a:themeElements></a:theme>'
+    )
+    parts = {"word/theme/theme1.xml": ('<?xml version="1.0"?>\n' + theme).encode()}
+    return package(rels=[(THEME_REL, "theme/theme1.xml")], parts=parts)
+
+
+def test_the_theme_takes_back_the_names_word_gives_its_own() -> None:
+    pkg = with_theme("Northwind Trading", "Northwind")
+    rep = clean(pkg)
+    root = pkg.xml("word/theme/theme1.xml")
+    schemes = root.iter(*(f"{{{THEME_NS}}}{k}" for k in ("clrScheme", "fontScheme", "fmtScheme")))
+    assert root.get("name") == "Office Theme"
+    assert [scheme.get("name") for scheme in schemes] == ["Office", "Office", "Office"]
+    assert rep.attributes_cleared == 4
+    # Its fonts are its own: the leak check finds a font named after the company.
+    assert b'typeface="Northwind Sans"' in pkg.raw("word/theme/theme1.xml")
+    assert clean(with_theme("Office Theme", "Office")).attributes_cleared == 0
+
+
 # ---- custom XML, bindings, glossary --------------------------------------------------------------
 
 

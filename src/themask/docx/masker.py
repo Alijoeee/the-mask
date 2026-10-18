@@ -81,11 +81,13 @@ _LINK_ID = f"{_REFERENCE}id"
 _HYPERLINK_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 
 # A word of a field instruction: a quoted string (its content in group 1), or anything else up
-# to the next space or quote (group 2). A bookmark is named by one such word.
-_INSTRUCTION_WORD = re.compile(r'"([^"]*)"|([^\s"]+)')
+# to the next space or quote (group 2). A bookmark is named by one such word. This, the field
+# names and the format switches below are how the leak check reads an instruction too (ruling
+# R31).
+INSTRUCTION_WORD = re.compile(r'"([^"]*)"|([^\s"]+)')
 # The names of Word's fields. Written as a word of an instruction, such a name is the field's,
 # even when a value is spelt like it or like part of it ("Page" and PAGE or PAGEREF).
-_FIELD_NAMES = frozenset(
+FIELD_NAMES = frozenset(
     {
         "ADDRESSBLOCK",
         "ADVANCE",
@@ -180,7 +182,7 @@ _FIELD_NAMES = frozenset(
 )
 # The switches that take a format: a keyword ("\* MERGEFORMAT") or a picture in quotes
 # ('\@ "d MMMM yyyy"', '\# "0.00"').
-_FORMAT_SWITCHES = frozenset({"\\*", "\\@", "\\#"})
+FORMAT_SWITCHES = frozenset({"\\*", "\\@", "\\#"})
 # After these words, a word names a bookmark, whatever it spells.
 _BOOKMARK_PLACES = frozenset({"REF", "PAGEREF", "NOTEREF", "\\L"})
 # A run of %-escapes, as an address writes the characters it may not hold ("%40" for "@").
@@ -534,16 +536,16 @@ class _Word:
 def _words(instruction: str) -> list[_Word]:
     words: list[_Word] = []
     previous = ""
-    for match in _INSTRUCTION_WORD.finditer(instruction):
+    for match in INSTRUCTION_WORD.finditer(instruction):
         quoted = match.group(1) is not None
         group = 1 if quoted else 2
         text = match.group(group)
         before = previous.upper()
         if before in _BOOKMARK_PLACES:  # a bookmark's name, whatever it spells
             renamable, fixed = True, False
-        elif before in _FORMAT_SWITCHES:  # a format keyword, or a picture that may hold text
+        elif before in FORMAT_SWITCHES:  # a format keyword, or a picture that may hold text
             renamable, fixed = False, not quoted
-        elif not quoted and (text.upper() in _FIELD_NAMES or text.startswith("\\")):
+        elif not quoted and (text.upper() in FIELD_NAMES or text.startswith("\\")):
             renamable, fixed = False, True
         else:
             renamable, fixed = True, False
@@ -584,7 +586,7 @@ class _Instructions:
         a placeholder already in the instruction; a value found in one of them is skipped
         (ruling R30).
         """
-        decoded, starts = _percent_decoded(instruction)
+        decoded, starts = percent_decoded(instruction)
         words = _words(instruction)
         renamed: Edits = []
         for word in words:
@@ -662,7 +664,7 @@ def _blanked(text: str, start: int, end: int, edits: Edits) -> str:
     return "".join(chars)
 
 
-def _percent_decoded(text: str) -> tuple[str, list[int]]:
+def percent_decoded(text: str) -> tuple[str, list[int]]:
     """``text`` with its %-escapes decoded as ``unquote`` decodes them, and where in ``text``
     each character of the result begins; a last entry, ``len(text)``, closes the list."""
     chars: list[str] = []
