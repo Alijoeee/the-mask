@@ -6,14 +6,17 @@ a whole, and its placeholder takes the formatting of the value's first run. Para
 numbering, styles and sections are never touched. A value can also sit where the text map does
 not reach, or in a form the plan's search does not find, and is taken out there too:
 
-* field instructions, both ``w:fldSimple/@w:instr`` and the ``w:instrText`` of other fields,
-  have every replaced value masked, however they case and space it (``flexible_pattern``), and
-  also where they %-escape it, as a ``mailto:`` address may ("%20" for a space, "%40" for "@";
-  ruling R26);
+* every field instruction, a simple field's ``w:fldSimple/@w:instr`` and the ``w:instrText`` of
+  any other field alike, is searched once, the same way, for every replaced value: however it
+  cases and spaces the value (``flexible_pattern``), and where it %-escapes it, as a ``mailto:``
+  address may ("%20" for a space, "%40" for "@"; ruling R26). The plan's replacements inside an
+  instruction are made in that one search, so both kinds of field give the same result. The
+  field's name and its switches stay as they are, even when a value is spelt like them ("Page"
+  and ``PAGE``), and so does a placeholder already there (ruling R30);
 * a hyperlink whose address holds a replaced value becomes plain runs, and the relationship that
   held the address is removed;
-* a bookmark whose name holds a replaced value is renamed ``bm<N>``, or ``_bm<N>`` when its
-  name starts with "_" as the bookmarks Word hides do, and the links and field instructions that
+* a bookmark whose name holds a replaced value is renamed ``bm<N>``, or ``_bm<N>`` when its name
+  starts with "_" as the bookmarks Word hides do, and the links and field instructions that
   refer to it follow, so they still work (ruling R23). A link anchor that names no bookmark, and
   a word of a field instruction, that holds a value is renamed the same way (ruling R27).
 
@@ -21,7 +24,8 @@ Whether an address or a name holds a value is decided the way the leak check dec
 R14), so that the masker takes out what the leak check would find: the value normalised, at
 least four characters long, and a value of digits only where no other digit touches it. A
 shorter value, such as the "5" of "5%", is in too many addresses and names to mean anything
-there (ruling R27).
+there (ruling R27). It is still replaced where it stands in an instruction, so a reference such
+as ``REF SAP_Section`` becomes ``REF [COMPANY_1]_Section`` and no longer finds its bookmark.
 
 ``insert_banner`` puts the note for the AI at the top of the document. ``new_case_code`` and
 ``neutral_name`` give the masked file a name that says nothing about the parties.
@@ -33,9 +37,8 @@ import codecs
 import random
 import re
 from bisect import bisect_right
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
-from functools import partial
 from urllib.parse import unquote
 
 from lxml import etree
@@ -80,25 +83,103 @@ _HYPERLINK_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relatio
 # A word of a field instruction: a quoted string (its content in group 1), or anything else up
 # to the next space or quote (group 2). A bookmark is named by one such word.
 _INSTRUCTION_WORD = re.compile(r'"([^"]*)"|([^\s"]+)')
-# The names of Word's fields. In an instruction such a word names the field, even when a value
-# is spelt like it or like part of it ("Page" in PAGEREF, "Link" in HYPERLINK), and is never
-# renamed; nor is the format a switch takes ("\* MERGEFORMAT").
+# The names of Word's fields. Written as a word of an instruction, such a name is the field's,
+# even when a value is spelt like it or like part of it ("Page" and PAGE or PAGEREF).
 _FIELD_NAMES = frozenset(
     {
-        "ADDRESSBLOCK", "ADVANCE", "ASK", "AUTHOR", "AUTONUM", "AUTONUMLGL", "AUTONUMOUT",
-        "AUTOTEXT", "AUTOTEXTLIST", "BARCODE", "BIBLIOGRAPHY", "BIDIOUTLINE", "CITATION",
-        "COMMENTS", "COMPARE", "CONTROL", "CREATEDATE", "DATABASE", "DATE", "DDE", "DDEAUTO",
-        "DISPLAYBARCODE", "DOCPROPERTY", "DOCVARIABLE", "EDITTIME", "EMBED", "EQ", "FILENAME",
-        "FILESIZE", "FILLIN", "FORMCHECKBOX", "FORMDROPDOWN", "FORMTEXT", "GLOSSARY",
-        "GOTOBUTTON", "GREETINGLINE", "HYPERLINK", "IF", "IMPORT", "INCLUDE", "INCLUDEPICTURE",
-        "INCLUDETEXT", "INDEX", "INFO", "KEYWORDS", "LASTSAVEDBY", "LINK", "LISTNUM",
-        "MACROBUTTON", "MERGEBARCODE", "MERGEFIELD", "MERGEREC", "MERGESEQ", "NEXT", "NEXTIF",
-        "NOTEREF", "NUMCHARS", "NUMPAGES", "NUMWORDS", "PAGE", "PAGEREF", "PRINT", "PRINTDATE",
-        "PRIVATE", "QUOTE", "RD", "REF", "REVNUM", "SAVEDATE", "SECTION", "SECTIONPAGES", "SEQ",
-        "SET", "SHAPE", "SKIPIF", "STYLEREF", "SUBJECT", "SYMBOL", "TA", "TC", "TEMPLATE",
-        "TIME", "TITLE", "TOA", "TOC", "USERADDRESS", "USERINITIALS", "USERNAME", "XE",
+        "ADDRESSBLOCK",
+        "ADVANCE",
+        "ASK",
+        "AUTHOR",
+        "AUTONUM",
+        "AUTONUMLGL",
+        "AUTONUMOUT",
+        "AUTOTEXT",
+        "AUTOTEXTLIST",
+        "BARCODE",
+        "BIBLIOGRAPHY",
+        "BIDIOUTLINE",
+        "CITATION",
+        "COMMENTS",
+        "COMPARE",
+        "CONTROL",
+        "CREATEDATE",
+        "DATABASE",
+        "DATE",
+        "DDE",
+        "DDEAUTO",
+        "DISPLAYBARCODE",
+        "DOCPROPERTY",
+        "DOCVARIABLE",
+        "EDITTIME",
+        "EMBED",
+        "EQ",
+        "FILENAME",
+        "FILESIZE",
+        "FILLIN",
+        "FORMCHECKBOX",
+        "FORMDROPDOWN",
+        "FORMTEXT",
+        "GLOSSARY",
+        "GOTOBUTTON",
+        "GREETINGLINE",
+        "HYPERLINK",
+        "IF",
+        "IMPORT",
+        "INCLUDE",
+        "INCLUDEPICTURE",
+        "INCLUDETEXT",
+        "INDEX",
+        "INFO",
+        "KEYWORDS",
+        "LASTSAVEDBY",
+        "LINK",
+        "LISTNUM",
+        "MACROBUTTON",
+        "MERGEBARCODE",
+        "MERGEFIELD",
+        "MERGEREC",
+        "MERGESEQ",
+        "NEXT",
+        "NEXTIF",
+        "NOTEREF",
+        "NUMCHARS",
+        "NUMPAGES",
+        "NUMWORDS",
+        "PAGE",
+        "PAGEREF",
+        "PRINT",
+        "PRINTDATE",
+        "PRIVATE",
+        "QUOTE",
+        "RD",
+        "REF",
+        "REVNUM",
+        "SAVEDATE",
+        "SECTION",
+        "SECTIONPAGES",
+        "SEQ",
+        "SET",
+        "SHAPE",
+        "SKIPIF",
+        "STYLEREF",
+        "SUBJECT",
+        "SYMBOL",
+        "TA",
+        "TC",
+        "TEMPLATE",
+        "TIME",
+        "TITLE",
+        "TOA",
+        "TOC",
+        "USERADDRESS",
+        "USERINITIALS",
+        "USERNAME",
+        "XE",
     }
 )
+# The switches that take a format: a keyword ("\* MERGEFORMAT") or a picture in quotes
+# ('\@ "d MMMM yyyy"', '\# "0.00"').
 _FORMAT_SWITCHES = frozenset({"\\*", "\\@", "\\#"})
 # After these words, a word names a bookmark, whatever it spells.
 _BOOKMARK_PLACES = frozenset({"REF", "PAGEREF", "NOTEREF", "\\L"})
@@ -111,8 +192,7 @@ _NAME_PART = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
 # Changes to a text: (start, end, new text), in order and not overlapping. In a paragraph, the
 # positions count from its start.
 Edits = list[tuple[int, int, str]]
-# Each replaced value's pattern, with the placeholder that replaces it.
-Patterns = list[tuple[re.Pattern[str], str]]
+Spans = list[tuple[int, int]]
 
 
 @dataclass
@@ -120,13 +200,12 @@ class MaskReport:
     """What ``apply_mask`` changed.
 
     ``replaced`` counts the plan's replacements that were made. One whose stretch holds no text
-    node is skipped (see ``replace_in_paragraph``); one that lies inside a field instruction's
-    reference to a renamed bookmark is made by the bookmark's new name instead of its
-    placeholder. ``hyperlinks_unwrapped`` counts the links turned into plain runs.
-    ``instr_fields_masked`` counts the field instructions changed besides the plan's
-    replacements: simple-field instructions, and the ``w:instrText`` instructions that still
-    held a value (%-escaped, or glued to other letters) after them. ``bookmarks_renamed``
-    counts the bookmarks given a new name.
+    node is skipped (see ``replace_in_paragraph``), and so is one on a field's name or switch or
+    inside a placeholder; one that lies inside a field instruction's reference to a renamed
+    bookmark is made by the bookmark's new name instead of its placeholder.
+    ``hyperlinks_unwrapped`` counts the links turned into plain runs, ``instr_fields_masked``
+    the field instructions changed (``w:fldSimple`` and ``w:instrText`` alike), and
+    ``bookmarks_renamed`` the bookmarks given a new name.
     """
 
     replaced: int
@@ -149,20 +228,17 @@ def apply_mask(pkg: DocxPackage, doc_text: DocText, plan: MaskPlan) -> MaskRepor
     """
     edits = _paragraph_edits(pkg, doc_text, plan)
     values = _values(doc_text, plan)
-    patterns = [(flexible_pattern(value), placeholder) for value, placeholder in values.items()]
     finder = _ValueFinder(values)
     names = _names_to_change(pkg, finder)
+    instructions = _Instructions(values, names, finder)
     replaced = 0
+    fields = 0
     for index, segment in enumerate(doc_text.segments):
-        planned = edits.get(index, [])
-        references = _references_in_instructions(segment.para, names)
-        if planned or references:
-            merged, used, taken_in = _merge(planned, references)
-            made = replace_in_paragraph(segment.para, "accepted", merged)
-            replaced += made - used + taken_in  # a renamed reference is always made
+        made, changed = _mask_paragraph(segment.para, edits.get(index, []), instructions)
+        replaced += made
+        fields += changed
+    fields += _mask_simple_fields(pkg, instructions)
     bookmarks = _rename_bookmarks(pkg, names)
-    fields = _mask_simple_fields(pkg, patterns, names, finder)
-    fields += _mask_field_codes(doc_text, patterns, names, finder)
     links = _unwrap_hyperlinks(pkg, finder)
     return MaskReport(
         replaced=replaced,
@@ -268,30 +344,60 @@ def _values(doc_text: DocText, plan: MaskPlan) -> dict[str, str]:
     return values
 
 
-def _merge(planned: Edits, references: Edits) -> tuple[Edits, int, int]:
-    """The plan's replacements in a paragraph together with its references to renamed bookmarks.
+def _mask_paragraph(
+    p: etree._Element, planned: Edits, instructions: _Instructions
+) -> tuple[int, int]:
+    """Makes the plan's replacements in paragraph ``p`` and takes the values out of its field
+    instructions, in one go; returns how many of the plan's replacements were made, and how
+    many instructions changed.
 
-    A reference takes the place of the replacements inside it: the bookmark's new name takes the
-    value out as well, and keeps the reference working. A reference that a replacement covers
-    only in part is left to the plan. Returns the replacements in order, how many of them are
-    references, and how many of the plan's the references took in.
+    A replacement of the plan inside a ``w:instrText`` instruction is made by the instruction's
+    own search (``_Instructions.edits``), which starts from the instruction as it stands, so
+    that it gives the same result as the same instruction of a simple field.
     """
-    kept = list(planned)
-    used: Edits = []
-    taken_in = 0
-    for start, end, name in references:
-        inside = [r for r in kept if r[0] < end and start < r[1]]
-        if all(start <= r[0] and r[1] <= end for r in inside):
-            kept = [r for r in kept if r not in inside]
-            used.append((start, end, name))
-            taken_in += sum(1 for r in inside if r[0] < r[1])  # an empty one is never made
-    return sorted(kept + used), len(used), taken_in
+    with_instructions = bool(instructions) and next(p.iter(_INSTR_TEXT), None) is not None
+    if not planned and not with_instructions:
+        return 0, 0
+    text, nodes = paragraph_nodes(p, "accepted") if with_instructions else ("", [])
+    stretches = _instruction_stretches(nodes)
+    in_text: Edits = []
+    inside: list[Edits] = [[] for _ in stretches]
+    for edit in planned:
+        holder = next(
+            (i for i, (s, e) in enumerate(stretches) if s <= edit[0] < edit[1] <= e), None
+        )
+        if holder is None:
+            in_text.append(edit)
+        else:
+            inside[holder].append(edit)
+    in_instructions: Edits = []
+    made = 0
+    changed = 0
+    for (start, end), folded in zip(stretches, inside, strict=True):
+        local = [(s - start, e - start, placeholder) for s, e, placeholder in folded]
+        found = [
+            (start + s, start + e, new)
+            for s, e, new in instructions.edits(text[start:end], local)
+            if not _overlaps(start + s, start + e, [(a, b) for a, b, _ in in_text])
+        ]
+        changed += bool(found)
+        made += sum(1 for s, e, _ in folded if any(a <= s and e <= b for a, b, _ in found))
+        in_instructions += found
+    all_edits = sorted(in_text + in_instructions)
+    if all_edits:
+        # Every edit of an instruction is made, as an instruction is all text.
+        made += replace_in_paragraph(p, "accepted", all_edits) - len(in_instructions)
+    return made, changed
 
 
 def _edited(text: str, edits: Edits) -> str:
     for start, end, new in reversed(edits):
         text = text[:start] + new + text[end:]
     return text
+
+
+def _overlaps(start: int, end: int, spans: Spans) -> bool:
+    return any(start < span_end and span_start < end for span_start, span_end in spans)
 
 
 # ---- values in addresses and names ------------------------------------------------------------
@@ -367,7 +473,11 @@ class _Names:
 
 
 def _names_to_change(pkg: DocxPackage, finder: _ValueFinder) -> _Names:
-    """The bookmarks whose names hold a value, and the anchors that do and name no bookmark."""
+    """The bookmarks and link anchors whose names hold a value, each given a new name.
+
+    An anchor that names a renamed bookmark gets the bookmark's new name; one that names no
+    bookmark gets a name of its own (ruling R27).
+    """
     bookmarks = [
         bookmark.get(_NAME, "")
         for part in pkg.TEXT_PARTS
@@ -378,9 +488,7 @@ def _names_to_change(pkg: DocxPackage, finder: _ValueFinder) -> _Names:
     ]
     names = _Names(finder, bookmarks + anchors)
     if finder:
-        marked = {name.casefold() for name in bookmarks}
-        dangling = [anchor for anchor in anchors if anchor.casefold() not in marked]
-        for name in bookmarks + dangling:
+        for name in bookmarks + anchors:
             if name and finder.found_in(name):
                 names.rename(name)
     return names
@@ -408,76 +516,150 @@ def _rename_bookmarks(pkg: DocxPackage, names: _Names) -> int:
 # ---- field instructions -----------------------------------------------------------------------
 
 
-def _renamed_words(
-    instruction: str, names: _Names, finder: _ValueFinder | None = None
-) -> Edits:
-    """The words of a field instruction to rename, with their new names.
+@dataclass(frozen=True)
+class _Word:
+    """A word of a field instruction: ``instruction[start:end]``, without its quotes.
 
-    A word that names a renamed bookmark or anchor gets its new name: that covers REF, PAGEREF
-    and NOTEREF fields and a HYPERLINK's ``\\l`` target alike, a word in quotes as well as one
-    without. Given ``finder``, a word that holds a value outside any placeholder is renamed as a
-    bookmark would be: a reference such as ``REF AcmeOld``, where the value is glued to other
-    letters and no pattern finds it (ruling R27). The field's name, its switches and their
-    formats are never renamed, except where a word stands for a bookmark.
+    ``renamable``: it can name a bookmark, or hold a value glued to other letters. ``fixed``: it
+    is the field's name, a switch, or the format keyword a switch takes, and is never changed.
     """
-    found: Edits = []
+
+    start: int
+    end: int
+    text: str
+    renamable: bool
+    fixed: bool
+
+
+def _words(instruction: str) -> list[_Word]:
+    words: list[_Word] = []
     previous = ""
-    for word in _INSTRUCTION_WORD.finditer(instruction):
-        group = 1 if word.group(1) is not None else 2
-        name = word.group(group)
-        if _may_be_renamed(name, previous):
-            new = names.get(name)
-            if new is None and finder is not None and finder.found_in(_outside_placeholders(name)):
-                new = names.rename(name)
+    for match in _INSTRUCTION_WORD.finditer(instruction):
+        quoted = match.group(1) is not None
+        group = 1 if quoted else 2
+        text = match.group(group)
+        before = previous.upper()
+        if before in _BOOKMARK_PLACES:  # a bookmark's name, whatever it spells
+            renamable, fixed = True, False
+        elif before in _FORMAT_SWITCHES:  # a format keyword, or a picture that may hold text
+            renamable, fixed = False, not quoted
+        elif not quoted and (text.upper() in _FIELD_NAMES or text.startswith("\\")):
+            renamable, fixed = False, True
+        else:
+            renamable, fixed = True, False
+        words.append(_Word(match.start(group), match.end(group), text, renamable, fixed))
+        previous = text
+    return words
+
+
+class _Instructions:
+    """Takes the replaced values out of field instructions, the same way for every kind of field."""
+
+    def __init__(self, values: dict[str, str], names: _Names, finder: _ValueFinder) -> None:
+        self._patterns = [(flexible_pattern(value), ph) for value, ph in values.items()]
+        self._names = names
+        self._finder = finder
+
+    def __bool__(self) -> bool:
+        return bool(self._patterns)
+
+    def edits(self, instruction: str, planned: Edits | None = None) -> Edits:
+        """The edits that take the values out of ``instruction``, positioned in it.
+
+        One search of the instruction as it stands:
+
+        * a word that names a renamed bookmark or anchor gets its new name, so that the
+          reference keeps working: in a REF, PAGEREF or NOTEREF field or a HYPERLINK's ``\\l``,
+          in quotes or not;
+        * every replaced value, as written or %-escaped (ruling R26), and each of the plan's
+          replacements inside the instruction (``planned``), becomes its placeholder. Of two
+          that overlap, the one that starts first wins, then the longer one, then the plan's. A
+          value found only %-escaped is mapped back to its escaped stretch, and only that
+          stretch is replaced: every other escape stays, since a decoded "%22" or "%5C" would
+          change the instruction's quoting;
+        * a word that still holds a value, glued to other letters where no pattern finds it,
+          is renamed like a bookmark (``REF AcmeOld``; ruling R27).
+
+        Never changed: the field's name, its switches and the format keyword a switch takes, and
+        a placeholder already in the instruction; a value found in one of them is skipped
+        (ruling R30).
+        """
+        decoded, starts = _percent_decoded(instruction)
+        words = _words(instruction)
+        renamed: Edits = []
+        for word in words:
+            new = self._names.get(word.text) if word.renamable else None
             if new is not None:
-                found.append((word.start(group), word.end(group), new))
-        previous = name
-    return found
+                renamed.append((word.start, word.end, new))
+        placeholders = _placeholders(instruction, decoded, starts)
+        kept: Spans = [(word.start, word.end) for word in words if word.fixed]
+        kept += [(start, end) for start, end, _ in renamed]
+        kept += placeholders
+        candidates = [(s, e, ph, 1) for s, e, ph in self._matches(instruction, decoded, starts)]
+        candidates += [(s, e, ph, 0) for s, e, ph in planned or [] if s < e]
+        values = _leftmost_longest([c for c in candidates if not _overlaps(c[0], c[1], kept)])
+        # What a word holds besides placeholders, those it held and those just written: their
+        # type names ("COMPANY") are no values.
+        blanks = values + [(start, end, "") for start, end in placeholders]
+        done = {(start, end) for start, end, _ in renamed}
+        glued: Edits = []
+        for word in words:
+            if not word.renamable or (word.start, word.end) in done:
+                continue
+            rest = _blanked(instruction, word.start, word.end, blanks)
+            if self._finder.found_in(rest):
+                glued.append((word.start, word.end, self._names.rename(word.text)))
+        values = [v for v in values if not _overlaps(v[0], v[1], [(s, e) for s, e, _ in glued])]
+        return sorted(renamed + values + glued)
 
-
-def _outside_placeholders(text: str) -> str:
-    """``text`` without its placeholders, whose type names ("COMPANY") are no values."""
-    return PLACEHOLDER_RE.sub(" ", text)
-
-
-def _may_be_renamed(word: str, previous: str) -> bool:
-    """Whether a word of a field instruction can be a bookmark's name or hold a value.
-
-    Not a field's name, nor the format a switch takes, unless it stands where a bookmark's name
-    does. (A switch itself, "\\h", is too short to hold a value.)
-    """
-    before = previous.upper()
-    if before in _BOOKMARK_PLACES:
-        return True
-    return word.upper() not in _FIELD_NAMES and before not in _FORMAT_SWITCHES
-
-
-def _value_edits(text: str, patterns: Patterns) -> Edits:
-    """Where ``text`` holds a value, as written or %-escaped, and the placeholder to put there.
-
-    The patterns run over the text and over the text with its %-escapes decoded (ruling R26).
-    A value found in the decoded text is mapped back to the escaped stretch it came from, and
-    only that stretch is replaced: every other escape stays as it was, since a decoded "%22"
-    or "%5C" would change the instruction's quoting. Of matches that overlap, the one that
-    starts first wins, then the longer one; and as the text is searched once, a value is never
-    looked for inside a placeholder written for another.
-    """
-    found = [(m.start(), m.end(), ph) for pattern, ph in patterns for m in pattern.finditer(text)]
-    decoded, starts = _percent_decoded(text)
-    if decoded != text:
-        found += [
-            (starts[m.start()], starts[m.end()], ph)
-            for pattern, ph in patterns
-            for m in pattern.finditer(decoded)
+    def _matches(self, instruction: str, decoded: str, starts: list[int]) -> Edits:
+        """Every match of every value, in the instruction and in its %-decoded form."""
+        found = [
+            (match.start(), match.end(), placeholder)
+            for pattern, placeholder in self._patterns
+            for match in pattern.finditer(instruction)
         ]
-    found.sort(key=lambda f: (f[0], f[0] - f[1]))
-    edits: Edits = []
+        if decoded != instruction:
+            found += [
+                (starts[match.start()], starts[match.end()], placeholder)
+                for pattern, placeholder in self._patterns
+                for match in pattern.finditer(decoded)
+            ]
+        return found
+
+
+def _placeholders(instruction: str, decoded: str, starts: list[int]) -> Spans:
+    """Where ``instruction`` already holds a placeholder, written or %-escaped."""
+    spans = [match.span() for match in PLACEHOLDER_RE.finditer(instruction)]
+    if decoded != instruction:
+        spans += [
+            (starts[match.start()], starts[match.end()])
+            for match in PLACEHOLDER_RE.finditer(decoded)
+        ]
+    return spans
+
+
+def _leftmost_longest(candidates: list[tuple[int, int, str, int]]) -> Edits:
+    """The candidates that do not overlap: of two that do, the one that starts first, then the
+    longer one, then the one ranked first."""
+    chosen: Edits = []
     at = 0
-    for start, end, placeholder in found:
+    for start, end, placeholder, _rank in sorted(
+        candidates, key=lambda c: (c[0], c[0] - c[1], c[3])
+    ):
         if start >= at and end > start:
-            edits.append((start, end, placeholder))
+            chosen.append((start, end, placeholder))
             at = end
-    return edits
+    return chosen
+
+
+def _blanked(text: str, start: int, end: int, edits: Edits) -> str:
+    """``text[start:end]`` with every character an edit replaces blanked out."""
+    chars = list(text[start:end])
+    for edit_start, edit_end, _new in edits:
+        for i in range(max(edit_start, start), min(edit_end, end)):
+            chars[i - start] = " "
+    return "".join(chars)
 
 
 def _percent_decoded(text: str) -> tuple[str, list[int]]:
@@ -506,16 +688,9 @@ def _percent_decoded(text: str) -> tuple[str, list[int]]:
     return "".join(chars), starts
 
 
-def _mask_simple_fields(
-    pkg: DocxPackage, patterns: Patterns, names: _Names, finder: _ValueFinder
-) -> int:
-    """Takes the values out of every simple field's instruction; returns how many changed.
-
-    In this order: a reference to a renamed bookmark gets its new name, so it keeps working;
-    values, as written or %-escaped, become their placeholders; a word that still holds a value
-    is renamed.
-    """
-    if not patterns:
+def _mask_simple_fields(pkg: DocxPackage, instructions: _Instructions) -> int:
+    """Takes the values out of every simple field's instruction; returns how many changed."""
+    if not instructions:
         return 0
     changed = 0
     for part in pkg.TEXT_PARTS:
@@ -523,73 +698,17 @@ def _mask_simple_fields(
             old = field.get(_INSTR)
             if old is None:
                 continue
-            new = _edited(old, _renamed_words(old, names))
-            new = _edited(new, _value_edits(new, patterns))
-            new = _edited(new, _renamed_words(new, names, finder))
+            new = _edited(old, instructions.edits(old))
             if new != old:
                 field.set(_INSTR, new)
                 changed += 1
     return changed
 
 
-def _mask_field_codes(
-    doc_text: DocText, patterns: Patterns, names: _Names, finder: _ValueFinder
-) -> int:
-    """Takes out of every ``w:instrText`` instruction what the plan's replacements left of the
-    values; returns how many instructions changed.
-
-    The plan replaced the values as the text writes them (the text map holds instructions) and
-    the references to renamed bookmarks with them. Left are values %-escaped in an address and
-    words that hold a value glued to other letters; the values as written are looked for again
-    as well (ruling R26).
-    """
-    if not patterns:
-        return 0
-    changed = 0
-    for segment in doc_text.segments:
-        p = segment.para
-        if next(p.iter(_INSTR_TEXT), None) is None:
-            continue
-        before = _instructions(p)
-        for find in (
-            partial(_value_edits, patterns=patterns),
-            partial(_renamed_words, names=names, finder=finder),
-        ):
-            edits = _instruction_edits(p, find)
-            if edits:
-                replace_in_paragraph(p, "accepted", edits)
-        changed += sum(old != new for old, new in zip(before, _instructions(p)))
-    return changed
-
-
-def _references_in_instructions(p: etree._Element, names: _Names) -> Edits:
-    """Where the ``w:instrText`` of paragraph ``p`` names a renamed bookmark, and its new name."""
-    if not names or next(p.iter(_INSTR_TEXT), None) is None:
-        return []
-    return _instruction_edits(p, partial(_renamed_words, names=names))
-
-
-def _instruction_edits(p: etree._Element, find: Callable[[str], Edits]) -> Edits:
-    """The edits ``find`` gives for each field instruction of paragraph ``p``, placed in its text.
-
-    An instruction can be split over several ``w:instrText`` nodes; nodes that follow on from
-    one another are read as one instruction.
-    """
-    text, nodes = paragraph_nodes(p, "accepted")
-    return [
-        (start + s, start + e, new)
-        for start, end in _instruction_stretches(nodes)
-        for s, e, new in find(text[start:end])
-    ]
-
-
-def _instructions(p: etree._Element) -> list[str]:
-    text, nodes = paragraph_nodes(p, "accepted")
-    return [text[start:end] for start, end in _instruction_stretches(nodes)]
-
-
-def _instruction_stretches(nodes: list[TextNode]) -> list[tuple[int, int]]:
-    stretches: list[tuple[int, int]] = []
+def _instruction_stretches(nodes: list[TextNode]) -> Spans:
+    """Where a paragraph's text holds field instructions: one stretch for each run of
+    ``w:instrText`` nodes that follow on from one another, as an instruction can be split."""
+    stretches: Spans = []
     for node in nodes:
         if node.kind != "instr":
             continue

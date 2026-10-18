@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
+from xml.sax.saxutils import escape, quoteattr
 
 import docx
 import pytest
@@ -219,7 +220,12 @@ TABS_AND_BREAKS = (
         # a tab inside the value, alone in its run: the run goes with it
         (8, 18, "Signed:\t[X]\nDirector", [("Signed:[X]", ""), ("Director", "b")]),
         # a value that starts with a tab
-        (7, 12, "Signed:[X]\tSmith\nDirector", [("Signed:[X]", ""), ("", ""), ("SmithDirector", "b")]),
+        (
+            7,
+            12,
+            "Signed:[X]\tSmith\nDirector",
+            [("Signed:[X]", ""), ("", ""), ("SmithDirector", "b")],
+        ),
         # a line break inside the value
         (13, 27, "Signed:\tJohn\t[X]", [("Signed:John", ""), ("", ""), ("[X]", "b")]),
     ],
@@ -434,16 +440,25 @@ def test_a_link_in_a_header_is_unwrapped_from_the_headers_relationships(
     para = pkg.xml("word/header1.xml").find("w:p", NS)
     # The link's runs are where the link was, in their order and with their formatting.
     assert children(para) == ["r", "r", "r", "r", "hyperlink"]
-    assert runs(para)[:4] == [("Questions: ", ""), ("write ", ""), ("to us", "b"), (" or visit ", "")]
+    assert runs(para)[:4] == [
+        ("Questions: ", ""),
+        ("write ", ""),
+        ("to us", "b"),
+        (" or visit ", ""),
+    ]
     rels = pkg.raw("word/_rels/header1.xml.rels")
     assert b"acme" not in rels and b'Id="rId2"' in rels
-    assert extract_text(pkg).text == "Notices to [EMAIL_1].\nQuestions: write to us or visit our site"
+    assert (
+        extract_text(pkg).text == "Notices to [EMAIL_1].\nQuestions: write to us or visit our site"
+    )
 
 
 def test_only_link_relationships_are_ever_removed(make_docx: MakeDocx) -> None:
     # The target of the document's relationship to its header, "header1.xml", holds the value
     # "Header" once normalised. It names a part of the file, not an address, and must stay.
-    pkg = DocxPackage.open(make_docx(p("Header Ltd signs."), parts={"word/header1.xml": p("Draft")}))
+    pkg = DocxPackage.open(
+        make_docx(p("Header Ltd signs."), parts={"word/header1.xml": p("Draft")})
+    )
     dt = extract_text(pkg)
 
     def relationships() -> list[tuple[str | None, str | None]]:
@@ -505,8 +520,9 @@ def test_bookmarks_named_after_a_value_are_renamed_with_their_references(
     plan = plan_for(dt, "Acme", "[COMPANY_1]")
     assert len(plan.replacements) == 3
     report = apply_mask(pkg, dt, plan)
+    # Four instructions changed: REF and HYPERLINK in simple fields, PAGEREF and NOTEREF.
     assert report == MaskReport(
-        replaced=3, hyperlinks_unwrapped=0, instr_fields_masked=2, bookmarks_renamed=1
+        replaced=3, hyperlinks_unwrapped=0, instr_fields_masked=4, bookmarks_renamed=1
     )
     root = pkg.xml("word/document.xml")
     # "bm1" is taken, so the renamed bookmark is "bm2"; the other one is left alone. Bookmark
@@ -547,7 +563,9 @@ def test_hidden_bookmarks_dangling_anchors_and_glued_references_are_renamed(
         '<w:p><w:hyperlink w:anchor="_RefAcme"><w:r><w:t>above</w:t></w:r></w:hyperlink>'
         '<w:hyperlink w:anchor="AcmeOld"><w:r><w:t xml:space="preserve"> and the old one</w:t>'
         "</w:r></w:hyperlink></w:p>"
-        '<w:p><w:fldSimple w:instr=" REF AcmeOld \\h "><w:r><w:t>old</w:t></w:r></w:fldSimple></w:p>'
+        '<w:p><w:fldSimple w:instr=" REF AcmeOld \\h "><w:r><w:t>old</w:t></w:r></w:fldSimple>'
+        '<w:fldSimple w:instr=" PAGEREF AcmeBackup \\h "><w:r><w:t>3</w:t></w:r></w:fldSimple>'
+        "</w:p>"
         '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
         '<w:r><w:instrText xml:space="preserve"> PAGEREF AcmeArchive \\h </w:instrText></w:r>'
         '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r>'
@@ -565,12 +583,16 @@ def test_hidden_bookmarks_dangling_anchors_and_glued_references_are_renamed(
     assert len(plan.replacements) == 1
     report = apply_mask(pkg, dt, plan)
     assert report == MaskReport(
-        replaced=1, hyperlinks_unwrapped=0, instr_fields_masked=2, bookmarks_renamed=1
+        replaced=1, hyperlinks_unwrapped=0, instr_fields_masked=3, bookmarks_renamed=1
     )
     root = pkg.xml("word/document.xml")
     assert [b.get(f"{{{W}}}name") for b in root.iter(f"{{{W}}}bookmarkStart")] == ["_bm1"]
     assert [h.get(f"{{{W}}}anchor") for h in root.iter(f"{{{W}}}hyperlink")] == ["_bm1", "bm2"]
-    assert root.find(".//w:fldSimple", NS).get(f"{{{W}}}instr") == " REF bm2 \\h "
+    # The instructions of fields are searched before those of simple fields.
+    assert [f.get(f"{{{W}}}instr") for f in root.iter(f"{{{W}}}fldSimple")] == [
+        " REF bm2 \\h ",
+        " PAGEREF bm4 \\h ",
+    ]
     assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" PAGEREF bm3 \\h "]
     assert b"acme" not in pkg.raw("word/document.xml").lower()
 
@@ -578,13 +600,17 @@ def test_hidden_bookmarks_dangling_anchors_and_glued_references_are_renamed(
 def test_field_names_switches_and_formats_are_never_renamed(make_docx: MakeDocx) -> None:
     # "Link", "Page" and "Format" are in HYPERLINK, PAGEREF, NUMPAGES and MERGEFORMAT, glued to
     # other letters; those words name the field and its format, not the companies. After REF,
-    # though, a word names a bookmark whatever it spells: the bookmark "Link" is renamed, and
-    # the reference to it follows.
-    simple = (
-        "<w:p><w:fldSimple w:instr=' HYPERLINK \\l \"_Ref1\" '><w:r><w:t>a</w:t></w:r></w:fldSimple>"
-        "<w:fldSimple w:instr=' PAGEREF _Ref1 \\h \\* MERGEFORMAT '><w:r><w:t>b</w:t></w:r>"
-        '</w:fldSimple><w:fldSimple w:instr=" REF Link \\h "><w:r><w:t>c</w:t></w:r></w:fldSimple>'
-        "</w:p>"
+    # PAGEREF, NOTEREF or \l, though, a word names a bookmark whatever it spells: the bookmark
+    # "Link" is renamed, and every reference to it follows.
+    simple = "".join(
+        f"<w:fldSimple w:instr={quoteattr(instruction)}><w:r><w:t>x</w:t></w:r></w:fldSimple>"
+        for instruction in (
+            ' HYPERLINK \\l "_Ref1" ',
+            " PAGEREF _Ref1 \\h \\* MERGEFORMAT ",
+            " REF Link \\h ",
+            " PAGEREF Link \\h ",
+            " HYPERLINK \\l Link ",
+        )
     )
     bookmark = (
         '<w:p><w:bookmarkStart w:id="0" w:name="Link"/><w:r><w:t>Terms</w:t></w:r>'
@@ -593,22 +619,26 @@ def test_field_names_switches_and_formats_are_never_renamed(make_docx: MakeDocx)
     body = (
         p("Link Group, Format Ltd and Page Industries sign.")
         + bookmark
-        + simple
+        + f"<w:p>{simple}</w:p>"
         + field_code(" NUMPAGES ")
+        + field_code(" NOTEREF Link ")
     )
     pkg = DocxPackage.open(make_docx(body))
     dt = extract_text(pkg)
     plan = plan_of(dt, {"Link": "[COMPANY_1]", "Format": "[COMPANY_2]", "Page": "[COMPANY_3]"})
+    assert len(plan.replacements) == 4  # one is the "Link" in the NOTEREF instruction
     report = apply_mask(pkg, dt, plan)
-    assert report == MaskReport(3, 0, 1, 1)
+    assert report == MaskReport(4, 0, 4, 1)
     root = pkg.xml("word/document.xml")
     assert root.find(".//w:bookmarkStart", NS).get(f"{{{W}}}name") == "bm1"
     assert [f.get(f"{{{W}}}instr") for f in root.iter(f"{{{W}}}fldSimple")] == [
         ' HYPERLINK \\l "_Ref1" ',
         " PAGEREF _Ref1 \\h \\* MERGEFORMAT ",
         " REF bm1 \\h ",
+        " PAGEREF bm1 \\h ",
+        " HYPERLINK \\l bm1 ",
     ]
-    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" NUMPAGES "]
+    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" NUMPAGES ", " NOTEREF bm1 "]
 
 
 def test_short_values_neither_unwrap_links_nor_rename_bookmarks(make_docx: MakeDocx) -> None:
@@ -737,6 +767,176 @@ def test_escaped_values_in_field_codes_are_masked_even_across_nodes(make_docx: M
         ' HYPERLINK "mailto:[EMAIL_1]" ',
     ]
     assert b"acme" not in pkg.raw("word/document.xml")
+
+
+def sweep_plan(dt: DocText, placeholders: dict[str, str]) -> MaskPlan:
+    """As the analysis sweeps the text: each value wherever its flexible pattern finds it."""
+    return longest_first(
+        dt.text,
+        [
+            (m.start(), m.end(), placeholder)
+            for value, placeholder in placeholders.items()
+            for m in flexible_pattern(value).finditer(dt.text)
+        ],
+    )
+
+
+def both_kinds(instruction: str) -> str:
+    """``instruction`` as a simple field's, then as the w:instrText of another field."""
+    simple = f"<w:fldSimple w:instr={quoteattr(instruction)}><w:r><w:t>x</w:t></w:r></w:fldSimple>"
+    return f"<w:p>{simple}</w:p>" + field_code(escape(instruction))
+
+
+def instructions_of(pkg: DocxPackage) -> list[str]:
+    """The simple fields' instructions, then each paragraph's w:instrText read as one."""
+    root = pkg.xml("word/document.xml")
+    simple = [f.get(f"{{{W}}}instr") for f in root.iter(f"{{{W}}}fldSimple")]
+    codes = [
+        "".join(i.text or "" for i in para.findall(".//w:instrText", NS))
+        for para in root.iter(f"{{{W}}}p")
+    ]
+    return simple + [code for code in codes if code]
+
+
+SWEPT = {
+    "John Smith": "[PERSON_1]",
+    "John": "[PERSON_1]",
+    "Acme Supplies Ltd": "[COMPANY_1]",
+    "Acme Supplies": "[COMPANY_1]",
+    "Acme": "[COMPANY_1]",
+}
+
+
+def test_an_escaped_value_is_masked_whole_in_both_kinds_of_field(make_docx: MakeDocx) -> None:
+    # Fix round 2: the sweep finds "John" and "Acme" in the w:instrText, where "=" comes before
+    # them. The instruction is still searched from what it holds, so the escaped "John Smith"
+    # and "Acme Supplies Ltd" are replaced whole, as in a simple field: no surname or legal form
+    # is left behind.
+    address = "mailto:office@example.org?name=John%20Smith&subject=Acme%20Supplies%20Ltd"
+    instruction = f' HYPERLINK "{address}" '
+    body = p("John Smith of Acme Supplies Ltd signs.") + both_kinds(instruction)
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    plan = sweep_plan(dt, SWEPT)
+    assert {dt.text[r.start : r.end] for r in plan.replacements} == {
+        "John Smith",
+        "Acme Supplies Ltd",
+        "John",
+        "Acme",
+    }
+    report = apply_mask(pkg, dt, plan)
+    masked_address = "mailto:office@example.org?name=[PERSON_1]&subject=[COMPANY_1]"
+    assert instructions_of(pkg) == [f' HYPERLINK "{masked_address}" '] * 2
+    assert report.replaced == len(plan.replacements) and report.instr_fields_masked == 2
+
+
+@pytest.mark.parametrize("delimiter", ["=", "/", "?", "&"])
+def test_an_escaped_value_after_any_delimiter_is_masked_whole(
+    make_docx: MakeDocx, delimiter: str
+) -> None:
+    address = f"https://forms.example.org/x{delimiter}John%20Smith{delimiter}Acme%20Supplies%20Ltd"
+    body = p("John Smith of Acme Supplies Ltd signs.") + both_kinds(f' HYPERLINK "{address}" ')
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    apply_mask(pkg, dt, sweep_plan(dt, SWEPT))
+    masked_address = f"https://forms.example.org/x{delimiter}[PERSON_1]{delimiter}[COMPANY_1]"
+    assert instructions_of(pkg) == [f' HYPERLINK "{masked_address}" '] * 2
+
+
+def test_a_value_is_never_found_inside_a_placeholder(make_docx: MakeDocx) -> None:
+    # Ruling R30: "Company" is a value too, but not the COMPANY of a placeholder, whether the
+    # masker writes it or the instruction held it already, as written or %-escaped.
+    instructions = (
+        ' HYPERLINK "https://www.example.org/?ref=Acme" ',
+        ' QUOTE "[COMPANY_1] and the Company" ',
+        ' HYPERLINK "https://www.example.org/?tag=%5BCOMPANY_1%5D" ',
+    )
+    body = p("Acme is the Company.") + "".join(map(both_kinds, instructions))
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    apply_mask(pkg, dt, sweep_plan(dt, {"Acme": "[COMPANY_1]", "Company": "[CUSTOM_1]"}))
+    expected = [
+        ' HYPERLINK "https://www.example.org/?ref=[COMPANY_1]" ',
+        ' QUOTE "[COMPANY_1] and the [CUSTOM_1]" ',
+        instructions[2],
+    ]
+    assert instructions_of(pkg) == expected + expected
+
+
+def test_field_names_and_switches_are_never_replaced(make_docx: MakeDocx) -> None:
+    # Ruling R30: the value "Page" (of Page Industries) is not the PAGE field, nor is "Upper"
+    # (of Upper Crust Ltd) the format keyword of "\* Upper"; but a quoted "Page" in a QUOTE
+    # field is text the field shows, and is replaced.
+    instructions = (" PAGE ", " PAGE \\* MERGEFORMAT ", " PAGE \\* Upper ", ' QUOTE "Page" ')
+    body = p("Page Industries and Upper Crust Ltd sign; Page delivers.") + "".join(
+        map(both_kinds, instructions)
+    )
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    values = {"Page Industries": "[COMPANY_1]", "Page": "[COMPANY_1]"}
+    plan = sweep_plan(dt, values | {"Upper Crust Ltd": "[COMPANY_2]", "Upper": "[COMPANY_2]"})
+    report = apply_mask(pkg, dt, plan)
+    expected = [*instructions[:3], ' QUOTE "[COMPANY_1]" ']
+    assert instructions_of(pkg) == expected + expected
+    # The plan's replacements on the field codes' three PAGEs and one Upper are not made.
+    assert report.replaced == len(plan.replacements) - 4 and report.instr_fields_masked == 2
+
+
+def test_the_plans_own_placeholder_is_kept_inside_a_field_code(make_docx: MakeDocx) -> None:
+    # Two people called Smith, told apart by the owner: the plan gives the one in the field code
+    # [PERSON_2]. The instruction's search makes the plan's replacement there, placeholder and
+    # all, rather than the first placeholder "Smith" has in the document.
+    pkg = DocxPackage.open(make_docx(p("Smith signs first.") + field_code(' QUOTE "Smith" ')))
+    dt = extract_text(pkg)
+    first, second = (m.span() for m in re.finditer("Smith", dt.text))
+    plan = MaskPlan([Replacement(*first, "[PERSON_1]"), Replacement(*second, "[PERSON_2]")])
+    assert apply_mask(pkg, dt, plan).replaced == 2
+    assert instructions_of(pkg) == [' QUOTE "[PERSON_2]" ']
+
+
+def test_a_word_renamed_for_a_glued_value_takes_its_other_values_with_it(
+    make_docx: MakeDocx,
+) -> None:
+    # "Smith" stands on its own in "AcmeOld_Smith", "Acme" is glued: the whole word is renamed,
+    # and the placeholder for "Smith" goes with it.
+    body = p("Acme and Smith sign.") + both_kinds(" REF AcmeOld_Smith \\h ")
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    apply_mask(pkg, dt, sweep_plan(dt, {"Acme": "[COMPANY_1]", "Smith": "[PERSON_1]"}))
+    assert instructions_of(pkg) == [" REF bm1 \\h "] * 2
+
+
+def test_the_formats_switches_take_are_never_renamed(make_docx: MakeDocx) -> None:
+    # A date or number picture may hold text: a value standing on its own there is replaced, but
+    # the picture is never renamed for a value glued to other letters ("AcmeCo"); the leak check
+    # reports that one.
+    instructions = (
+        " DATE \\@ \"'AcmeCo' d MMMM yyyy\" ",
+        " = 5 \\# \"0 'AcmeUnits'\" ",
+        " DATE \\@ \"'Acme' d MMMM\" ",
+    )
+    body = p("Acme Supplies Ltd signs.") + "".join(map(both_kinds, instructions))
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    apply_mask(pkg, dt, sweep_plan(dt, SWEPT))
+    expected = [*instructions[:2], " DATE \\@ \"'[COMPANY_1]' d MMMM\" "]
+    assert instructions_of(pkg) == expected + expected
+
+
+def test_a_new_name_never_holds_a_value(make_docx: MakeDocx) -> None:
+    # bm1 to bm9 are taken, and "bm10" would hold the value "BM10": the renamed bookmark is bm11.
+    bookmarks = "".join(
+        f'<w:p><w:bookmarkStart w:id="{n}" w:name="{name}"/><w:r><w:t>{name}</w:t></w:r>'
+        f'<w:bookmarkEnd w:id="{n}"/></w:p>'
+        for n, name in enumerate([f"bm{k}" for k in range(1, 10)] + ["Acme_Address"])
+    )
+    pkg = DocxPackage.open(make_docx(p("Part BM10 comes from Acme.") + bookmarks))
+    dt = extract_text(pkg)
+    apply_mask(pkg, dt, sweep_plan(dt, {"BM10": "[ID_1]", "Acme": "[COMPANY_1]"}))
+    names = [
+        b.get(f"{{{W}}}name") for b in pkg.xml("word/document.xml").iter(f"{{{W}}}bookmarkStart")
+    ]
+    assert names == [f"bm{k}" for k in range(1, 10)] + ["bm11"]
 
 
 def test_a_replacement_across_paragraphs_is_refused_before_anything_changes(
