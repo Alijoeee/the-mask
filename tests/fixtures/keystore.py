@@ -1,13 +1,32 @@
-"""Fixtures for the encrypted case store: a master key in memory, a store, and one sample case."""
+"""Fixtures for the encrypted case store: a master key in memory, a store, and one sample case.
 
+``no_real_keychain`` is used by every test without asking: it puts a keyring that always fails in
+place of the system's, so that no test, whatever it builds, can read or write the developer's real
+Keychain. A test that wants a keyring installs its own (tests/keystore/test_crypto.py does).
+"""
+
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import keyring
 import pytest
+from keyring.backends.fail import Keyring as FailKeyring
 
 from themask.keystore.cases import CaseStore
 from themask.keystore.secrets import KeyStore, MemoryKeyStore
 from themask.model import Case, KeyEntry, MaskedFile, PlaceholderType
+
+
+@pytest.fixture(autouse=True)
+def no_real_keychain() -> Iterator[None]:
+    """A keyring that always fails, for the whole test; the system's comes back afterwards."""
+    previous = keyring.get_keyring()
+    keyring.set_keyring(FailKeyring())
+    try:
+        yield
+    finally:
+        keyring.set_keyring(previous)
 
 
 @pytest.fixture

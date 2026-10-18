@@ -9,8 +9,10 @@ import keyring
 import pytest
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from keyring.backend import KeyringBackend
+from keyring.backends.fail import Keyring as FailKeyring
+from keyring.errors import KeyringError, KeyringLocked, PasswordSetError
 
-from themask.errors import CaseCorruptError
+from themask.errors import CaseCorruptError, KeyStoreError, MaskError
 from themask.keystore.crypto import decrypt, encrypt
 from themask.keystore.secrets import KeychainKeyStore, MemoryKeyStore
 
@@ -218,6 +220,80 @@ def test_a_damaged_keychain_entry_is_reported_and_never_replaced(
 ) -> None:
     # Replacing it would quietly lock the owner out of every case already stored.
     memory_keyring.items[KEYCHAIN_ITEM] = entry
-    with pytest.raises(ValueError, match="damaged"):
+    with pytest.raises(KeyStoreError, match="damaged"):
         KeychainKeyStore().get_or_create_master_key()
     assert memory_keyring.items == {KEYCHAIN_ITEM: entry}
+
+
+def test_a_damaged_keychain_entry_says_what_to_do_about_it(memory_keyring: MemoryKeyring) -> None:
+    memory_keyring.items[KEYCHAIN_ITEM] = "this is not base64!"
+    with pytest.raises(KeyStoreError) as caught:
+        KeychainKeyStore().get_or_create_master_key()
+    assert "Keychain Access" in caught.value.user_message
+    assert "The MASK" in caught.value.user_message and "master-key" in caught.value.user_message
+
+
+# ---- a Keychain that cannot be reached -----------------------------------------------------------
+
+UNREACHABLE = "The MASK could not reach the macOS Keychain."
+
+
+def test_no_test_can_reach_the_real_keychain() -> None:
+    # The autouse fixture of tests/fixtures/keystore.py: this test asked for nothing.
+    assert isinstance(keyring.get_keyring(), FailKeyring)
+    with pytest.raises(KeyringError):
+        keyring.get_password(*KEYCHAIN_ITEM)
+
+
+def test_the_key_store_error_is_an_error_for_the_owner() -> None:
+    error = KeyStoreError("a plain message")
+    assert isinstance(error, MaskError) and error.user_message == "a plain message"
+
+
+def test_an_unreachable_keychain_is_reported_in_plain_words() -> None:
+    # The fail keyring is what every test has: asking it for the key raises NoKeyringError.
+    with pytest.raises(KeyStoreError) as caught:
+        KeychainKeyStore().get_or_create_master_key()
+    assert caught.value.user_message.startswith(UNREACHABLE)
+    # What keyring said is kept as the cause.
+    assert isinstance(caught.value.__cause__, KeyringError)
+
+
+class FailingKeyring(MemoryKeyring):
+    """A keyring that is a dict but fails with ``error`` when asked to read or to write."""
+
+    def __init__(self, on_get: Exception | None, on_set: Exception | None) -> None:
+        super().__init__()
+        self.on_get, self.on_set = on_get, on_set
+
+    def get_password(self, service: str, username: str) -> str | None:
+        if self.on_get is not None:
+            raise self.on_get
+        return super().get_password(service, username)
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        if self.on_set is not None:
+            raise self.on_set
+        super().set_password(service, username, password)
+
+
+@pytest.mark.parametrize(
+    ("on_get", "on_set"),
+    [
+        (KeyringLocked("the keychain is locked"), None),  # reading is refused
+        (None, PasswordSetError("denied")),  # the first key cannot be stored
+        (None, KeyringLocked("the keychain is locked")),
+    ],
+    ids=["read refused", "write failed", "write refused"],
+)
+def test_a_keychain_that_refuses_is_reported_and_no_key_is_returned(
+    on_get: Exception | None, on_set: Exception | None
+) -> None:
+    previous = keyring.get_keyring()
+    keyring.set_keyring(FailingKeyring(on_get, on_set))
+    try:
+        with pytest.raises(KeyStoreError) as caught:
+            KeychainKeyStore().get_or_create_master_key()
+    finally:
+        keyring.set_keyring(previous)
+    assert caught.value.user_message.startswith(UNREACHABLE)

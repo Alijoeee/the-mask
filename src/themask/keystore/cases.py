@@ -38,10 +38,11 @@ class CaseSummary:
 class CaseStore:
     """The cases kept in the folder ``dir``, locked with the master key from ``keystore``.
 
-    A file that cannot be opened (damaged, cut short, locked with another key, or not a case of the
-    name it carries) is skipped by ``list`` and named in ``unreadable``; ``load`` of it raises
-    CaseCorruptError. Asking the key store for the master key can fail too, for instance when the
-    Keychain refuses; that error is not caught here.
+    A file that cannot be opened (damaged, cut short, locked with another key, not a case of the
+    name it carries, or one the operating system will not let us read) is skipped by ``list`` and
+    named in ``unreadable``; ``load`` of it raises CaseCorruptError, or OSError when it cannot be
+    read at all. Asking the key store for the master key can fail too, for instance when the
+    Keychain refuses (KeyStoreError for the Keychain); that error is not caught here.
     """
 
     def __init__(self, dir: Path, keystore: KeyStore) -> None:
@@ -85,7 +86,7 @@ class CaseStore:
         for path in paths:
             try:
                 cases.append(self._open(key, path, path.read_bytes()))
-            except CaseCorruptError:
+            except (CaseCorruptError, OSError):
                 unreadable.append(path)
         return cases, unreadable
 

@@ -33,3 +33,7 @@ class CaseCorruptError(MaskError):
 
 class LeakBlockedError(MaskError):
     """The export was stopped because a confidential value is still in the masked file."""
+
+
+class KeyStoreError(MaskError):
+    """The master key could not be read from or kept in the macOS Keychain, or it is damaged."""

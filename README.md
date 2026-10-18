@@ -24,8 +24,9 @@ uv run python -m themask
 
 `uv sync` needs the network once, to download the dependencies. The finished app never does.
 
-The `python -m themask` entry point is added in a later step of the build plan; until then the
-tests below are the way to exercise the code.
+The window opens at once and says "Loading…" for a few seconds while it loads the language model.
+Drop a Word or PDF contract on it (or use "Choose files…") to analyse it and review what it found.
+The export and the restore screens are added in later steps of the build plan.
 
 ## Develop
 

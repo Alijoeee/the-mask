@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Literal
 from themask.detect.pipeline import CombinedText
 from themask.docx.cleaner import clean
 from themask.docx.masker import apply_mask, insert_banner, neutral_name, new_case_code
-from themask.docx.package import DocxPackage
+from themask.docx.package import NOT_A_DOCX_MESSAGE, DocxPackage
 from themask.docx.reader import DocText, extract_text, has_revisions
 from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
@@ -141,10 +141,11 @@ def load_sources(paths: list[Path], redline_split: bool) -> list[SourceDoc]:
     """The files at ``paths``, each read and prepared for masking (see ``SourceDoc``), in order.
 
     A file is read as a Word file or as a PDF by its extension, in any case; any other file is
-    refused with UnsupportedFileError. With ``redline_split``, a Word file with tracked changes
-    is also prepared in its version before them. What reading a file raises comes through:
-    UnsupportedFileError and ProtectedFileError for a file The MASK cannot read, ScannedPdfError
-    for a PDF without text, OSError for a file that cannot be read at all.
+    refused with UnsupportedFileError (an old .doc with the advice to save it as .docx). With
+    ``redline_split``, a Word file with tracked changes is also prepared in its version before
+    them. What reading a file raises comes through: UnsupportedFileError and ProtectedFileError
+    for a file The MASK cannot read, ScannedPdfError for a PDF without text, OSError for a file
+    that cannot be read at all.
     """
     return [_load(path, redline_split) for path in paths]
 
@@ -240,6 +241,9 @@ def _load(path: Path, redline_split: bool) -> SourceDoc:
     elif suffix == ".pdf":
         kind = "pdf"
         pkg, report = _from_pdf(path)
+    elif suffix == ".doc":
+        # The old binary Word format: the owner can open it in Word and save it as .docx.
+        raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
     else:
         raise UnsupportedFileError(UNSUPPORTED_MESSAGE)
     tracked = kind == "docx" and has_revisions(pkg)
