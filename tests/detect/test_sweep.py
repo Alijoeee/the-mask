@@ -51,10 +51,14 @@ def test_longest_variant_goes_first_across_groups():
 
 
 def test_sweep_never_touches_an_existing_placeholder():
+    # Ruling R44: only the exact form is a placeholder in a source; "company_2" is text.
     txt = "[COMPANY_1] and company_2 are not the Company."
     g = G(C, ["Company"])
     sweep(txt, [g])
-    assert [(f.text, f.start) for f in g.findings] == [("Company", txt.rindex("Company"))]
+    assert [(f.text, f.start) for f in g.findings] == [
+        ("company", txt.index("company_2")),
+        ("Company", txt.rindex("Company")),
+    ]
 
 
 def test_sweep_stays_within_one_line():
@@ -189,3 +193,23 @@ def test_taking_over_keeps_the_switched_off_indexes_right():
     sweep(txt, [whole, part])
     assert [f.start for f in part.findings] == [0, 32] and part.disabled == {1}
     assert [f.start for f in whole.findings] == [12]
+
+
+def test_a_group_switched_off_neither_sweeps_nor_takes_over():
+    # Raised minor M3
+    txt = "Project Falcon starts; Project Falcon ends."
+    off = G(C, ["Project Falcon"])
+    off.enabled = False
+    part = G(C, ["Falcon"], F(C, "Falcon", txt))
+    sweep(txt, [off, part])
+    assert off.findings == []
+    assert [f.start for f in part.findings] == [txt.index("Falcon"), txt.rindex("Falcon")]
+
+
+def test_a_word_is_whole_in_any_script():
+    # Raised minor M5: "Gül" is not found inside "Gülşen", nor "Smith" inside "Smithé".
+    txt = "Gülşen Gül signs; Smithé and Smith attend."
+    gul, smith = G(P, ["Gül"]), G(P, ["Smith"])
+    sweep(txt, [gul, smith])
+    assert [f.start for f in gul.findings] == [txt.index("Gül ")]
+    assert [f.start for f in smith.findings] == [txt.rindex("Smith")]

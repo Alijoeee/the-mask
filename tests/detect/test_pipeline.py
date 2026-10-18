@@ -47,6 +47,17 @@ def all_findings(a):
     return [f for g in a.groups for f in g.findings]
 
 
+def masked(a):
+    """The text with every finding replaced by its group's placeholder."""
+    out = a.text
+    found = sorted(
+        ((f, g.placeholder) for g in a.groups for f in g.findings), key=lambda x: -x[0].start
+    )
+    for f, placeholder in found:
+        out = out[: f.start] + placeholder + out[f.end :]
+    return out
+
+
 def assert_one_replacement_each(a):
     """Every finding is the text it says it is, within one line, and no two overlap."""
     for f in all_findings(a):
@@ -315,6 +326,152 @@ def test_a_case_entry_is_never_taken_over(lists):
     assert_one_replacement_each(a)
 
 
+# --- Review fix round 1 ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "t,expected",
+    [
+        (
+            (
+                'Acme Supplies Ltd appoints Jane Doe (the "Consultant", or "Ms Doe").'
+                " Ms Doe shall report weekly."
+            ),
+            (
+                '[COMPANY_1] appoints [PERSON_1] (the "Consultant", or "[PERSON_1]").'
+                " [PERSON_1] shall report weekly."
+            ),
+        ),
+        (
+            'John Smith ("Smith"). Smith shall provide the Services.',
+            '[PERSON_1] ("[PERSON_1]"). [PERSON_1] shall provide the Services.',
+        ),
+        (
+            'Mr John Smith ("Mr Smith"). Mr Smith shall attend every meeting.',
+            '[PERSON_1] ("[PERSON_1]"). [PERSON_1] shall attend every meeting.',
+        ),
+    ],
+)
+def test_a_persons_defined_short_name_is_hidden(engine, lists, t, expected):
+    # Important 1: the surname forms of a person found beat the terms the document defines.
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == expected
+
+
+def test_a_shared_initial_is_never_given_to_the_stronger_name(lists):
+    # Important 2: the model types "Ms Jane Smith" as a company (0.6); J. Smith fits both.
+    t = "John Smith and Ms Jane Smith sign. J. Smith attends every meeting."
+    fake = FakeEngine((P, "John Smith", 0.85, "model"), (C, "Ms Jane Smith", 0.6, "model"))
+    a = analyze(one(t), fake, lists)
+    assert masked(a) == "[PERSON_1] and [PERSON_2] sign. [PERSON_3] attends every meeting."
+    (shared,) = [g for g in a.groups if g.canonical == "J. Smith"]
+    assert shared.needs_check
+
+
+@pytest.mark.parametrize(
+    "t",
+    [
+        "Özdemir Gıda Ltd. Şti. and Özdemir Gıda Ltd. Sti. sign.",
+        "Gıda Sanayi A.Ş. and Gıda Sanayi A.S. sign.",
+    ],
+)
+def test_one_legal_form_spelt_two_ways_is_one_company(engine, lists, t):
+    # Important 3
+    a = analyze(one(t), engine, lists)
+    companies = [g for g in a.groups if g.type == C]
+    assert len(companies) == 1 and len(companies[0].findings) == 2
+    assert not companies[0].needs_check
+
+
+def person_at(t, needle, last=False, score=0.85, kind=None):
+    start = t.rindex(needle) if last else t.index(needle)
+    return Finding(kind or P, start, start + len(needle), needle, score, "model")
+
+
+@pytest.mark.parametrize(
+    "t,full,word",
+    [
+        ("Katie Price signs for the Supplier. Price shall attend.", "Katie Price", "Price"),
+        ("Jo Banks signs for the Buyer. Banks shall be notified.", "Jo Banks", "Banks"),
+    ],
+)
+def test_a_surname_that_is_a_default_term_stays_hidden(lists, t, full, word):
+    # Ruling R42: one full name found ends with the word, and no determiner stands before it.
+    engine = FixedEngine(person_at(t, full), person_at(t, word, last=True))
+    a = analyze(one(t), engine, lists)
+    (g,) = a.groups
+    assert g.canonical == full and [f.text for f in g.findings] == [full, word]
+    assert g.needs_check
+    assert word not in g.variants  # the word itself is never swept through the document
+
+
+def test_a_default_term_after_a_determiner_stays_visible(lists):
+    t = "Katie Price signs for the Supplier. Then the Price shall be paid."
+    engine = FixedEngine(person_at(t, "Katie Price"), person_at(t, "Price", last=True))
+    a = analyze(one(t), engine, lists)
+    (g,) = a.groups
+    assert [f.text for f in g.findings] == ["Katie Price"] and not g.needs_check
+    assert masked(a).endswith("Then the Price shall be paid.")
+
+
+def test_the_owners_never_hide_list_beats_a_surname(lists):
+    lists.add_never("Price")
+    t = "Katie Price signs for the Supplier. Price shall attend."
+    engine = FixedEngine(person_at(t, "Katie Price"), person_at(t, "Price", last=True))
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "[PERSON_1] signs for the Supplier. Price shall attend."
+
+
+def test_a_default_term_with_an_honorific_is_flagged(engine, lists):
+    a = analyze(one("Katie Price signs for the Supplier. Ms Price shall attend."), engine, lists)
+    (g,) = a.groups
+    assert [f.text for f in g.findings] == ["Katie Price", "Ms Price"] and g.needs_check
+
+
+def test_a_rule_name_with_its_legal_form_keeps_its_end(engine, lists):
+    # Ruling R45 (and R46 for the passport number): the model ran on into "Passport".
+    t = "Name: Jane Doe, for Acme Supplies Ltd. Passport number: 534412786."
+    a = analyze(one(t), engine, lists)
+    by = {g.canonical: g for g in a.groups}
+    assert "Acme Supplies Ltd" in by and "Acme Supplies Ltd. Passport" not in by
+    assert by["534412786"].type == PlaceholderType.ID and by["534412786"].placeholder == "[ID_1]"
+    assert "Passport number" in masked(a)
+
+
+def test_a_rule_name_beats_a_longer_model_span_only_with_its_legal_form(lists):
+    t = "Signed by Jane Doe Smith for Acme Supplies Ltd. Passport checked."
+
+    def at(kind, needle, score, source):
+        start = t.index(needle)
+        return Finding(kind, start, start + len(needle), needle, score, source)
+
+    fake = FixedEngine(
+        at(C, "Acme Supplies Ltd", 0.95, "rule"),
+        at(C, "Acme Supplies Ltd. Passport", 0.85, "model"),
+        at(P, "Jane Doe", 0.9, "rule"),  # no legal form: the model's longer name stands
+        at(P, "Jane Doe Smith", 0.85, "model"),
+    )
+    a = analyze(one(t), fake, lists)
+    assert sorted(g.canonical for g in a.groups) == ["Acme Supplies Ltd", "Jane Doe Smith"]
+
+
+@pytest.mark.parametrize(
+    "id_score,phone_score,expected",
+    [(0.85, 0.75, PlaceholderType.ID), (0.8, 0.75, PlaceholderType.PHONE)],
+)
+def test_on_one_span_a_clearly_higher_score_wins(lists, id_score, phone_score, expected):
+    # Ruling R46: 0.1 or more apart, the score decides; closer, the type order does.
+    t = "Passport number: 534412786"
+    fake = FixedEngine(
+        Finding(PlaceholderType.ID, 17, 26, "534412786", id_score, "pattern"),
+        Finding(PlaceholderType.PHONE, 17, 26, "534412786", phone_score, "pattern"),
+        Finding(PlaceholderType.AMOUNT, 17, 26, "534412786", 0.4, "pattern"),
+    )
+    a = analyze(one(t), fake, lists)
+    (g,) = a.groups
+    assert g.type == expected and g.placeholder == f"[{expected.value}_1]"
+
+
 # --- The owner's always-hide lists ---------------------------------------------------------------
 
 
@@ -371,11 +528,12 @@ def test_overlapping_finds_become_one_replacement(engine, lists):
     assert "https://carter.example/contact?mail=legal@carter.example" in texts
 
 
-def test_altered_placeholders_count_too(engine, lists):
+def test_only_exact_placeholders_count(engine, lists):
+    # Ruling R44: in a source document only [TYPE_N] is a placeholder; "company_2" is text.
     t = "This document refers to [COMPANY_1] and company_2 and Northwind Trading B.V."
     a = analyze(one(t), engine, lists)
     (g,) = a.groups
-    assert g.placeholder == "[COMPANY_3]"
+    assert g.placeholder == "[COMPANY_2]"
     assert a.warnings == [
         (
             "The document already contains placeholders such as [COMPANY_1];"
@@ -383,6 +541,18 @@ def test_altered_placeholders_count_too(engine, lists):
         )
     ]
     assert all(f.start >= t.index("Northwind") for f in g.findings)
+
+
+def test_a_bare_reference_like_id_55821_is_a_value(engine, lists):
+    # Ruling R44: "ID-55821" looks like an altered placeholder, but in an original it is a value.
+    t = "Customer ID-55821 shall be quoted on every invoice."
+    a = analyze(one(t), engine, lists)
+    assert a.warnings == []
+    assert "55821" not in masked(a)
+    fixed = FixedEngine(Finding(PlaceholderType.ID, 12, 17, "55821", 0.85, "pattern"))
+    a = analyze(one(t), fixed, lists)
+    assert [(g.canonical, g.placeholder) for g in a.groups] == [("55821", "[ID_1]")]
+    assert a.warnings == []
 
 
 def test_nothing_is_found_inside_an_existing_placeholder(lists):

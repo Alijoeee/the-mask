@@ -244,6 +244,14 @@ def test_load_refuses_a_damaged_file(tmp_path, content):
     assert "lists" in raised.value.user_message
 
 
+def test_load_refuses_a_file_that_is_not_utf8(tmp_path):
+    # Raised minor M4
+    path = tmp_path / "lists.json"
+    path.write_bytes(b'{"always_hide": ["Caf\xe9"], "never_hide": []}')
+    with pytest.raises(MaskError):
+        UserLists.load(path)
+
+
 def test_load_reads_a_file_with_one_list_missing(tmp_path):
     path = tmp_path / "lists.json"
     path.write_text('{"never_hide": ["Bunzl"]}', encoding="utf-8")

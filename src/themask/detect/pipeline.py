@@ -35,30 +35,35 @@ does not occur in the new text is left out of the result (the case's key keeps i
 
 from __future__ import annotations
 
+import re
 import uuid
 from bisect import bisect_right
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
-from themask.detect.grouping import group_findings
+from themask.detect.grouping import PersonName, group_findings
 from themask.detect.lists import (
     CaseLists,
     UserLists,
     always_hide_entry,
+    is_default_term,
     never_hide_check,
+    on_never_hide_list,
 )
-from themask.detect.sweep import LINE_BREAKS, Spans, is_searchable, occurrences, sweep
+from themask.detect.sweep import (
+    LINE_BREAKS,
+    Spans,
+    existing_placeholders,
+    is_searchable,
+    occurrences,
+    sweep,
+)
 from themask.model import Analysis, Finding, Group, KeyEntry, PlaceholderType
-from themask.placeholders import (
-    PLACEHOLDER_RE,
-    PlaceholderMatch,
-    find_placeholders,
-    format_placeholder,
-    next_free_number,
-)
-from themask.textnorm import normalize, strip_legal_form, variants_of
+from themask.placeholders import PLACEHOLDER_RE, PlaceholderMatch, format_placeholder
+from themask.textnorm import has_legal_form, normalize, strip_legal_form, variants_of
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
@@ -88,6 +93,15 @@ EXISTING_PLACEHOLDERS_WARNING = (
 )
 
 _NAMES = frozenset({PlaceholderType.PERSON, PlaceholderType.COMPANY})
+# The owner's own values among the findings before grouping: always-hide matches, and the case's
+# key (matched as "sweep" findings).
+_OWNERS = frozenset({"list", "sweep"})
+# On one span, a score at least this much higher wins over the type order (ruling R46).
+SCORE_MARGIN = 0.1
+# A contract rule's name with its legal form, at least this sure, keeps its end (ruling R45).
+RULE_NAME_SCORE = 0.9
+# A default never-hide word after one of these is the word, not a person's surname (ruling R42).
+_DETERMINERS = frozenset({"the", "such", "this", "that", "any", "each", "no"})
 
 # What may stand at the edge of a finding without being part of the value: spaces, quotes, an
 # ellipsis, list and sentence marks. A full stop stays ("B.V.", "Inc."), and so does a bracket
@@ -149,7 +163,7 @@ def analyze(
     """
     text = combined.text
     case = case_lists if case_lists is not None else CaseLists([], [], set())
-    placeholders = find_placeholders(text)
+    placeholders = existing_placeholders(text)  # the exact [TYPE_N] only (ruling R44)
     in_placeholder = Spans((p.start, p.end) for p in placeholders)
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
@@ -165,20 +179,32 @@ def analyze(
         common = len(form.split()) == 1 and is_contract_wording(form)
         return is_searchable(form) and not never_hidden(form) and not common
 
-    found = [f for f in found if not (never_hidden(f.text) or _names_nobody(f))]
+    surnames = _surnames_kept(found, text, user_lists, case)
+    found = [
+        f
+        for f in found
+        if (f.start, f.end) in surnames or not (never_hidden(f.text) or _names_nobody(f))
+    ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
     _keep_shared_variants_out(seeds)
     found += _seed_matches(text, seeds, placeholders)
 
-    groups = group_findings(_one_per_place(found), text, seeds=seeds, keep=keep)
+    groups = group_findings(
+        _one_per_place(found), text, seeds=seeds, keep=keep, aliases=case.defined_terms
+    )
+    for group in groups:
+        # A never-hide word kept at one place as a surname (ruling R42) is not swept elsewhere.
+        group.variants = {v for v in group.variants if not never_hidden(v)}
     sweep(text, groups, fixed=seeds)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
+        if any((f.start, f.end) in surnames for f in group.findings):
+            group.needs_check = True
     groups.sort(key=lambda g: g.findings[0].start)
-    _number(groups, seed_entries or [], text)
-    return Analysis(text, groups, _warnings(text, placeholders))
+    _number(groups, seed_entries or [], placeholders)
+    return Analysis(text, groups, _warnings(placeholders))
 
 
 # --- Finding ---------------------------------------------------------------------------------
@@ -274,10 +300,56 @@ def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bo
         elif finding.type in _NAMES and not (is_term(finding.text) or _names_nobody(finding)):
             names += [finding.text, strip_legal_form(finding.text)]
             names += variants_of(finding.text, finding.type)
+            if finding.type is PlaceholderType.PERSON:
+                names += PersonName.of(finding.text).short_forms()
     for seed in seeds:
         if seed.type in _NAMES:
             names += [seed.canonical, *seed.variants]
+        if seed.type is PlaceholderType.PERSON:
+            names += PersonName.of(seed.canonical).short_forms()
     return names
+
+
+def _surnames_kept(
+    found: list[Finding], text: str, user: UserLists, case: CaseLists
+) -> set[tuple[int, int]]:
+    """The spans of the people found as one capitalised word, after an honorific or not, that is
+    a default never-hide term ("Price", "Ms Banks"), where that word is a surname all the same
+    (ruling R42): exactly one full name found ends with it, and no determiner stands before it
+    ("the Price" is the price). The owner's own never-hide lists always win. These stay hidden,
+    and their groups are marked for checking.
+    """
+    full_names: dict[str, set[str]] = defaultdict(set)
+    for finding in found:
+        person = PersonName.of(finding.text)
+        if finding.type is PlaceholderType.PERSON and person.is_full:
+            full_names[person.last].add(person.key)
+    spans = set()
+    for finding in found:
+        person = PersonName.of(finding.text)
+        if finding.type is not PlaceholderType.PERSON or len(person.words) != 1:
+            continue
+        word = person.words[0]
+        if (
+            word[:1].isupper()
+            and is_default_term(word)
+            and not on_never_hide_list(word, user, case)
+            and not on_never_hide_list(finding.text, user, case)
+            and len(full_names.get(person.last, ())) == 1
+            and not _after_a_determiner(text, finding.start)
+        ):
+            spans.add((finding.start, finding.end))
+    return spans
+
+
+_WORD = re.compile(r"[^\W\d_]+")
+
+
+def _after_a_determiner(text: str, start: int) -> bool:
+    """Whether the word before ``start``, on its line, is a determiner ("the", "no" ...)."""
+    line_start = text.rfind("\n", 0, start) + 1
+    words = _WORD.findall(text, max(line_start, start - 40), start)
+    return bool(words) and words[-1].casefold() in _DETERMINERS
 
 
 # --- The case's key -------------------------------------------------------------------------
@@ -320,18 +392,49 @@ def _seed_matches(
 
 def _one_per_place(found: list[Finding]) -> list[Finding]:
     """Of the findings that overlap, the one that wins (see the module), in text order."""
+    spans: dict[tuple[int, int], list[Finding]] = defaultdict(list)
+    for finding in _without_overruns(found):
+        spans[(finding.start, finding.end)].append(finding)
     taken = Spans()
     kept = []
-    for finding in sorted(found, key=_strength):
+    for finding in sorted(map(_span_winner, spans.values()), key=_strength):
         if not taken.overlaps(finding.start, finding.end):
             taken.add(finding.start, finding.end)
             kept.append(finding)
     return sorted(kept, key=lambda f: (f.start, f.end))
 
 
+def _without_overruns(found: list[Finding]) -> list[Finding]:
+    """``found`` without the model's findings that run on past a contract rule's name with its
+    legal form, from the same start and of the same type (ruling R45): the rule knows where the
+    company ends, and the model's "Acme Supplies Ltd. Passport" would become the canonical form
+    that a restore writes back everywhere.
+    """
+    ends: dict[tuple[PlaceholderType, int], list[int]] = defaultdict(list)
+    for f in found:
+        if f.source == "rule" and f.score >= RULE_NAME_SCORE and has_legal_form(f.text):
+            ends[(f.type, f.start)].append(f.end)
+    return [
+        f
+        for f in found
+        if not (f.source == "model" and any(end < f.end for end in ends.get((f.type, f.start), ())))
+    ]
+
+
+def _span_winner(findings: list[Finding]) -> Finding:
+    """Of findings on one span, the one that wins (ruling R46): the owner's own values first;
+    then a score at least ``SCORE_MARGIN`` higher than the others'; between scores closer than
+    that, the type order; then the higher score.
+    """
+    pool = [f for f in findings if f.source in _OWNERS] or findings
+    best = max(f.score for f in pool)
+    close = [f for f in pool if best - f.score < SCORE_MARGIN - 1e-9]  # 0.85 - 0.75 is 0.0999...
+    return min(close, key=lambda f: (_RANK[f.type], -f.score))
+
+
 def _strength(finding: Finding) -> tuple[int, int, int, float, int, int]:
     """Sorts the strongest finding first."""
-    owners = 0 if finding.source in ("list", "sweep") else 1
+    owners = 0 if finding.source in _OWNERS else 1
     return (
         -len(normalize(finding.text)),
         owners,
@@ -342,33 +445,35 @@ def _strength(finding: Finding) -> tuple[int, int, int, float, int, int]:
     )
 
 
-def _number(groups: list[Group], seed_entries: list[KeyEntry], text: str) -> None:
+def _number(
+    groups: list[Group], seed_entries: list[KeyEntry], placeholders: list[PlaceholderMatch]
+) -> None:
     """Number the groups without a placeholder, per type in order of first appearance, after
-    every number the text and the case's key use already.
+    every number the text's placeholders and the case's key use already.
     """
-    next_number: dict[PlaceholderType, int] = {
-        kind: next_free_number(text, kind) for kind in PlaceholderType
-    }
-    for entry in seed_entries:
-        parsed = PLACEHOLDER_RE.fullmatch(entry.placeholder)
-        if parsed is None:
-            raise ValueError(f"{entry.placeholder!r} in the case's key is not a placeholder.")
-        kind = PlaceholderType(parsed["type"])
-        next_number[kind] = max(next_number[kind], int(parsed["number"]) + 1)
+    next_number = dict.fromkeys(PlaceholderType, 1)
+    for placeholder in [p.placeholder for p in placeholders] + [
+        e.placeholder for e in seed_entries
+    ]:
+        kind, number = _type_and_number(placeholder)
+        next_number[kind] = max(next_number[kind], number + 1)
     for group in groups:
         if not group.placeholder:
             group.placeholder = format_placeholder(group.type, next_number[group.type])
             next_number[group.type] += 1
 
 
-def _warnings(text: str, placeholders: list[PlaceholderMatch]) -> list[str]:
-    """The warnings for the owner: the text holds placeholders already."""
-    if any(next_free_number(text, kind) > 1 for kind in PlaceholderType):
-        first = next(p for p in placeholders if _number_of(p) > 0)
-        return [EXISTING_PLACEHOLDERS_WARNING.format(placeholder=first.placeholder)]
+def _warnings(placeholders: list[PlaceholderMatch]) -> list[str]:
+    """The warnings for the owner: the text holds numbered placeholders already."""
+    numbered = [p.placeholder for p in placeholders if _type_and_number(p.placeholder)[1] > 0]
+    if numbered:
+        return [EXISTING_PLACEHOLDERS_WARNING.format(placeholder=numbered[0])]
     return []
 
 
-def _number_of(match: PlaceholderMatch) -> int:
-    parsed = PLACEHOLDER_RE.fullmatch(match.placeholder)
-    return int(parsed["number"]) if parsed else 0
+def _type_and_number(placeholder: str) -> tuple[PlaceholderType, int]:
+    """The type and the number of an exact placeholder, "[COMPANY_2]" or one in the case's key."""
+    parsed = PLACEHOLDER_RE.fullmatch(placeholder)
+    if parsed is None:
+        raise ValueError(f"{placeholder!r} is not a placeholder.")
+    return PlaceholderType(parsed["type"]), int(parsed["number"])

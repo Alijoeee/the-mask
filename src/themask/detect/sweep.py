@@ -3,22 +3,23 @@
 ``sweep`` searches the text for every variant of every group, the way ``flexible_pattern`` finds a
 value (ignoring case, however it is spaced), and adds each occurrence that nothing covers yet to
 its group as a finding with source "sweep" and score 1.0. Longer variants go first, across all
-groups, so "Acme Supplies" is found whole before "Acme" is looked for.
+groups, so "Acme Supplies" is found whole before "Acme" is looked for. A group the owner switched
+off sweeps nothing.
 
 An occurrence that holds shorter findings with room to spare takes them over (ruling R35): they
 leave their groups and the whole occurrence joins the sweeping group, so "Project Falcon" swept
 over the model's "Falcon" gives one replacement and one group. A group whose findings are all
-taken over is left with none, for the caller to drop. The owner's decisions are never taken
-over; the occurrence is skipped instead: a finding of the always-hide list or of the owner's own
+taken over is left with none, for the caller to drop. The owner's decisions are never taken over;
+the occurrence is skipped instead: a finding of the always-hide list or of the owner's own
 selection, a finding of a ``fixed`` group (the case's key), and a finding or a group the owner
 switched off.
 
 Otherwise an occurrence is never taken when it overlaps a finding of any group (the same span, or
-only part of it), or a placeholder already in the text (a placeholder inside a placeholder would
-break both), and never when it runs from one line into the next: a replacement must lie within
-one paragraph, and the analysis joins the files of a case with line breaks. A variant that is
-blank, or shorter than two letters or digits once normalised, is not searched for at all: it
-would be found all over the text.
+only part of it), or a placeholder the text holds already (an exact ``[TYPE_N]``, ruling R44; a
+placeholder inside a placeholder would break both), and never when it runs from one line into the
+next: a replacement must lie within one paragraph, and the analysis joins the files of a case with
+line breaks. A variant that is blank, or shorter than two letters or digits once normalised, is
+not searched for at all: it would be found all over the text.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 from themask.model import Finding, FindingSource, Group
-from themask.placeholders import find_placeholders
+from themask.placeholders import PlaceholderMatch, find_placeholders
 from themask.textnorm import flexible_pattern, normalize
 
 # A variant needs at least this many letters or digits, once normalised, to be searched for.
@@ -39,6 +40,15 @@ OWNER_SOURCES: frozenset[FindingSource] = frozenset({"list", "user"})
 
 # The characters that end a line or a paragraph: no finding may hold one.
 LINE_BREAKS = frozenset("\n\r\f\v\x1c\x1d\x1e\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}")
+
+
+def existing_placeholders(text: str) -> list[PlaceholderMatch]:
+    """The placeholders a source text holds already: only the exact ``[TYPE_N]`` (ruling R44).
+
+    An altered or bracketless form in an original ("Customer ID-55821", "PERSON-2") is a value
+    like any other, to be found and hidden; telling such forms apart is the restore's business.
+    """
+    return [match for match in find_placeholders(text) if match.exact]
 
 
 def is_searchable(variant: str) -> bool:
@@ -123,11 +133,14 @@ class _Places:
             index -= 1
         return found
 
-    def may_take_over(self, place: _Place, start: int, end: int) -> bool:
-        """Whether an occurrence at ``start``-``end`` may take over ``place``: it holds the
-        finding with room to spare, and the finding is not the owner's decision.
+    def may_take_over(self, place: _Place, start: int, end: int, sweeper: Group) -> bool:
+        """Whether an occurrence at ``start``-``end`` that ``sweeper`` found may take over
+        ``place``: the sweeping group is switched on, the occurrence holds the finding with room
+        to spare, and the finding is not the owner's decision.
         """
         finding, group = place.finding, place.group
+        if not sweeper.enabled:
+            return False
         holds = (
             start <= finding.start
             and finding.end <= end
@@ -177,11 +190,12 @@ def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None
     switched off follow). Sweeping again adds nothing.
     """
     places = _Places(groups, fixed)
-    placeholders = Spans((p.start, p.end) for p in find_placeholders(text))
+    placeholders = Spans((p.start, p.end) for p in existing_placeholders(text))
     variants = sorted(
         (
             (variant, index)
             for index, group in enumerate(groups)
+            if group.enabled  # a group the owner switched off neither sweeps nor takes over
             for variant in group.variants
             if is_searchable(variant)
         ),
@@ -198,7 +212,7 @@ def sweep(text: str, groups: list[Group], fixed: Collection[Group] = ()) -> None
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
-                or not all(places.may_take_over(place, start, end) for place in inside)
+                or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
             if refused:
                 position = start + 1  # a match that starts inside this one may still fit

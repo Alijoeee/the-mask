@@ -846,6 +846,29 @@ def test_flexible_pattern_boundary_also_applies_to_non_ascii_letter_ends() -> No
     assert flexible_pattern("Ömer").search("Herr Ömer")
 
 
+@pytest.mark.parametrize(
+    "value,text",
+    [
+        ("Gül", "Gülşen"),
+        ("Smith", "Smithé"),
+        ("Ali", "Alişan"),
+        ("Acme", "ÖAcme"),
+        ("12", "\N{ARABIC-INDIC DIGIT ONE}12"),
+    ],
+)
+def test_flexible_pattern_word_edges_hold_in_any_script(value: str, text: str) -> None:
+    # Task 8 raised minor M5: a letter or digit of any script ends a word, as an ASCII one does.
+    assert not flexible_pattern(value).search(f"x {text} x")
+
+
+def test_flexible_pattern_finds_a_word_beside_non_letters_of_any_script() -> None:
+    assert flexible_pattern("Gül").search("Ayşe Gül, Ankara")
+    assert flexible_pattern("Gül").search("«Gül»")
+    assert flexible_pattern("Smith").search(
+        "Smith\N{SUPERSCRIPT TWO} and Smith\N{VULGAR FRACTION ONE HALF}"
+    )
+
+
 def test_flexible_pattern_finds_every_occurrence() -> None:
     pattern = flexible_pattern("John Smith")
     spans = [m.span() for m in pattern.finditer("John Smith and john   smith")]

@@ -59,14 +59,14 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 
-from themask.detect.sweep import Spans, is_searchable, occurrences
+from themask.detect.sweep import Spans, existing_placeholders, is_searchable, occurrences
 from themask.model import Finding, Group, PlaceholderType
-from themask.placeholders import find_placeholders
 from themask.textnorm import HONORIFICS, has_legal_form, normalize, strip_legal_form, variants_of
 
 PERSON = PlaceholderType.PERSON
@@ -85,22 +85,36 @@ _PARTICLES = frozenset(
 # A first name written as its initial: "J", "J." or "J.A.".
 _INITIAL = re.compile(r"[^\W\d_]\.?|(?:[^\W\d_]\.){2,4}")
 _LEADING_THE = re.compile(r"(?i:the)\s+")
-# Spellings of one legal form, normalised.
+# Spellings of one legal form, normalised and without diacritics (see ``_legal_form_key``).
 _SAME_LEGAL_FORM = {"limited": "ltd", "incorporated": "inc", "corporation": "corp"}
+
+
+def _legal_form_key(form: str) -> str:
+    """A legal form as it is compared: normalised (no case, dots or spaces) and without its
+    diacritics, so that each spelling of one form is equal: "Ltd. Şti." and "Ltd. Sti.", "A.Ş."
+    and "A.S.", "B.V." and "BV", "Limited" and "Ltd".
+    """
+    decomposed = unicodedata.normalize("NFKD", normalize(form))
+    key = "".join(character for character in decomposed if not unicodedata.combining(character))
+    return _SAME_LEGAL_FORM.get(key, key)
 
 
 # --- What a finding says about the name it holds ---------------------------------------------
 
 
 @dataclass(frozen=True)
-class _Person:
-    """A person's name as written: its words after any honorific, and whether one stood there."""
+class PersonName:
+    """A person's name as written: its words after any honorific, and whether one stood there.
+
+    The pipeline reads names with it too, for the forms of a person's name that beat the terms a
+    document defines (``short_forms``).
+    """
 
     words: tuple[str, ...]
     honorific: bool
 
     @classmethod
-    def of(cls, text: str) -> _Person:
+    def of(cls, text: str) -> PersonName:
         words = text.split()
         honorific = False
         while words and normalize(words[0]) in _HONORIFIC_KEYS:
@@ -149,6 +163,18 @@ class _Person:
     def last(self) -> str:
         return normalize(self.words[-1]) if self.words else ""
 
+    def short_forms(self) -> set[str]:
+        """For a full name, the forms a document may use for that person alone: the surname and
+        its last word, each on its own, after any honorific, and after the first initial ("van
+        der Berg", "Berg", "Ms van der Berg", "Mr Berg", "J. van der Berg", "J. Berg"). None for
+        anything that is not a full name.
+        """
+        if not self.is_full:
+            return set()
+        surnames = {" ".join(self.words[1:]), self.words[-1]}
+        before = [*HONORIFICS, f"{self.words[0][0]}."]
+        return surnames | {f"{word} {surname}" for word in before for surname in surnames}
+
 
 def _without_the(text: str) -> str:
     """``text`` without a leading "the": the model's "the Northwind Group" is Northwind Group."""
@@ -172,9 +198,7 @@ class _Company:
         stem = normalize(stem_text)
         form = None
         if stem_text != name:
-            whole = normalize(name)
-            suffix = whole.removeprefix(stem)
-            form = _SAME_LEGAL_FORM.get(suffix, suffix)
+            form = _legal_form_key(normalize(name).removeprefix(stem))
         short = {normalize(v) for v in variants_of(name, COMPANY) if len(v.split()) == 1}
         first = normalize(stem_text.split()[0]) if stem_text.split() else ""
         return cls(stem, form, len(stem_text.split()), first if first in short else "")
@@ -197,7 +221,7 @@ class _Bucket:
     seed: Group | None = None
     names: set[str] = field(default_factory=set)  # keys that are this group's name
     flagged: bool = False
-    person: _Person | None = None  # the full name, for a group of a person
+    person: PersonName | None = None  # the full name, for a group of a person
     companies: list[_Company] = field(default_factory=list)  # its names, for a company
     variants: set[str] = field(default_factory=set)
 
@@ -205,8 +229,8 @@ class _Bucket:
     def of_seed(cls, seed: Group) -> _Bucket:
         bucket = cls(seed.type, seed=seed, names={normalize(v) for v in seed.variants})
         bucket.names.add(normalize(seed.canonical))
-        if seed.type is PERSON and _Person.of(seed.canonical).is_full:
-            bucket.person = _Person.of(seed.canonical)
+        if seed.type is PERSON and PersonName.of(seed.canonical).is_full:
+            bucket.person = PersonName.of(seed.canonical)
         if seed.type is COMPANY:
             bucket.companies.append(_Company.of(seed.canonical))
         return bucket
@@ -242,13 +266,17 @@ def group_findings(
     *,
     seeds: Iterable[Group] = (),
     keep: Callable[[str], bool] | None = None,
+    aliases: Iterable[str] = (),
 ) -> list[Group]:
     """The groups of ``findings``, in order of first appearance in ``text`` (see the module).
 
     ``seeds`` are groups that exist already (a case's key); they come back as the same objects,
-    with the findings that joined them. ``keep`` says whether a form ``variants_of`` derives may
-    be a variant (the pipeline leaves out the never-hide terms); the forms seen are always kept.
-    Findings are expected not to overlap: the pipeline settles overlaps first.
+    with the findings that joined them. ``keep`` says whether a form derived from the findings
+    may be a variant (the pipeline leaves out the never-hide terms); the forms seen are kept
+    unless they are too short to search for. ``aliases`` are the terms the document defines: one
+    that is a surname form of a person found ("Smith", "Ms Doe", "J. Smith") is a variant of that
+    person, and of no one when several people fit it. Findings are expected not to overlap: the
+    pipeline settles overlaps first.
     """
     keep_variant = keep or _keep_all
     seed_buckets = [_Bucket.of_seed(seed) for seed in seeds]
@@ -274,7 +302,7 @@ def group_findings(
     _place_people(people, buckets)
     _place_companies(companies, buckets)
     buckets = [b for b in buckets if b.findings or b.seed is not None]
-    buckets += _settle_variants(buckets, text, keep_variant)
+    buckets += _settle_variants(buckets, text, keep_variant, _alias_forms(aliases, buckets))
     buckets.sort(key=_Bucket.first_seen)
     return [_group(bucket) for bucket in buckets]
 
@@ -285,7 +313,7 @@ def _as_named(finding: Finding) -> Finding:
     Edwards", "S. Davies"), and a person with a legal form is a company.
     """
     if finding.type is COMPANY and not has_legal_form(finding.text):
-        person = _Person.of(finding.text)
+        person = PersonName.of(finding.text)
         if (person.honorific and person.words) or person.is_initial:
             return replace(finding, type=PERSON)
     if finding.type is PERSON and has_legal_form(finding.text):
@@ -315,7 +343,7 @@ def _people(findings: list[Finding], buckets: list[_Bucket]) -> dict[str, list[F
     by_name = {b.person.key: b for b in buckets if b.seed is not None and b.person is not None}
     mentions: dict[str, list[Finding]] = defaultdict(list)
     for finding in findings:
-        person = _Person.of(finding.text)
+        person = PersonName.of(finding.text)
         if not person.is_full:
             mentions[normalize(finding.text)].append(finding)
             continue
@@ -327,7 +355,7 @@ def _people(findings: list[Finding], buckets: list[_Bucket]) -> dict[str, list[F
     return mentions
 
 
-def _person_claims(person: _Person, buckets: list[_Bucket]) -> list[_Bucket]:
+def _person_claims(person: PersonName, buckets: list[_Bucket]) -> list[_Bucket]:
     """The groups of the full names a mention of ``person`` fits."""
     claims = []
     for bucket in buckets:
@@ -352,7 +380,7 @@ def _company_claims(key: str, buckets: list[_Bucket]) -> list[_Bucket]:
 def _place_people(mentions: dict[str, list[Finding]], buckets: list[_Bucket]) -> None:
     """Each mention joins the one full name it fits; else it is a group of its own."""
     for found in mentions.values():
-        person = _Person.of(found[0].text)
+        person = PersonName.of(found[0].text)
         claims = _person_claims(person, buckets)
         if len(claims) == 1:
             _join(claims[0], found)
@@ -391,7 +419,7 @@ def _companies(findings: list[Finding], buckets: list[_Bucket]) -> dict[str, lis
         if company.is_full:
             by_stem[company.stem].append((company, finding))
         else:
-            mentions[normalize(finding.text)].append(finding)
+            mentions[company.stem].append(finding)  # "the Acme" is "Acme"
     for stem, members in by_stem.items():
         forms = {company.form for company, _ in members if company.form is not None}
         targets: dict[str | None, _Bucket] = {}
@@ -424,7 +452,7 @@ def _place_companies(mentions: dict[str, list[Finding]], buckets: list[_Bucket])
             _join(company, found)
             continue
         if not claims:
-            people = _person_claims(_Person((found[0].text.strip(),), False), buckets)
+            people = _person_claims(PersonName.of(_without_the(found[0].text)), buckets)
             if len(people) == 1:
                 _join(people[0], found)
                 continue
@@ -476,17 +504,44 @@ def _derived(form: str, kind: PlaceholderType) -> set[str]:
         return variants_of(name, kind) | {name}
     derived = variants_of(form, kind)
     if kind is PERSON:
-        person = _Person.of(form)
+        person = PersonName.of(form)
         if person.is_full and len(person.words) >= 3 and person.words[0][:1].isalpha():
             derived.add(f"{person.words[0][0]}. {' '.join(person.words[1:])}")
     return derived
 
 
+def _alias_forms(aliases: Iterable[str], buckets: list[_Bucket]) -> dict[_Bucket, set[str]]:
+    """The defined terms that are a surname form of a full name found, by the groups they fit."""
+    forms: dict[_Bucket, set[str]] = defaultdict(set)
+    for alias in aliases:
+        person = PersonName.of(alias)
+        if person.words and not person.is_full:
+            for bucket in _person_claims(person, buckets):
+                forms[bucket].add(alias)
+    return forms
+
+
+def _form_owner(claims: list[_Bucket]) -> _Bucket | None:
+    """The one group of ``claims`` a derived form belongs to: the only one; of companies, the
+    only strong one (``_chosen``). A form two people fit belongs to neither, however sure one of
+    them is: "J. Smith" with John Smith and Jane Smith is a group of its own, to check.
+    """
+    if len(claims) == 1:
+        return claims[0]
+    if all(bucket.type is COMPANY for bucket in claims):
+        return _chosen(claims)
+    return None
+
+
 def _settle_variants(
-    buckets: list[_Bucket], text: str, keep: Callable[[str], bool]
+    buckets: list[_Bucket],
+    text: str,
+    keep: Callable[[str], bool],
+    aliases: dict[_Bucket, set[str]],
 ) -> list[_Bucket]:
     """Give each group its variants, each variant to one group only (see the module), and
     return the new groups to check for the shared forms that stand in the text on their own.
+    ``aliases`` adds the defined terms each group's person fits to the forms it derives.
     """
     own = {bucket: bucket.own() for bucket in buckets}
     owners: dict[str, list[_Bucket]] = defaultdict(list)
@@ -501,9 +556,10 @@ def _settle_variants(
             bucket.variants = set(bucket.seed.variants)
             continue
         seen = {f.text for f in bucket.findings}
-        bucket.variants = set(seen)
+        bucket.variants = {form for form in seen if is_searchable(form)}  # decision 6
         forms: dict[str, set[str]] = defaultdict(set)
-        for form in (form for text_seen in seen for form in _derived(text_seen, bucket.type)):
+        candidates = {form for text_seen in seen for form in _derived(text_seen, bucket.type)}
+        for form in candidates | aliases.get(bucket, set()):
             if keep(form) and is_searchable(form):
                 forms[normalize(form)].add(form)
         derived[bucket] = forms
@@ -519,9 +575,9 @@ def _settle_variants(
                 bucket.variants |= spellings
             elif key in owners:
                 continue  # the form is another group's own
-            elif _chosen(claimants[key]) is bucket:
+            elif _form_owner(claimants[key]) is bucket:
                 bucket.variants |= spellings
-            elif _chosen(claimants[key]) is None:
+            elif _form_owner(claimants[key]) is None:
                 shared[key] |= spellings
                 shared_type.setdefault(key, bucket.type)
     return _shared_form_groups(buckets, shared, shared_type, text)
@@ -536,7 +592,7 @@ def _shared_form_groups(
     """A group to check for each shared form that stands in ``text`` outside every finding."""
     taken = Spans(
         [(f.start, f.end) for bucket in buckets for f in bucket.findings]
-        + [(p.start, p.end) for p in find_placeholders(text)]
+        + [(p.start, p.end) for p in existing_placeholders(text)]
     )
     new = []
     for key in sorted(shared, key=lambda k: (-max(map(len, shared[k])), k)):
@@ -579,7 +635,7 @@ def _group(bucket: _Bucket) -> Group:
         id=uuid.uuid4().hex,
         type=bucket.type,
         canonical=canonical,
-        variants=bucket.variants | {canonical},
+        variants=bucket.variants | ({canonical} if is_searchable(canonical) else set()),
         findings=findings,
         placeholder="",
         needs_check=_needs_check(bucket),

@@ -313,6 +313,18 @@ def never_hide_check(
     return check
 
 
+def is_default_term(text: str) -> bool:
+    """Whether ``text`` is one of ``DEFAULT_NEVER_HIDE``, matched the way ``is_never_hide`` matches."""
+    key = term_key(text)
+    return bool(key) and _DEFAULTS.has(key)
+
+
+def on_never_hide_list(text: str, user: UserLists, case: CaseLists) -> bool:
+    """Whether ``text`` is on the owner's or the case's own never-hide list."""
+    key = term_key(text)
+    return bool(key) and _Terms([*user.never_hide, *case.never_hide]).has(key)
+
+
 def is_never_hide(text: str, user: UserLists, case: CaseLists) -> bool:
     """Whether ``text`` is a term that is never hidden: one of the defaults, on the owner's or the
     case's never-hide list, or a term the case's documents define. See the module for how terms
@@ -363,16 +375,16 @@ class UserLists:
     def load(cls, path: Path) -> UserLists:
         """The lists saved at ``path``; empty lists when there is no file yet.
 
-        Raises MaskError for a file that is not the lists ``save`` writes. A damaged file is
-        never taken for empty lists: the owner's always-hide values would silently stop being
-        hidden.
+        Raises MaskError for a file that is not the lists ``save`` writes (not UTF-8, not JSON,
+        or not two lists of texts). A damaged file is never taken for empty lists: the owner's
+        always-hide values would silently stop being hidden.
         """
         try:
-            text = path.read_text(encoding="utf-8")
+            content = path.read_bytes()
         except FileNotFoundError:
             return cls([], [])
         try:
-            data = json.loads(text)
+            data = json.loads(content.decode("utf-8"))
             if not isinstance(data, dict):
                 raise TypeError("The lists file holds no object.")
             return cls(_entries(data, "always_hide"), _entries(data, "never_hide"))

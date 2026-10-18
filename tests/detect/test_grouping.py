@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from themask.detect.grouping import group_findings
 from themask.model import Finding, Group, PlaceholderType
 
@@ -70,6 +72,31 @@ def test_initial_and_surname_merge_only_when_one_full_name_fits():
     assert not gs["John Smith"].needs_check and not gs["Jane Smith"].needs_check
     # Neither full name may claim "J. Smith", or the sweep would merge it after all.
     assert "J. Smith" not in gs["John Smith"].variants | gs["Jane Smith"].variants
+
+
+@pytest.mark.parametrize("jane", [(P, "Jane Smith"), (C, "Ms Jane Smith")])
+def test_a_weak_name_still_makes_a_shared_initial_a_check(jane):
+    # Important 2: John Smith at 0.9, Jane Smith at 0.6 (the model's "company" Ms Jane Smith).
+    kind, name = jane
+    txt = f"John Smith and {name} sign. J. Smith attends."
+    fs = [F(P, "John Smith", txt, score=0.9), F(kind, name, txt, score=0.6)]
+    gs = by_canonical(group_findings(fs, txt))
+    assert "J. Smith" not in gs["John Smith"].variants | gs[name].variants
+    assert gs["J. Smith"].needs_check and gs["J. Smith"].findings[0].source == "sweep"
+
+
+def test_a_defined_surname_form_is_its_persons_variant():
+    txt = 'John Smith ("Smith"). Smith shall provide the Services.'
+    (g,) = group_findings([F(P, "John Smith", txt)], txt, aliases={"Smith", "Services"})
+    assert "Smith" in g.variants and "Services" not in g.variants
+
+
+def test_a_defined_surname_two_people_share_is_checked():
+    txt = 'John Smith and Jane Smith ("Smith"). Smith shall attend.'
+    fs = [F(P, "John Smith", txt), F(P, "Jane Smith", txt)]
+    gs = by_canonical(group_findings(fs, txt, aliases={"Smith"}))
+    assert "Smith" not in gs["John Smith"].variants | gs["Jane Smith"].variants
+    assert gs["Smith"].needs_check and len(gs["Smith"].findings) == 2
 
 
 def test_a_shared_short_form_in_the_text_gets_a_group_of_its_own():
@@ -176,6 +203,37 @@ def test_two_legal_forms_are_two_companies():
     gs = by_canonical(group_findings(fs, txt))
     assert len(gs) == 3 and gs["Northwind Trading"].needs_check
     assert not gs["Northwind Trading B.V."].needs_check
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("Özdemir Gıda Ltd. Şti.", "Özdemir Gıda Ltd. Sti.", "Özdemir Gıda"),
+        ("Gıda Sanayi A.Ş.", "Gıda Sanayi A.S.", "Gıda Sanayi"),
+        ("Northwind Trading B.V.", "NORTHWIND TRADING BV", "Northwind Trading"),
+    ],
+)
+def test_one_legal_form_spelt_two_ways_is_one_company(names):
+    # Important 3: case, dots, spaces and diacritics do not make another legal form.
+    txt = f"{names[0]} signs; {names[1]} pays; {names[2]} delivers."
+    (g,) = group_findings([F(C, name, txt) for name in names], txt)
+    assert len(g.findings) == 3 and not g.needs_check
+
+
+def test_a_company_with_a_leading_the_joins_its_name():
+    # Raised minor M1: "the Acme" is keyed by its name, not by "theacme".
+    txt = "Acme Supplies Ltd signs. the Acme pays."
+    fs = [F(C, "Acme Supplies Ltd", txt), F(C, "the Acme", txt, score=0.6)]
+    (g,) = group_findings(fs, txt)
+    assert len(g.findings) == 2
+
+
+def test_a_form_too_short_to_search_is_no_variant():
+    # Raised minor M10 (decision 6): "5%" normalises to one character.
+    percent = PlaceholderType.PERCENT
+    txt = "A rebate of 5% and 12.5% applies."
+    gs = by_canonical(group_findings([F(percent, "5%", txt), F(percent, "12.5%", txt)], txt))
+    assert gs["5%"].variants == set() and gs["12.5%"].variants == {"12.5%"}
 
 
 def test_ltd_and_limited_are_one_legal_form():
