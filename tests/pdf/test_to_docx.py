@@ -1,9 +1,11 @@
 """PDF to Word: a fresh Word file holding the text of a PDF, and nothing else of it.
 
-The brief's test checks that every secret of supply-01 reaches the Word file. The others check how
-the blocks are written (headings, paragraphs, a table with a bold first row), where a note stands
-for a page that is only a picture, that nothing but text comes from the PDF and none of
-python-docx's own properties stay, and that characters a Word file cannot hold are left out.
+The brief's test checks that every secret of supply-01 reaches the Word file, and runs on each of
+the six text PDFs that have a Word twin. The others check how the blocks are written (headings,
+paragraphs, a table with a bold first row), where a note stands for a page with nothing to read
+(a picture, also one stamped with its page number), that nothing but text comes from the PDF and
+none of python-docx's own properties stay, and that characters a Word file cannot hold are left
+out.
 """
 
 from __future__ import annotations
@@ -12,9 +14,10 @@ import json
 from pathlib import Path
 
 import docx
+import pytest
 from docx.text.paragraph import Paragraph
 
-from tests.fixtures.pdf import Line, MakePdf
+from tests.fixtures.pdf import Line, MakePdf, Picture
 from themask.docx.package import DocxPackage
 from themask.docx.reader import extract_text
 from themask.pdf.extractor import extract_blocks
@@ -22,11 +25,14 @@ from themask.pdf.to_docx import IMAGE_PAGE_NOTE, pdf_to_docx
 from themask.textnorm import normalize
 
 
-def test_to_docx_keeps_every_truth_value(corpus: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "name", ["supply-01", "supply-04", "supply-05", "supply-06", "supply-10", "nda-01"]
+)
+def test_to_docx_keeps_every_truth_value(corpus: Path, tmp_path: Path, name: str) -> None:
     out = tmp_path / "s.docx"
-    pdf_to_docx(corpus / "supply-01.pdf", out)
+    pdf_to_docx(corpus / f"{name}.pdf", out)
     text = normalize(extract_text(DocxPackage.open(out)).text)
-    for t in json.loads((corpus / "supply-01.truth.json").read_text()):
+    for t in json.loads((corpus / f"{name}.truth.json").read_text()):
         assert normalize(t["value"]) in text, t["value"]
 
 
@@ -67,15 +73,36 @@ def test_a_note_stands_for_each_image_page(corpus: Path, tmp_path: Path) -> None
     assert texts[at - 1 : at + 2] == [before, note, after]
 
 
+def test_a_note_stands_for_a_scan_stamped_with_its_page_number(
+    make_pdf: MakePdf, tmp_path: Path
+) -> None:
+    stamp = [Line(812, f"Page {n} of 3") for n in (1, 2, 3)]
+    pages = [
+        [Line(100, "Clause 1 of the Agreement."), stamp[0]],
+        Picture([stamp[1]]),
+        [Line(100, "Clause 3 of the Agreement."), stamp[2]],
+    ]
+    out = tmp_path / "stamped.docx"
+    pdf_to_docx(make_pdf("stamped.pdf", pages), out)
+    assert [p.text for p in docx.Document(str(out)).paragraphs] == [
+        "Page 1 of 3",
+        "Clause 1 of the Agreement.",
+        IMAGE_PAGE_NOTE.format(page=2),
+        "Clause 3 of the Agreement.",
+    ]
+
+
 def test_nothing_but_the_text_comes_from_the_pdf(corpus: Path, tmp_path: Path) -> None:
-    """The PDF's title, author and the like stay behind, and python-docx's own are cleared."""
+    """The PDF's title, author and the like stay behind, and so do python-docx's own: the
+    author, comment, dates and revision of its template."""
     out = tmp_path / "s.docx"
     pdf_to_docx(corpus / "supply-01.pdf", out)
     props = docx.Document(str(out)).core_properties
     texts = (props.author, props.comments, props.keywords, props.last_modified_by, props.subject)
     assert texts == ("",) * 5 and props.title == ""
+    assert (props.created, props.modified, props.last_printed, props.revision) == (None,) * 3 + (0,)
     core = DocxPackage.open(out).raw("docProps/core.xml").decode()
-    assert "python-docx" not in core and "Supply Agreement" not in core
+    assert "python-docx" not in core and "Supply Agreement" not in core and "2013" not in core
 
 
 def test_characters_word_cannot_hold_are_left_out(make_pdf: MakePdf, tmp_path: Path) -> None:
