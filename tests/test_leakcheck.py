@@ -11,7 +11,10 @@ what a hit shows. No hit may show a value: every test that gets hits checks them
 from __future__ import annotations
 
 import json
+import re
 import time
+import unicodedata
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
@@ -21,9 +24,14 @@ import pytest
 from tests.fixtures.docx import PACKAGE_RELS, MakeDocx
 from tests.fixtures.leak import MASKED_ENTRIES, mask_file
 from tests.helpers import plant
+from themask import leakcheck
 from themask.detect.pipeline import CombinedText, analyze
+from themask.detect.sweep import is_bare_name
+from themask.docx.cleaner import clean
+from themask.docx.masker import apply_mask, insert_banner
 from themask.docx.package import DocxPackage
 from themask.docx.reader import extract_text
+from themask.docx.revisions import accept_all
 from themask.errors import ProtectedFileError, UnsupportedFileError
 from themask.leakcheck import (
     BINARY_PART,
@@ -34,7 +42,7 @@ from themask.leakcheck import (
     scan_package,
     unverifiable,
 )
-from themask.model import KeyEntry, PlaceholderType
+from themask.model import Group, KeyEntry, MaskPlan, PlaceholderType, Replacement
 from themask.placeholders import find_placeholders
 from themask.textnorm import normalize
 
@@ -50,9 +58,20 @@ IBAN = PlaceholderType.IBAN
 ID = PlaceholderType.ID
 PERCENT = PlaceholderType.PERCENT
 PERSON = PlaceholderType.PERSON
+# The types whose values are names, compared by their words (ruling R63).
+NAME_TYPES = {
+    PERSON,
+    COMPANY,
+    PlaceholderType.ADDRESS,
+    CUSTOM,
+    EMAIL,
+    PlaceholderType.URL,
+}
 
 E = MASKED_ENTRIES
 HYPERLINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
 def para(text: str) -> str:
@@ -67,13 +86,35 @@ def hyperlink_rels(target: str) -> bytes:
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml).encode()
 
 
+def words_of(text: str) -> str:
+    """``text`` as ruling R63 compares names: case folded, marks dropped, each run of anything
+    else that is not a letter or a digit one space, and a space at either end."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    folded = folded.replace("\N{LATIN SMALL LETTER DOTLESS I}", "i")
+    folded = "".join(c for c in folded if unicodedata.category(c) not in {"Mn", "Mc", "Me", "Cf"})
+    return " " + " ".join(re.findall(r"[^\W_]+", folded)) + " "
+
+
+def shows(text: str, entry: KeyEntry, form: str) -> bool:
+    """Whether ``text`` shows ``form`` of ``entry`` as the leak check finds a value: a name by its
+    whole words (ruling R63), a number by its letters and digits, and a number of digits only
+    where no other digit touches it (ruling R14)."""
+    if entry.type in NAME_TYPES:
+        return words_of(form) in words_of(text)
+    key = normalize(form)
+    if key.isdigit():
+        return re.search(rf"(?<!\d){key}(?!\d)", normalize(text)) is not None
+    return key in normalize(text)
+
+
 def assert_nothing_shown(hits: list[LeakHit], entries: list[KeyEntry]) -> None:
     """No hit shows a value or a variant that the leak check looks for, however it is written."""
-    keys = {normalize(form) for entry in entries for form in (entry.value, *entry.variants)}
     for hit in hits:
-        for key in (key for key in keys if len(key) >= 4):
-            assert key not in normalize(hit.context), (hit, key)
-            assert key not in normalize(hit.part), (hit, key)
+        for entry in entries:
+            for form in (entry.value, *entry.variants):
+                if len(normalize(form)) >= 4:
+                    assert not shows(hit.context, entry, form), (hit, form)
+                    assert not shows(hit.part, entry, form), (hit, form)
 
 
 # ---- the brief ----------------------------------------------------------------------------------
@@ -154,6 +195,127 @@ def test_short_values_are_not_checkable(make_docx: MakeDocx) -> None:
     assert scan_package(path, entries) == []
 
 
+# ---- names by their words (ruling R63) ----------------------------------------------------------
+
+
+def test_names_count_only_as_whole_words(make_docx: MakeDocx) -> None:
+    assert leakcheck.NAME_TYPES == NAME_TYPES  # the others are compared by letters and digits
+    sarah = KeyEntry("[PERSON_1]", PERSON, "Sarah Hall", ["S. Hall"])
+    bob = KeyEntry("[PERSON_2]", PERSON, "Bob Lee", ["B. Lee"])
+    quiet = para("The Supplier shall deliver the Goods.") + para(
+        "Each party shall use reasonable endeavours."
+    )
+    assert scan_package(make_docx(quiet), [sarah, bob]) == []
+    hits = scan_package(make_docx(quiet + para("Signed by S. Hall.")), [sarah, bob])
+    assert [(hit.placeholder, hit.context) for hit in hits] == [
+        ("[PERSON_1]", "Signed by [PERSON_1].")
+    ]
+
+
+def test_a_tab_parts_two_words_and_a_drawing_joins_none(make_docx: MakeDocx) -> None:
+    northwind = KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", [])
+    body = (
+        "<w:p><w:r><w:t>Northwind</w:t><w:tab/><w:t>Trading B.V.</w:t></w:r></w:p>"
+        # A drawing's position is a text of its own, not part of what the paragraph shows.
+        "<w:p><w:r><w:t>Paid by Northwind Trading</w:t></w:r><w:r><w:drawing><wp:anchor>"
+        '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>'
+        '</wp:anchor></w:drawing></w:r><w:r><w:t xml:space="preserve"> B.V. today</w:t></w:r></w:p>'
+    )
+    hits = scan_package(make_docx(body), [northwind])
+    # The full stop that ends "B.V." is no letter of the value, so it stays.
+    assert [hit.context for hit in hits] == ["[COMPANY_1].", "Paid by [COMPANY_1]. today"]
+
+
+# ---- the file format's own vocabulary (ruling R64) ----------------------------------------------
+
+
+def xml(text: str) -> bytes:
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + text).encode()
+
+
+def test_sizes_colours_and_ids_are_no_amounts(make_docx: MakeDocx) -> None:
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 35.000", ["35.000"])
+    cap = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 800.000,00", ["800.000,00"])  # 80000000
+    theme = xml(
+        f'<a:theme xmlns:a="{A_NS}" name="Office Theme"><a:themeElements>'
+        '<a:fmtScheme name="Office"><a:fillStyleLst><a:gradFill><a:gsLst><a:gs pos="35000">'
+        '<a:schemeClr val="phClr">'
+        '<a:tint val="35000"/><a:satMod val="350000"/></a:schemeClr></a:gs></a:gsLst></a:gradFill>'
+        "</a:fillStyleLst></a:fmtScheme></a:themeElements></a:theme>"
+    )
+    fonts = xml(
+        f'<w:fonts xmlns:w="{W_NS}"><w:font w:name="Calibri">'
+        '<w:sig w:usb0="E0002AFF" w:csb0="80000000"/></w:font></w:fonts>'
+    )
+    raw = {"word/theme/theme1.xml": theme, "word/fontTable.xml": fonts}
+    body = '<w:p><w:pPr><w:ind w:left="35000"/></w:pPr><w:r><w:t>Clean.</w:t></w:r></w:p>'
+    assert scan_package(make_docx(body, raw=raw), [fee, cap]) == []
+    hits = scan_package(make_docx(body + para("The fee is 35.000 a year."), raw=raw), [fee, cap])
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/document.xml", "The fee is [AMOUNT_1] a year.")
+    ]
+
+
+def test_a_party_named_like_the_file_format_counts_in_content_only(
+    make_docx: MakeDocx, masked_docx: Path
+) -> None:
+    microsoft = KeyEntry(
+        "[COMPANY_1]",
+        COMPANY,
+        "Microsoft Ireland Operations Limited",
+        ["Microsoft Ireland Operations", "Microsoft"],
+    )
+    styles_type = "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
+    raw = {
+        "word/_rels/document.xml.rels": xml(
+            f'<Relationships xmlns="{PACKAGE_RELS}"><Relationship Id="rId1" Type="{styles_type}"'
+            ' Target="stylesWithEffects.xml"/></Relationships>'
+        ),
+        "word/settings.xml": xml(
+            f'<w:settings xmlns:w="{W_NS}"><w:compat>'
+            '<w:compatSetting w:name="mode" w:uri="http://schemas.microsoft.com/office/word"/>'
+            '<w:compatSetting w:name="vml" w:uri="urn:schemas-microsoft-com:office:word"/>'
+            '<w:compatSetting w:name="mathml" w:uri="http://www.w3.org/Microsoft/MathML"/>'
+            "</w:compat></w:settings>"
+        ),
+        "word/fontTable.xml": xml(
+            f'<w:fonts xmlns:w="{W_NS}"><w:font w:name="Microsoft YaHei"/></w:fonts>'
+        ),
+        "word/theme/theme1.xml": xml(
+            f'<a:theme xmlns:a="{A_NS}" name="Office Theme"><a:themeElements>'
+            '<a:fontScheme name="Office"><a:majorFont><a:latin typeface="Microsoft Sans Serif"/>'
+            '<a:ea typeface="Microsoft YaHei"/><a:cs typeface="Microsoft Uighur"/>'
+            '<a:font script="Tibt" typeface="Microsoft Himalaya"/></a:majorFont></a:fontScheme>'
+            "</a:themeElements></a:theme>"
+        ),
+        "docProps/app.xml": xml(
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'extended-properties"><Template>Microsoft Normal.dotm</Template>'
+            "<Application>Microsoft Office Word</Application><AppVersion>16.0000</AppVersion>"
+            "</Properties>"
+        ),
+    }
+    body = (
+        '<w:p><w:r><w:rPr><w:rFonts w:ascii="Microsoft Sans Serif" w:cs="Microsoft Sans Serif"/>'
+        "</w:rPr><w:t>Plain text.</w:t></w:r></w:p>"
+    )
+    assert scan_package(make_docx(body, raw=raw), [microsoft]) == []
+    # Word's own copy of the same vocabulary, in the masked corpus file, is no hit either.
+    with zipfile.ZipFile(masked_docx) as archive:
+        assert b"Microsoft" in archive.read("word/theme/theme1.xml")
+        assert b"Microsoft" in archive.read("docProps/app.xml")
+    assert scan_package(masked_docx, [microsoft]) == []
+
+    tooltip = (
+        '<w:p><w:hyperlink w:tooltip="Microsoft portal"><w:r><w:t>portal</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+    )
+    hits = scan_package(make_docx(body + tooltip, raw=raw), [microsoft])
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/document.xml", 'tooltip="[COMPANY_1] portal"')
+    ]
+
+
 # ---- where values hide --------------------------------------------------------------------------
 
 
@@ -212,10 +374,13 @@ def test_field_names_and_format_keywords_are_no_hits(make_docx: MakeDocx) -> Non
         '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
         '<w:p><w:fldSimple w:instr=" PAGE \\* MERGEFORMAT "><w:r><w:t>2</w:t></w:r>'
         "</w:fldSimple></w:p>"
+        # A name is never part of a longer word either (ruling R63).
+        '<w:p><w:fldSimple w:instr=" PAGEREF _Ref1 \\h "><w:r><w:t>3</w:t></w:r></w:fldSimple>'
+        '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>'
     )
     words = [
         KeyEntry("[CUSTOM_1]", CUSTOM, "Page", []),
-        KeyEntry("[CUSTOM_2]", CUSTOM, "Merge-Format", []),
+        KeyEntry("[CUSTOM_2]", CUSTOM, "MergeFormat", []),
     ]
     assert scan_package(make_docx(fields), words) == []
 
@@ -386,6 +551,39 @@ def test_rescan_leaves_out_the_banner_and_the_marked_values(
     assert any(g.type is PERSON and "Jane Smith" in g.canonical for g in unmarked)
     assert not any({normalize(g.canonical), *map(normalize, g.variants)} & keys for g in unmarked)
     assert not any(find_placeholders(g.canonical) for g in unmarked)
+
+
+# ---- the whole pipeline -------------------------------------------------------------------------
+
+
+def key_of(group: Group) -> KeyEntry:
+    """A group's line of the key, as the review gives it: a person's bare surname is no variant
+    (ruling R52)."""
+    variants = sorted(
+        v for v in group.variants if v != group.canonical and not is_bare_name(group.type, v)
+    )
+    return KeyEntry(group.placeholder, group.type, group.canonical, variants)
+
+
+@pytest.mark.parametrize("name", ["supply-01", "supply-04", "nda-02", "dpa-01", "services-03"])
+def test_corpus_files_masked_by_the_pipeline_have_no_hits(
+    name: str, corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Analysed, every group's findings masked, then scanned for the key the groups make.
+    pkg = DocxPackage.open(corpus / f"{name}.docx")
+    accept_all(pkg)
+    clean(pkg)
+    doc_text = extract_text(pkg)
+    groups = analyze(CombinedText.join([(f"{name}.docx", doc_text.text)]), engine, lists).groups
+    marked = [group for group in groups if group.enabled]
+    plan = MaskPlan(
+        [Replacement(f.start, f.end, g.placeholder) for g in marked for f in g.active_findings()]
+    )
+    apply_mask(pkg, doc_text, plan)
+    insert_banner(pkg)
+    masked = tmp_path / "MASKED-CORP.docx"
+    pkg.save(masked)
+    assert scan_package(masked, [key_of(group) for group in marked]) == []
 
 
 # ---- speed --------------------------------------------------------------------------------------
