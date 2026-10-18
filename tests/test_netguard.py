@@ -1,9 +1,13 @@
-"""The network guard: no internet socket opens, and the suffix list comes with the program.
+"""The network guard: no internet socket opens, no host name is looked up, and the suffix list
+comes with the program.
 
 tests/conftest.py installs the guard before the first test, so the whole suite runs guarded. These
 tests check what the guard blocks and what it leaves alone (Unix-domain sockets, which Qt and the
 operating system use to talk to other processes on this computer), that installing it again changes
 nothing, and that tldextract reads the public-suffix list it ships with instead of fetching one.
+Apart from the brief's test_guard_blocks_connect, the tests send to and look up only what is on
+this computer (127.0.0.1, ::1, localhost), so that a guard that failed would still put nothing
+onto a network.
 """
 
 from __future__ import annotations
@@ -27,7 +31,16 @@ if TYPE_CHECKING:
     from themask.detect.engine import Engine
 
 MESSAGE = "The MASK never uses the network."
-SOCKET_METHODS = ("connect", "connect_ex", "sendto", "bind", "listen")
+SOCKET_METHODS = ("connect", "connect_ex", "sendto", "sendmsg", "bind", "listen")
+SOCKET_FUNCTIONS = (
+    "create_connection",
+    "create_server",
+    "getaddrinfo",
+    "gethostbyname",
+    "gethostbyname_ex",
+    "gethostbyaddr",
+    "getnameinfo",
+)
 
 
 def test_guard_blocks_connect():
@@ -48,7 +61,7 @@ def test_url_recognizer_works_offline(engine: Engine, caplog: pytest.LogCaptureF
 def test_the_error_is_an_os_error_with_a_plain_message():
     assert issubclass(NetworkBlockedError, OSError)
     with pytest.raises(OSError) as raised:
-        socket.getaddrinfo("example.com", 443)
+        socket.getaddrinfo("localhost", 443)
     assert type(raised.value) is NetworkBlockedError
     assert str(raised.value) == MESSAGE
 
@@ -61,17 +74,45 @@ def test_internet_sockets_cannot_connect_send_bind_or_listen(family, method):
         "connect": lambda sock: sock.connect((host, 9)),
         "connect_ex": lambda sock: sock.connect_ex((host, 9)),
         "sendto": lambda sock: sock.sendto(b"ping", (host, 9)),
+        "sendmsg": lambda sock: sock.sendmsg([b"ping"], [], 0, (host, 9)),
         "bind": lambda sock: sock.bind((host, 0)),
         "listen": lambda sock: sock.listen(1),
     }
+    datagrams = method in {"sendto", "sendmsg"}
     try:
-        sock = socket.socket(
-            family, socket.SOCK_DGRAM if method == "sendto" else socket.SOCK_STREAM
-        )
+        sock = socket.socket(family, socket.SOCK_DGRAM if datagrams else socket.SOCK_STREAM)
     except OSError:
         pytest.skip("This computer has no sockets of that family.")
     with sock, pytest.raises(NetworkBlockedError, match=re.escape(MESSAGE)):
         calls[method](sock)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(lambda: socket.create_server(("127.0.0.1", 0)), id="create_server-IPv4"),
+        pytest.param(
+            lambda: socket.create_server(("::1", 0), family=socket.AF_INET6),
+            id="create_server-IPv6",
+        ),
+        pytest.param(lambda: socket.gethostbyname("localhost"), id="gethostbyname"),
+        pytest.param(lambda: socket.gethostbyname_ex("localhost"), id="gethostbyname_ex"),
+        pytest.param(lambda: socket.gethostbyaddr("127.0.0.1"), id="gethostbyaddr"),
+        pytest.param(lambda: socket.getnameinfo(("127.0.0.1", 80), 0), id="getnameinfo"),
+    ],
+)
+def test_servers_and_name_lookups_raise_the_guards_own_error(call):
+    # create_server would otherwise fail inside bind() with a bare OSError that says "None": the
+    # standard library re-raises bind's error without its type or message.
+    with pytest.raises(NetworkBlockedError, match=re.escape(MESSAGE)):
+        call()
+
+
+def test_getfqdn_makes_no_lookup():
+    install_network_guard()
+    # getfqdn asks gethostbyaddr, which is blocked, and keeps the error to itself: the name it was
+    # given comes back. Without the guard a Mac answers "1.0.0.127.in-addr.arpa".
+    assert socket.getfqdn("127.0.0.1") == "127.0.0.1"
 
 
 def test_local_sockets_still_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -84,6 +125,8 @@ def test_local_sockets_still_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     with left, right:
         left.sendall(b"ping")
         assert right.recv(4) == b"ping"
+        left.sendmsg([b"pong"])
+        assert right.recv(4) == b"pong"
 
     with (
         socket.socket(socket.AF_UNIX) as server,
@@ -106,13 +149,16 @@ def test_local_sockets_still_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         receiver.bind("datagram.sock")
         sender.sendto(b"ping", "datagram.sock")
         assert receiver.recv(4) == b"ping"
+        sender.sendmsg([b"pong"], [], 0, "datagram.sock")
+        assert receiver.recv(4) == b"pong"
 
 
 def test_installing_twice_changes_nothing():
     install_network_guard()
     methods = {name: getattr(socket.socket, name) for name in SOCKET_METHODS}
-    functions = {name: getattr(socket, name) for name in ("create_connection", "getaddrinfo")}
+    functions = {name: getattr(socket, name) for name in SOCKET_FUNCTIONS}
     extractor = tldextract.extract
+    modules_extractor = tldextract.tldextract.TLD_EXTRACTOR
 
     install_network_guard()
 
@@ -121,6 +167,7 @@ def test_installing_twice_changes_nothing():
     for name, function in functions.items():
         assert getattr(socket, name) is function, name
     assert tldextract.extract is extractor
+    assert tldextract.tldextract.TLD_EXTRACTOR is modules_extractor
 
 
 def test_tldextract_reads_the_list_it_ships_with(caplog: pytest.LogCaptureFixture):
@@ -136,9 +183,20 @@ def test_tldextract_reads_the_list_it_ships_with(caplog: pytest.LogCaptureFixtur
     assert "Public Suffix List" not in caplog.text
 
 
+def test_the_functions_a_program_took_earlier_use_the_same_extractor():
+    install_network_guard()
+    # "from tldextract import extract" before the guard went on holds the submodule's function,
+    # which reads this global each time it is called.
+    assert tldextract.tldextract.TLD_EXTRACTOR is tldextract.extract
+    assert tldextract.tldextract.extract is not tldextract.extract
+
+    assert tldextract.tldextract.extract("https://forums.bbc.co.uk/news").suffix == "co.uk"
+
+
 def test_tldextract_leaves_no_cache_behind(tmp_path: Path):
     """tldextract's own cache would write a file under ~/.cache; the app keeps its files in its
     data folder only, and a cache that cannot be written makes tldextract warn about the list.
+    The function a program took before the guard went on must be as quiet as the new one.
     """
     home = tmp_path / "home"
     home.mkdir()
@@ -149,10 +207,12 @@ def test_tldextract_leaves_no_cache_behind(tmp_path: Path):
     }
     environment["HOME"] = str(home)  # where tldextract looks for its cache folder
     program = (
+        "from tldextract import extract as taken_before\n"
         "from themask.netguard import install_network_guard\n"
         "install_network_guard()\n"
         "import tldextract\n"
-        "print(tldextract.extract('https://forums.bbc.co.uk/news').suffix)\n"
+        "for extract in (tldextract.extract, taken_before):\n"
+        "    print(extract('https://forums.bbc.co.uk/news').suffix)\n"
     )
 
     result = subprocess.run(
@@ -165,6 +225,6 @@ def test_tldextract_leaves_no_cache_behind(tmp_path: Path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "co.uk"
+    assert result.stdout.split() == ["co.uk", "co.uk"]
     assert result.stderr == ""
     assert list(home.rglob("*")) == []
