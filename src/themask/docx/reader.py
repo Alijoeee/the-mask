@@ -14,9 +14,12 @@ where it sits in the document; Word stores each text box twice, as DrawingML in 
 as VML in ``mc:Fallback``, and only ``mc:Choice`` is read (ruling R16: the cleaner deletes every
 fallback, so no unmasked copy is left behind).
 
-Not read: the text of equations (``m:t`` in OMML) and the content of ``w:altChunk`` parts (HTML or
-RTF a document embeds whole). The cleaner removes both and leaves a visible note in their place
-(ruling R17).
+Not read: the text of equations (``m:t`` in OMML) and the content of ``w:altChunk`` parts (HTML,
+RTF or a whole .docx that a document embeds); the cleaner removes both and leaves a visible note
+in their place (ruling R17). Nor the text Word keeps in attributes: a watermark's
+``v:textpath/@string``, a link's ``@w:tooltip``, a picture's ``wp:docPr/@descr``, the items of a
+list content control, form-field defaults and smart-tag attributes; the cleaner removes it, and
+the leak check scans attributes (ruling R19).
 """
 
 from __future__ import annotations
@@ -53,6 +56,7 @@ _COMMENT_REFERENCE = _w("commentReference")
 # What some run content stands for in the text; it has no node, as there is nothing to change.
 _CHARACTERS = {
     _w("tab"): "\t",
+    _w("ptab"): "\t",  # an alignment tab, as in Word's three-part headers and footers
     _w("br"): "\n",
     _w("cr"): "\n",
     _w("noBreakHyphen"): "\N{NON-BREAKING HYPHEN}",
@@ -134,8 +138,9 @@ def paragraph_nodes(p: etree._Element, view: View) -> tuple[str, list[TextNode]]
     """The text of paragraph ``p`` in ``view``, and the nodes that hold it, in document order.
 
     Every run of the paragraph is read, also inside hyperlinks, content controls, smart tags,
-    simple fields, custom XML and tracked changes (those of the view). A tab stands for "\\t", a
-    line or page break for "\\n", a non-breaking hyphen for itself and a soft hyphen for nothing.
+    simple fields, custom XML and tracked changes (those of the view). A tab or an alignment tab
+    stands for "\\t", a line or page break for "\\n", a non-breaking hyphen for itself and a soft
+    hyphen for nothing.
     Paragraphs nested in this one, in a text box, are not part of its text.
     """
     _check(view)

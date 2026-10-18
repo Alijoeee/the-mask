@@ -8,7 +8,16 @@ from pathlib import Path
 import docx
 import pytest
 
-from tests.fixtures.docx import XMLNS, MakeDocx
+from tests.fixtures.docx import (
+    MAIN,
+    PACKAGE_RELS,
+    REL,
+    WML,
+    XMLNS,
+    MakeDocx,
+    content_types,
+    relationships,
+)
 from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import extract_text
 from themask.errors import MaskError, ProtectedFileError, UnsupportedFileError
@@ -17,23 +26,7 @@ NOT_A_DOCX = (
     "This is not a Word .docx file. If it is an old .doc, open it in Word and save as .docx."
 )
 PROTECTED = "This file is protected or encrypted. Please provide an unprotected copy."
-COMMENTS_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
-REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-PACKAGE_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
-WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
-
-
-def content_types(overrides: dict[str, str], defaults: dict[str, str] | None = None) -> bytes:
-    """A [Content_Types].xml with an Override for each part and a Default for each extension."""
-    every_default = {
-        "rels": "application/vnd.openxmlformats-package.relationships+xml",
-        "xml": "application/xml",
-        **(defaults or {}),
-    }
-    rows = [f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in every_default.items()]
-    rows += [f'<Override PartName="/{n}" ContentType="{t}"/>' for n, t in overrides.items()]
-    types = "http://schemas.openxmlformats.org/package/2006/content-types"
-    return f'<Types xmlns="{types}">{"".join(rows)}</Types>'.encode()
+COMMENTS_TYPE = f"{WML}.comments+xml"
 
 
 # ---- opening ---------------------------------------------------------------------------------
@@ -237,7 +230,8 @@ def test_text_parts_in_order(make_docx: MakeDocx) -> None:
 def test_text_parts_are_found_by_content_type(make_docx: MakeDocx) -> None:
     # Ruling R18: the content type decides, not the name, for other producers name parts as they
     # like. Within each kind the names ending in a number come in numeric order, then the others
-    # in the package's order.
+    # in the package's order. A part typed as a main document is not one unless the package says
+    # so (an altChunk payload has that type).
     header = f"{WML}.header+xml"
     typed = {
         "word/hdr-b.xml": header,
@@ -254,12 +248,11 @@ def test_text_parts_are_found_by_content_type(make_docx: MakeDocx) -> None:
     }
     raw = {name: f"<w:hdr {XMLNS}/>".encode() for name in typed}
     raw["[Content_Types].xml"] = content_types(
-        {"word/document.xml": f"{WML}.document.main+xml"} | {n: t for n, t in typed.items() if t},
+        {"word/document.xml": MAIN} | {n: t for n, t in typed.items() if t},
         defaults={"hdr": header},
     )
     assert DocxPackage.open(make_docx("<w:p/>", raw=raw)).TEXT_PARTS == [
         "word/document.xml",
-        "word/main2.xml",
         "word/header3.xml",
         "word/header12.xml",
         "word/hdr-b.xml",
@@ -281,14 +274,70 @@ def test_text_parts_are_found_by_content_type(make_docx: MakeDocx) -> None:
     ],
     ids=["macro-enabled", "template", "untyped", "typed-as-a-header"],
 )
-def test_the_document_is_always_a_text_part(make_docx: MakeDocx, main_type: str) -> None:
-    # open() has checked that word/document.xml is a Word document, so its text never drops out
-    # of the map, whatever type the package gives it (or none), and it is never read twice.
+def test_the_main_document_is_read_whatever_its_type(make_docx: MakeDocx, main_type: str) -> None:
+    # The package's officeDocument relationship names the main document, and open() has checked
+    # it is a Word document, so its text never drops out of the map whatever type it is given
+    # (or none), and it is never read twice.
     types = content_types({"word/document.xml": main_type} if main_type else {})
     pkg = DocxPackage.open(
         make_docx("<w:p><w:r><w:t>Body</w:t></w:r></w:p>", raw={"[Content_Types].xml": types})
     )
     assert pkg.TEXT_PARTS == ["word/document.xml"] and extract_text(pkg).text == "Body"
+
+
+def test_the_main_document_is_the_one_the_package_names(make_docx: MakeDocx) -> None:
+    # Ruling for review item 1: the target of the officeDocument relationship in _rels/.rels.
+    real = (
+        f"<w:document {XMLNS}><w:body><w:p><w:r><w:t>Real</w:t></w:r></w:p></w:body></w:document>"
+    )
+    named = DocxPackage.open(
+        make_docx(
+            "<w:p><w:r><w:t>Left over</w:t></w:r></w:p>",
+            raw={
+                "word/main.xml": real.encode(),
+                "_rels/.rels": relationships((f"{REL}/officeDocument", "/word/main.xml")),
+            },
+        )
+    )
+    assert named.TEXT_PARTS == ["word/main.xml"] and extract_text(named).text == "Real"
+    # No officeDocument relationship, or one to a part that is not there: word/document.xml.
+    for rels in (relationships(), relationships((f"{REL}/officeDocument", "word/gone.xml"))):
+        fallback = DocxPackage.open(make_docx("<w:p/>", raw={"_rels/.rels": rels}))
+        assert fallback.TEXT_PARTS == ["word/document.xml"]
+
+
+def test_the_main_document_must_be_a_word_document(make_docx: MakeDocx) -> None:
+    # open() checks the part the package names, not merely word/document.xml.
+    rels = relationships((f"{REL}/officeDocument", "word/main.xml"))
+    path = make_docx("<w:p/>", raw={"word/main.xml": b"<html/>", "_rels/.rels": rels})
+    with pytest.raises(UnsupportedFileError) as e:
+        DocxPackage.open(path)
+    assert e.value.user_message == NOT_A_DOCX
+
+
+def test_a_document_with_a_doctype_is_refused(make_docx: MakeDocx) -> None:
+    # Ruling R20: Word never writes a DOCTYPE, and the entities one declares could hide text.
+    document = (
+        '<!DOCTYPE w:document [<!ENTITY party "Northwind Trading B.V.">]>'
+        f"<w:document {XMLNS}><w:body><w:p><w:r><w:t>&party;</w:t></w:r></w:p></w:body>"
+        "</w:document>"
+    )
+    with pytest.raises(UnsupportedFileError) as e:
+        DocxPackage.open(make_docx("", raw={"word/document.xml": document.encode()}))
+    assert e.value.user_message == NOT_A_DOCX
+
+
+def test_any_part_with_a_doctype_is_refused_when_it_is_read(make_docx: MakeDocx) -> None:
+    header = f"<!DOCTYPE w:hdr><w:hdr {XMLNS}><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>"
+    pkg = DocxPackage.open(
+        make_docx(
+            "<w:p/>", parts={"word/header1.xml": ""}, raw={"word/header1.xml": header.encode()}
+        )
+    )
+    with pytest.raises(UnsupportedFileError):
+        extract_text(pkg)
+    with pytest.raises(UnsupportedFileError):
+        pkg.xml("word/header1.xml")
 
 
 def test_namespaces() -> None:

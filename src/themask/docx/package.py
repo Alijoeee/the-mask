@@ -58,20 +58,16 @@ RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 DOCUMENT = "word/document.xml"
 CONTENT_TYPES = "[Content_Types].xml"
 
-# The content types of the parts that hold the document's text (ruling R18: a part is found by
-# its type, not its name). Compared without case, as content types are.
+_REL_TYPES = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_OFFICE_DOCUMENT = f"{_REL_TYPES}/officeDocument"  # names the main document
+# The kinds of text part after the main document, in reading order, each with its content type
+# (compared without case, as content types are) and its relationship type. A part is of a kind
+# when its content type says so (ruling R18) or when the main document relates to it with that
+# kind's relationship, which is how Word finds it whatever its content type (ruling R20).
 _WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
-_MAIN_TYPES = frozenset(  # the main document of a .docx, .dotx, .docm and .dotm
-    t.casefold()
-    for t in (
-        f"{_WML}.document.main+xml",
-        f"{_WML}.template.main+xml",
-        "application/vnd.ms-word.document.macroEnabled.main+xml",
-        "application/vnd.ms-word.template.macroEnabledTemplate.main+xml",
-    )
-)
-_TEXT_KINDS = tuple(  # after the main document, in this order
-    f"{_WML}.{kind}+xml".casefold() for kind in ("header", "footer", "footnotes", "endnotes")
+_TEXT_KINDS = tuple(
+    (f"{_WML}.{kind}+xml".casefold(), f"{_REL_TYPES}/{kind}")
+    for kind in ("header", "footer", "footnotes", "endnotes")
 )
 _ENDS_IN_A_NUMBER = re.compile(r"([0-9]+)\.[^.]*$")  # the digits before a file's extension
 
@@ -114,9 +110,9 @@ class DocxPackage:
 
         Raises ProtectedFileError for a file Word has encrypted with a password, and
         UnsupportedFileError for anything else that is not a .docx: an old .doc, a damaged or
-        non-zip file, a zip without a Word document or without [Content_Types].xml (which tells
-        the text parts apart), or a "Strict Open XML" document, whose text this package cannot
-        see.
+        non-zip file, a zip without word/document.xml or without [Content_Types].xml (which
+        tells the text parts apart), or one whose main document is not a Word document: a
+        "Strict Open XML" document, whose text this package cannot see, or one with a DOCTYPE.
         """
         data = path.read_bytes()
         if data.startswith(_COMPOUND_FILE):
@@ -130,9 +126,11 @@ class DocxPackage:
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE) from error
         if CONTENT_TYPES not in parts or DOCUMENT not in parts:
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
-        if _root_tag(parts[DOCUMENT]) != f"{{{NS['w']}}}document":
+        package = cls(parts, path)
+        main = package._main_part()
+        if main is None or _root_tag(parts[main]) != f"{{{NS['w']}}}document":
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
-        return cls(parts, path)
+        return package
 
     def copy(self) -> DocxPackage:
         """A package of its own with the same parts: changing one never changes the other."""
@@ -147,8 +145,9 @@ class DocxPackage:
     def xml(self, name: str) -> etree._Element:
         """The root element of part ``name``, parsed the first time and the same object after.
 
-        Changes to the tree are kept: ``raw`` and ``save`` write the tree as it is then. Raises
-        KeyError when there is no such part and UnsupportedFileError when it is not valid XML.
+        Changes to the tree are kept: ``raw`` and ``save`` write the tree as it is then. XML
+        comments and processing instructions are left out of it. Raises KeyError when there is no
+        such part and UnsupportedFileError when it is not valid XML or has a DOCTYPE.
         """
         root = self._trees.get(name)
         if root is None:
@@ -214,20 +213,32 @@ class DocxPackage:
 
     @property
     def TEXT_PARTS(self) -> list[str]:  # upper case: the name the plan gives it
-        """The parts that hold the document's text, in reading order, found by content type.
+        """The parts that hold the document's text, in reading order.
 
-        First ``word/document.xml``, which ``open`` has checked is a Word document, and any other
-        part typed as a main document; then the headers, the footers, the footnotes and the
-        endnotes. Within each kind, the parts whose names end in a number come in numeric order
-        (header2 before header10), then the others in the package's order. Comments are not
-        among them: they are removed before masking.
+        First the main document: the part the package's officeDocument relationship names, else
+        ``word/document.xml``. Then the headers, the footers, the footnotes and the endnotes:
+        the parts whose content type says so, and those the main document relates to as such
+        whatever their content type, since Word shows those too. Within each kind, the parts
+        whose names end in a number come in numeric order (header2 before header10), then the
+        others in the package's order; no part comes twice. Not among them: comments, removed
+        before masking, and any other part typed as a main document, such as the whole .docx an
+        altChunk embeds, which the cleaner removes.
         """
+        main = self._main_part()
+        if main is None:
+            return []
         types = self._content_types()
-        others = [n for n in self._raw if n != DOCUMENT]  # so no part is listed twice
-        parts = [DOCUMENT] if DOCUMENT in self._raw else []
-        parts += [n for n in others if types.get(n) in _MAIN_TYPES]
-        for kind in _TEXT_KINDS:
-            parts += _in_number_order([n for n in others if types.get(n) == kind])
+        related = self._relationships(main)
+        parts = [main]
+        for content_type, relationship in _TEXT_KINDS:
+            of_kind = {name for kind, name in related if kind == relationship}
+            parts += _in_number_order(
+                [
+                    n
+                    for n in self._raw
+                    if n not in parts and (n in of_kind or types.get(n) == content_type)
+                ]
+            )
         return parts
 
     def _drop_children(
@@ -245,6 +256,32 @@ class DocxPackage:
             root.remove(child)
         if children and not parsed_before:
             self._trees[name] = root
+
+    def _main_part(self) -> str | None:
+        """The part the package's officeDocument relationship names, else word/document.xml."""
+        for kind, name in self._relationships(""):
+            if kind == _OFFICE_DOCUMENT:
+                return name
+        return DOCUMENT if DOCUMENT in self._raw else None
+
+    def _relationships(self, source: str) -> list[tuple[str, str]]:
+        """(type, part) for each relationship of part ``source`` ("" for the package itself).
+
+        In the order of its relationships part, and only those to a part the package has.
+        """
+        rels = _rels_name(source)
+        if rels not in self._raw:
+            return []
+        folder = posixpath.dirname(source)
+        by_name = {unquote(n).casefold(): n for n in self._raw}
+        found: list[tuple[str, str]] = []
+        for r in self._tree(rels).iterchildren(f"{{{RELS_NS}}}Relationship"):
+            internal = r.get("TargetMode") != "External"
+            target = _target_part(folder, r.get("Target", "")) if internal else None
+            name = None if target is None else by_name.get(unquote(target).casefold())
+            if name is not None:
+                found.append((r.get("Type", ""), name))
+        return found
 
     def _tree(self, name: str) -> etree._Element:
         """Part ``name`` parsed: its tree if it has one, else a new tree that is not kept."""
@@ -281,12 +318,20 @@ class DocxPackage:
 
 def _parse(data: bytes) -> etree._Element:
     # A parser of its own for each part: an lxml parser must not be used by two threads at once,
-    # and the analysis runs in a worker thread. Entities are never expanded, nothing is fetched.
-    parser = etree.XMLParser(resolve_entities=False, no_network=True)
+    # and the analysis runs in a worker thread. Nothing is fetched and no entity is expanded; a
+    # part with a DOCTYPE is refused (Word never writes one, and the entities it declares could
+    # hide text: ruling R20). XML comments and processing instructions are dropped, so the text
+    # on either side of one inside a w:t is a single text.
+    parser = etree.XMLParser(
+        resolve_entities=False, no_network=True, remove_comments=True, remove_pis=True
+    )
     try:
-        return etree.fromstring(data, parser)
+        root = etree.fromstring(data, parser)
     except etree.XMLSyntaxError as error:
         raise UnsupportedFileError(NOT_A_DOCX_MESSAGE) from error
+    if root.getroottree().docinfo.doctype:
+        raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
+    return root
 
 
 def _serialize(root: etree._Element) -> bytes:
@@ -297,7 +342,7 @@ def _serialize(root: etree._Element) -> bytes:
 
 
 def _root_tag(data: bytes) -> str | None:
-    """The tag of the root element of ``data``, or None when it is not XML; reads no further."""
+    """The tag of the root of ``data``; None when it is not XML or has a DOCTYPE. Reads no more."""
     events = etree.iterparse(
         io.BytesIO(data), events=("start",), resolve_entities=False, no_network=True
     )
@@ -305,7 +350,7 @@ def _root_tag(data: bytes) -> str | None:
         _event, root = next(events)
     except (etree.XMLSyntaxError, StopIteration):
         return None
-    return str(root.tag)
+    return None if root.getroottree().docinfo.doctype else str(root.tag)
 
 
 def _rels_name(part_name: str) -> str:

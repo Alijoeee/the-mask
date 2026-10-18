@@ -3,7 +3,9 @@
 ``fixtures`` is the folder of files that only pretend to be Word files. ``make_docx`` writes a
 small Word file from a few lines of WordprocessingML, for the cases the corpus does not have
 (fields, tabs, nested tables, content controls, odd part names). ``paragraph`` makes a single
-``w:p`` element. The namespaces are written out here rather than taken from the code under test.
+``w:p`` element; ``content_types`` and ``relationships`` write the package's bookkeeping parts
+for a test that needs its own. The namespaces are written out here rather than taken from the
+code under test.
 """
 
 from __future__ import annotations
@@ -28,17 +30,18 @@ NAMESPACES = {
 }
 XMLNS = " ".join(f'xmlns:{prefix}="{uri}"' for prefix, uri in NAMESPACES.items())
 
-_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
-_PACKAGE_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
-_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-_WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"
+TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
+PACKAGE_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"  # relationship types
+WML = "application/vnd.openxmlformats-officedocument.wordprocessingml"  # their content types
+MAIN = f"{WML}.document.main+xml"
 # For each kind of part make_docx can add: its root element, content type and relationship type.
 _KINDS = {
-    "header": ("w:hdr", f"{_WML}.header+xml", f"{_REL}/header"),
-    "footer": ("w:ftr", f"{_WML}.footer+xml", f"{_REL}/footer"),
-    "footnotes": ("w:footnotes", f"{_WML}.footnotes+xml", f"{_REL}/footnotes"),
-    "endnotes": ("w:endnotes", f"{_WML}.endnotes+xml", f"{_REL}/endnotes"),
-    "comments": ("w:comments", f"{_WML}.comments+xml", f"{_REL}/comments"),
+    "header": ("w:hdr", f"{WML}.header+xml", f"{REL}/header"),
+    "footer": ("w:ftr", f"{WML}.footer+xml", f"{REL}/footer"),
+    "footnotes": ("w:footnotes", f"{WML}.footnotes+xml", f"{REL}/footnotes"),
+    "endnotes": ("w:endnotes", f"{WML}.endnotes+xml", f"{REL}/endnotes"),
+    "comments": ("w:comments", f"{WML}.comments+xml", f"{REL}/comments"),
 }
 _KIND = re.compile(r"word/(header|footer|footnotes|endnotes|comments)\d*\.xml")
 
@@ -50,41 +53,51 @@ def paragraph(content: str) -> etree._Element:
     return etree.fromstring(f"<w:p {XMLNS}>{content}</w:p>")
 
 
+def content_types(overrides: Mapping[str, str], defaults: Mapping[str, str] | None = None) -> bytes:
+    """A [Content_Types].xml with an Override for each part and a Default for each extension.
+
+    The Defaults for "rels" and "xml" are always there; ``defaults`` adds to them.
+    """
+    every_default = {
+        "rels": "application/vnd.openxmlformats-package.relationships+xml",
+        "xml": "application/xml",
+        **(defaults or {}),
+    }
+    rows = [f'<Default Extension="{e}" ContentType="{t}"/>' for e, t in every_default.items()]
+    rows += [f'<Override PartName="/{n}" ContentType="{t}"/>' for n, t in overrides.items()]
+    return _xml(f'<Types xmlns="{TYPES}">{"".join(rows)}</Types>')
+
+
+def relationships(*targets: tuple[str, str]) -> bytes:
+    """A .rels part relating to each ``(type, target)``, with the ids rId1, rId2, ..."""
+    rows = [
+        f'<Relationship Id="rId{n}" Type="{kind}" Target="{target}"/>'
+        for n, (kind, target) in enumerate(targets, start=1)
+    ]
+    return _xml(f'<Relationships xmlns="{PACKAGE_RELS}">{"".join(rows)}</Relationships>')
+
+
 def _xml(text: str) -> bytes:
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + text).encode()
 
 
 def _entries(body: str, parts: Mapping[str, str]) -> dict[str, bytes]:
-    types = [f'<Override PartName="/word/document.xml" ContentType="{_WML}.document.main+xml"/>']
-    relationships = []
+    types = {"word/document.xml": MAIN}
+    related = []
     added = {}
-    for number, (name, content) in enumerate(parts.items(), start=1):
+    for name, content in parts.items():
         kind = _KIND.fullmatch(name)
         if kind is None:
             raise ValueError(f"make_docx does not know what kind of part {name} is.")
         root, content_type, relationship_type = _KINDS[kind.group(1)]
         added[name] = _xml(f"<{root} {XMLNS}>{content}</{root}>")
-        types.append(f'<Override PartName="/{name}" ContentType="{content_type}"/>')
-        relationships.append(
-            f'<Relationship Id="rId{number}" Type="{relationship_type}"'
-            f' Target="{name.removeprefix("word/")}"/>'
-        )
+        types[name] = content_type
+        related.append((relationship_type, name.removeprefix("word/")))
     return {
-        "[Content_Types].xml": _xml(
-            f'<Types xmlns="{_TYPES}">'
-            '<Default Extension="rels"'
-            ' ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-            '<Default Extension="xml" ContentType="application/xml"/>'
-            f"{''.join(types)}</Types>"
-        ),
-        "_rels/.rels": _xml(
-            f'<Relationships xmlns="{_PACKAGE_RELS}"><Relationship Id="rId1"'
-            f' Type="{_REL}/officeDocument" Target="word/document.xml"/></Relationships>'
-        ),
+        "[Content_Types].xml": content_types(types),
+        "_rels/.rels": relationships((f"{REL}/officeDocument", "word/document.xml")),
         "word/document.xml": _xml(f"<w:document {XMLNS}><w:body>{body}</w:body></w:document>"),
-        "word/_rels/document.xml.rels": _xml(
-            f'<Relationships xmlns="{_PACKAGE_RELS}">{"".join(relationships)}</Relationships>'
-        ),
+        "word/_rels/document.xml.rels": relationships(*related),
         **added,
     }
 

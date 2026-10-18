@@ -15,7 +15,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.fixtures.docx import MakeDocx, paragraph
+from tests.fixtures.docx import (
+    MAIN,
+    REL,
+    WML,
+    MakeDocx,
+    content_types,
+    paragraph,
+    relationships,
+)
 from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import (
     extract_text,
@@ -173,6 +181,19 @@ def test_tabs_breaks_and_hyphens() -> None:
     ]
     assert {n.kind for n in nodes} == {"t"}
     assert all(text[n.start : n.end] == (n.elem.text or "") for n in nodes)
+
+
+def test_alignment_tabs_separate_like_tabs() -> None:
+    # Review item 2: Word's three-part header and footer layouts put an alignment tab between
+    # the parts, so without a separator the sweep would not find "Jane Smith" there.
+    para = paragraph(
+        '<w:r><w:t>Jane Smith</w:t><w:ptab w:relativeTo="margin" w:alignment="center"'
+        ' w:leader="none"/><w:t>Supply Agreement</w:t>'
+        '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/><w:t>Draft</w:t></w:r>'
+    )
+    text, nodes = paragraph_nodes(para, "accepted")
+    assert text == "Jane Smith\tSupply Agreement\tDraft"
+    assert [(n.start, n.end) for n in nodes] == [(0, 10), (11, 27), (28, 33)]
 
 
 def test_field_instructions_are_nodes_of_their_own_kind() -> None:
@@ -356,6 +377,55 @@ def test_a_renamed_header_is_still_read(make_docx: MakeDocx, tmp_path: Path) -> 
     dt = extract_text(DocxPackage.open(renamed))
     assert dt.text == "Body\nRenamed header"
     assert [s.part for s in dt.segments] == ["word/document.xml", "word/hdr.xml"]
+
+
+@pytest.mark.parametrize("header_type", ["", f"{WML}.comments+xml"], ids=["missing", "wrong"])
+def test_a_header_the_document_relates_to_is_read_whatever_its_type(
+    make_docx: MakeDocx, header_type: str
+) -> None:
+    # Ruling R20: Word renders a part the document relates to as a header whatever its content
+    # type says, so the relationship finds it too.
+    overrides = {"word/document.xml": MAIN} | (
+        {"word/header1.xml": header_type} if header_type else {}
+    )
+    pkg = DocxPackage.open(
+        make_docx(
+            p("Body"),
+            parts={"word/header1.xml": p("Header")},
+            raw={"[Content_Types].xml": content_types(overrides)},
+        )
+    )
+    assert pkg.TEXT_PARTS == ["word/document.xml", "word/header1.xml"]
+    assert extract_text(pkg).text == "Body\nHeader"
+
+
+def test_an_alt_chunk_is_not_a_text_part(make_docx: MakeDocx) -> None:
+    # Review item 1: the Open XML SDK merges a whole .docx into a document as an altChunk part
+    # typed as a main document. It is not the main document: the file opens and its text is read
+    # without it (the cleaner removes it, ruling R17).
+    chunk = make_docx(p("Inside the chunk")).read_bytes()  # a whole Word file: a zip, not XML
+    path = make_docx(
+        p("Before") + '<w:altChunk r:id="rId1"/>' + p("After"),
+        raw={
+            "word/afchunk1.docx": chunk,
+            "[Content_Types].xml": content_types(
+                {"word/document.xml": MAIN, "word/afchunk1.docx": MAIN}
+            ),
+            "word/_rels/document.xml.rels": relationships((f"{REL}/aFChunk", "afchunk1.docx")),
+        },
+    )
+    pkg = DocxPackage.open(path)
+    assert pkg.TEXT_PARTS == ["word/document.xml"]
+    assert extract_text(pkg).text == "Before\nAfter"
+    assert not has_revisions(pkg) and not has_comments(pkg)
+
+
+def test_xml_comments_and_processing_instructions_are_left_out(make_docx: MakeDocx) -> None:
+    # Ruling R20: parts are parsed without them, so the text on either side is one text.
+    dt = extract_text(DocxPackage.open(make_docx(p("Acme<!--x--> B.V.") + p("North<?pi x?>wind"))))
+    assert dt.text == "Acme B.V.\nNorthwind"
+    nodes = paragraph_nodes(dt.segments[0].para, "accepted")[1]
+    assert [n.elem.text for n in nodes] == ["Acme B.V."]
 
 
 def test_parts_in_order_and_comments_left_out(make_docx: MakeDocx) -> None:
