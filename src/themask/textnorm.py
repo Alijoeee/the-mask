@@ -116,6 +116,13 @@ HONORIFICS: tuple[str, ...] = (
     "Frau",
 )
 
+# The small words a surname may start with: "van der Berg", "de la Cruz", "von Bülow". Compare
+# ignoring case.
+NAME_PARTICLES: frozenset[str] = frozenset(
+    {"van", "der", "den", "de", "del", "della", "di", "da", "du", "la", "le", "von", "zu"}
+    | {"ter", "ten", "bin", "al", "el", "y"}
+)
+
 # --------------------------------------------------------------------------------------------
 # normalize
 # --------------------------------------------------------------------------------------------
@@ -378,8 +385,29 @@ def variants_of(value: str, t: PlaceholderType) -> set[str]:
 # flexible_pattern
 # --------------------------------------------------------------------------------------------
 
-_NOT_PRECEDED_BY_LETTER_OR_DIGIT = r"(?<![A-Za-z0-9])"
-_NOT_FOLLOWED_BY_LETTER_OR_DIGIT = r"(?![A-Za-z0-9])"
+
+def _numbers_that_are_not_digits() -> str:
+    """The numbers of the Basic Multilingual Plane that are not decimal digits, as the inside of a
+    character class: superscripts and subscripts, fractions, Roman numerals, circled numbers.
+    ``\\w`` takes them for letters or digits, but a footnote mark ("Smith¹") ends a word.
+    """
+    ranges: list[list[int]] = []
+    for code in range(0x10000):
+        if unicodedata.category(chr(code)) in ("No", "Nl"):
+            if ranges and ranges[-1][1] == code - 1:
+                ranges[-1][1] = code
+            else:
+                ranges.append([code, code])
+    return "".join(
+        re.escape(chr(first)) + ("" if first == last else "-" + re.escape(chr(last)))
+        for first, last in ranges
+    )
+
+
+# A letter or a digit of any script ("é", "ş", "ı", "١"), and not the underscore.
+_LETTER_OR_DIGIT = r"[^\W_" + _numbers_that_are_not_digits() + "]"
+_NOT_PRECEDED_BY_LETTER_OR_DIGIT = f"(?<!{_LETTER_OR_DIGIT})"
+_NOT_FOLLOWED_BY_LETTER_OR_DIGIT = f"(?!{_LETTER_OR_DIGIT})"
 # A full stop or comma between digits joins them into one number: "1,250" and "5,000.00".
 _NOT_AFTER_DIGITS_AND_SEPARATOR = r"(?<!\d[.,])"
 _NOT_BEFORE_SEPARATOR_AND_DIGITS = r"(?![.,]\d)"
@@ -391,7 +419,8 @@ def flexible_pattern(value: str) -> re.Pattern[str]:
     Every run of whitespace in ``value`` matches any run of whitespace in the text (a space, a
     tab, a line break or a non-breaking space), and everything else is matched literally. When
     ``value`` starts or ends with a letter or digit, it must not touch another letter or digit
-    there, so "Smith" is not found inside "Smithson". When it starts or ends with a digit, it is
+    there, of any script: "Smith" is not found inside "Smithson", nor "Gül" inside "Gülşen" (a
+    footnote mark such as "¹" is no digit). When it starts or ends with a digit, it is
     not found as part of a longer number either (ruling R11): "EUR 5" is not in "EUR 5,000.00", nor
     "250" in "1,250". A blank ``value`` is rejected, because its pattern would match everywhere.
     """
