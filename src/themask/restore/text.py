@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from themask.model import Case
-from themask.restore.matcher import banner_spans, plan_restore
+from themask.restore.matcher import banner_spans, plan_restore, restore_span
 from themask.restore.report import RestoreItem, RestoreReport
 
 
@@ -13,8 +13,9 @@ def restore_text(text: str, case: Case, confirm_altered: bool) -> tuple[str, Res
     An exact placeholder the key holds is always replaced by its value. One the AI changed is
     replaced only when ``confirm_altered`` is set; otherwise it stays as written and is listed in
     ``needs_check``. One the key does not hold stays as written and is listed in ``unknown``. A
-    replacement covers the whole placeholder as written, brackets and markdown markers included.
-    The MASK's own lines (``banner_spans``) are taken out. Nothing else in the text changes.
+    replacement covers the whole placeholder as written, brackets and markdown markers included,
+    except a bracket on one side only, which is the surrounding text's (``restore_span``). The
+    MASK's own lines (``banner_spans``) are taken out. Nothing else in the text changes.
     """
     banners = banner_spans(text)
     # (start, end, new text) for each stretch of the text to change; no two of them overlap.
@@ -26,7 +27,8 @@ def restore_text(text: str, case: Case, confirm_altered: bool) -> tuple[str, Res
         if item.entry is None:
             unknown.append(item.match.raw)
         elif item.status == "exact" or confirm_altered:
-            edits.append((item.match.start, item.match.end, item.entry.value))
+            start, end = restore_span(item.match)
+            edits.append((start, end, item.entry.value))
             restored += 1
             if item.status == "altered":
                 altered_restored += 1

@@ -4,33 +4,37 @@
 is put back, a form of it the AI changed waits for the owner's confirmation, and one the key does
 not hold is left as written. The MASK's banner and its instruction for the AI hold placeholders as
 examples; a line that is one of them is not planned, because a restore takes the line out.
+``restore_span`` says which stretch of the text a restore replaces for a placeholder.
 """
 
 from __future__ import annotations
 
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case
-from themask.placeholders import PlaceholderMatch, find_placeholders
+from themask.placeholders import _TOKEN_RE, PlaceholderMatch, find_placeholders
 from themask.restore.report import RestoreItem
+from themask.textnorm import normalize
 
-# The MASK's own lines, with each run of whitespace written as one space (see banner_spans).
-_OWN_LINES = frozenset(" ".join(line.split()) for line in (BANNER_TEXT, AI_INSTRUCTION))
+# The MASK's own lines as a line is compared with them: letters and digits only, case folded.
+_OWN_LINES = frozenset(normalize(line) for line in (BANNER_TEXT, AI_INSTRUCTION))
 
 
 def banner_spans(text: str) -> list[tuple[int, int]]:
     """Where The MASK's own lines stand in ``text``, as ``(start, end)`` spans in text order.
 
-    A line counts when, with each run of whitespace written as one space and none at its ends, it
-    reads exactly ``BANNER_TEXT`` or ``AI_INSTRUCTION``: an AI tool may copy the banner from the
-    masked file, or the instruction the owner pasted with the question. A span covers the line
-    with its line break, and one blank line after it if there is one.
+    A line counts when its letters and digits, case folded (``textnorm.normalize``), are those of
+    ``BANNER_TEXT`` or ``AI_INSTRUCTION`` and no others (ruling R78). An AI tool may copy the
+    banner from the masked file, or the instruction the owner pasted with the question, and
+    rewrite it a little on the way: in italics, as a quote, after a byte order mark, with its
+    brackets escaped or its spacing changed. A line with any word of its own on it is not one of
+    them. A span covers the line with its line break, and one blank line after it if there is one.
     """
     spans: list[tuple[int, int]] = []
     start = 0
     after_own_line = False
     for line in text.splitlines(keepends=True):
         end = start + len(line)
-        if " ".join(line.split()) in _OWN_LINES:
+        if normalize(line) in _OWN_LINES:
             spans.append((start, end))
             after_own_line = True
         else:
@@ -50,6 +54,23 @@ def _placeholders(text: str) -> list[PlaceholderMatch]:
         for match in find_placeholders(text)
         if not any(match.start < end and start < match.end for start, end in spans)
     ]
+
+
+def restore_span(match: PlaceholderMatch) -> tuple[int, int]:
+    """The stretch of the text that a restore replaces with the value for ``match``.
+
+    That is the whole placeholder as written, brackets and markdown markers included, unless it
+    has a bracket on one side only. Such a bracket belongs to the text round the placeholder, as
+    in "[Buyer, PERSON_1]", where the placeholder reads "PERSON_1]" (ruling R79): it stays, and so
+    do the spaces between it and the placeholder and any markers round both. Only the type's name
+    and the number are replaced then.
+    """
+    # The grammar's own pattern, so the parts of a token are read the way it found them; it
+    # always matches the whole of a token find_placeholders found.
+    token = _TOKEN_RE.fullmatch(match.raw)
+    if token is None or (token["open"] is None) == (token["close"] is None):
+        return match.start, match.end
+    return match.start + token.start("type"), match.start + token.end("number")
 
 
 def plan_restore(text: str, case: Case) -> list[RestoreItem]:
