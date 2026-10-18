@@ -43,7 +43,9 @@ And last, the package:
 
 9. File properties, custom XML, the glossary, the picture of the first page, printer settings and
    digital signatures; then the settings: document variables, the attached template and its
-   link, mail merge, ``w:rsids`` and ``w:trackRevisions``.
+   link, mail merge, ``w:rsids`` and ``w:trackRevisions``; and the names of the theme and its
+   colour, font and format schemes go back to the ones Word gives its own ("Office Theme",
+   "Office"), as a template may name them after its company (ruling R66).
 10. What is left of the folders of pictures, charts, diagrams and embedded files.
 
 A part that goes takes everything that only it used: the relationships that point at it, its own,
@@ -214,8 +216,9 @@ class CleanReport:
     ``attributes_cleared`` the pieces of text kept in attributes that were removed: a tooltip, a
     description, a title, the name of a shape, a text watermark, a smart tag, the items of a
     list, the title or tag of a content control, the data of a form field or the description of a
-    table (also the alt text of the shapes of a group and of VML shapes). ``stray_runs_removed``
-    counts the runs that were in no paragraph (ruling R24).
+    table (also the alt text of the shapes of a group and of VML shapes), or the name of the
+    theme or of one of its schemes, given back Word's own. ``stray_runs_removed`` counts the runs
+    that were in no paragraph (ruling R24).
     """
 
     comments: int = 0
@@ -267,6 +270,7 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
     _clean_properties(pkg, _w3c(now), report)
     _remove_hidden_parts(pkg, main)
     _clean_settings(pkg, main)
+    report.attributes_cleared += _reset_theme_names(pkg, main)
     _sweep(pkg)
     remaining = set(pkg.names())
     report.parts_removed = [n for n in names_before if n not in remaining]
@@ -777,6 +781,29 @@ def _clean_settings(pkg: DocxPackage, main: str) -> None:
     for element in list(root.iter(*removed)):
         _remove(element)
     _release(pkg, settings, used - _references(root))
+
+
+# The names Word gives its own theme and its schemes (ruling R66).
+_THEME, _THEME_NAME = _q("a", "theme"), "Office Theme"
+_SCHEMES = tuple(_q("a", name) for name in ("clrScheme", "fontScheme", "fmtScheme"))
+_SCHEME_NAME = "Office"
+
+
+def _reset_theme_names(pkg: DocxPackage, main: str) -> int:
+    """Gives the document's theme and its colour, font and format schemes the names Word gives
+    its own; returns how many names changed."""
+    theme = _find_part(pkg, main, "/theme", "word/theme/theme1.xml")
+    if theme is None:
+        return 0
+    root = pkg.xml(theme)
+    if root.tag != _THEME:
+        return 0
+    changed = 0
+    for element, name in [(root, _THEME_NAME), *((s, _SCHEME_NAME) for s in root.iter(*_SCHEMES))]:
+        if element.get("name") not in (None, name):
+            element.set("name", name)
+            changed += 1
+    return changed
 
 
 def _sweep(pkg: DocxPackage) -> None:

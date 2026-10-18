@@ -586,7 +586,7 @@ class _Instructions:
         a placeholder already in the instruction; a value found in one of them is skipped
         (ruling R30).
         """
-        decoded, starts = _percent_decoded(instruction)
+        decoded, starts = percent_decoded(instruction)
         words = _words(instruction)
         renamed: Edits = []
         for word in words:
@@ -664,7 +664,7 @@ def _blanked(text: str, start: int, end: int, edits: Edits) -> str:
     return "".join(chars)
 
 
-def _percent_decoded(text: str) -> tuple[str, list[int]]:
+def percent_decoded(text: str) -> tuple[str, list[int]]:
     """``text`` with its %-escapes decoded as ``unquote`` decodes them, and where in ``text``
     each character of the result begins; a last entry, ``len(text)``, closes the list."""
     chars: list[str] = []

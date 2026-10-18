@@ -13,9 +13,7 @@ checks them.
 from __future__ import annotations
 
 import json
-import re
 import time
-import unicodedata
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +25,7 @@ from tests.fixtures.docx import PACKAGE_RELS, MakeDocx
 from tests.fixtures.leak import MASKED_ENTRIES, mask_file
 from tests.helpers import plant
 from themask import leakcheck
+from themask.detect.grouping import PersonName
 from themask.detect.pipeline import CombinedText, analyze
 from themask.detect.sweep import is_bare_name
 from themask.docx.cleaner import clean
@@ -40,6 +39,7 @@ from themask.leakcheck import (
     FILE_NAME,
     PART_NAME,
     LeakHit,
+    hits_by_placeholder,
     rescan_detection,
     scan_package,
     unverifiable,
@@ -60,6 +60,8 @@ IBAN = PlaceholderType.IBAN
 ID = PlaceholderType.ID
 PERCENT = PlaceholderType.PERCENT
 PERSON = PlaceholderType.PERSON
+PHONE = PlaceholderType.PHONE
+QUANTITY = PlaceholderType.QUANTITY
 # The types whose values are names, compared by their words (ruling R63).
 NAME_TYPES = {
     PERSON,
@@ -88,35 +90,21 @@ def hyperlink_rels(target: str) -> bytes:
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml).encode()
 
 
-def words_of(text: str) -> str:
-    """``text`` as ruling R63 compares names: case folded, marks dropped, each run of anything
-    else that is not a letter or a digit one space, and a space at either end."""
-    folded = unicodedata.normalize("NFKC", text).casefold()
-    folded = folded.replace("\N{LATIN SMALL LETTER DOTLESS I}", "i")
-    folded = "".join(c for c in folded if unicodedata.category(c) not in {"Mn", "Mc", "Me", "Cf"})
-    return " " + " ".join(re.findall(r"[^\W_]+", folded)) + " "
-
-
-def shows(text: str, entry: KeyEntry, form: str) -> bool:
-    """Whether ``text`` shows ``form`` of ``entry`` as the leak check finds a value: a name by its
-    whole words (ruling R63), a number by its letters and digits, and a number of digits only
-    where no other digit touches it (ruling R14)."""
-    if entry.type in NAME_TYPES:
-        return words_of(form) in words_of(text)
-    key = normalize(form)
-    if key.isdigit():
-        return re.search(rf"(?<!\d){key}(?!\d)", normalize(text)) is not None
-    return key in normalize(text)
-
-
 def assert_nothing_shown(hits: list[LeakHit], entries: list[KeyEntry]) -> None:
-    """No hit shows a value or a variant that the leak check looks for, however it is written."""
+    """No hit holds anything that normalises to a value, a variant or a person's surname that
+    the leak check looks for, glued to other letters or not (ruling R69)."""
+    forms = [form for entry in entries for form in (entry.value, *entry.variants)]
+    forms += [
+        surname
+        for entry in entries
+        if entry.type is PERSON
+        for surname in PersonName.of(entry.value).surnames()
+    ]
+    keys = {normalize(form) for form in forms if len(normalize(form)) >= 4}
     for hit in hits:
-        for entry in entries:
-            for form in (entry.value, *entry.variants):
-                if len(normalize(form)) >= 4:
-                    assert not shows(hit.context, entry, form), (hit, form)
-                    assert not shows(hit.part, entry, form), (hit, form)
+        for key in keys:
+            assert key not in normalize(hit.context), (hit, key)
+            assert key not in normalize(hit.part), (hit, key)
 
 
 # ---- the brief ----------------------------------------------------------------------------------
@@ -402,6 +390,214 @@ def test_theme_and_scheme_names_are_no_names(make_docx: MakeDocx, masked_docx: P
     with zipfile.ZipFile(masked_docx) as archive:
         assert b'name="Office' in archive.read("word/theme/theme1.xml")
     assert all(hit.part != "word/theme/theme1.xml" for hit in scan_package(masked_docx, [office]))
+
+
+# ---- numbers beside numbers (ruling R65) -------------------------------------------------------
+
+
+def tab_row(*cells: str) -> str:
+    """A paragraph of texts parted by tabs, as a schedule writes them."""
+    texts = (f'<w:t xml:space="preserve">{escape(cell)}</w:t>' for cell in cells)
+    return f"<w:p><w:r>{'<w:tab/>'.join(texts)}</w:r></w:p>"
+
+
+def test_a_tab_or_a_line_break_parts_two_numbers(make_docx: MakeDocx) -> None:
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 125,000", ["125,000"])
+    units = KeyEntry("[QUANTITY_1]", QUANTITY, "1,250 units", ["1,250"])
+    body = (
+        tab_row("Instalment 1", "125,000", "on signing")
+        + tab_row("Instalment 2", "125,000", "on delivery")
+        + tab_row("Instalment 3", "125,000", "on acceptance")
+        + tab_row("2025", "1,250")  # a year column
+        + "<w:p><w:r><w:t>2026</w:t><w:br/><w:t>1,250</w:t></w:r></w:p>"
+        + tab_row("1.", "125,000 payable on signing")
+    )
+    hits = scan_package(make_docx(body), [fee, units])
+    assert [hit.context for hit in hits] == [
+        "Instalment 1 [AMOUNT_1] on signing",
+        "Instalment 2 [AMOUNT_1] on delivery",
+        "Instalment 3 [AMOUNT_1] on acceptance",
+        "2025 [QUANTITY_1]",
+        "2026 [QUANTITY_1]",
+        "1. [AMOUNT_1] payable on signing",
+    ]
+
+
+def test_what_parts_a_number_from_a_number(make_docx: MakeDocx) -> None:
+    tel = KeyEntry("[PHONE_1]", PHONE, "+31 20 123 4567", [])
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 125,000", ["125,000"])
+    deposit = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 1,250", [])
+    shown = (
+        para("Tel. 2: +31 20 123 4567")
+        + para("Fee 125,000.00 per year.")  # cents are no other number
+        + para("Fee 125,000\N{SUPERSCRIPT ONE} payable.")  # nor is a footnote mark
+        + para("A fee of EUR 1,250.50 applies.")
+    )
+    hits = scan_package(make_docx(shown), [tel, fee, deposit])
+    assert [hit.context for hit in hits] == [
+        "Tel. 2: +[PHONE_1]",
+        "Fee [AMOUNT_1].00 per year.",
+        "Fee [AMOUNT_1]\N{SUPERSCRIPT ONE} payable.",
+        "A fee of [AMOUNT_2].50 applies.",
+    ]
+    # A number with more digits round it is another number.
+    other = para("A deposit of EUR 12,500 applies.") + para("A cap of EUR 1,250,000 applies.")
+    assert scan_package(make_docx(other), [deposit]) == []
+
+
+# ---- the file format's names, and those it was given (rulings R66, R67) --------------------------
+
+
+def branded(src: Path, out: Path) -> Path:
+    """A copy of the Word file ``src`` whose theme, colour scheme and fonts are named after the
+    company Northwind."""
+    with zipfile.ZipFile(src) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in entries:
+            if info.filename == "word/theme/theme1.xml":
+                data = data.replace(b'name="Office Theme"', b'name="Northwind Trading"')
+                data = data.replace(b'<a:clrScheme name="Office"', b'<a:clrScheme name="Northwind"')
+                data = data.replace(
+                    b'<a:latin typeface="Cambria"', b'<a:latin typeface="Northwind Sans"'
+                )
+            if info.filename == "word/fontTable.xml":
+                font = b'<w:font w:name="Northwind Sans"><w:family w:val="swiss"/></w:font>'
+                data = data.replace(b"</w:fonts>", font + b"</w:fonts>")
+            if info.filename == "word/styles.xml":
+                data = data.replace(b"<w:rFonts ", b'<w:rFonts w:ascii="Northwind Sans" ', 1)
+            archive.writestr(info, data)
+    return out
+
+
+def test_a_theme_named_after_the_company_is_renamed_and_its_font_found(
+    corpus: Path, tmp_path: Path
+) -> None:
+    source = branded(corpus / "supply-01.docx", tmp_path / "branded.docx")
+    with zipfile.ZipFile(source) as archive:
+        assert archive.read("word/theme/theme1.xml").count(b"Northwind") == 3
+    masked = mask_file(source, E, tmp_path / "MASKED-BRND.docx")
+    with zipfile.ZipFile(masked) as archive:  # the cleaner gave the theme Word's own names
+        theme = archive.read("word/theme/theme1.xml")
+        assert b'name="Office Theme"' in theme and b'clrScheme name="Office"' in theme
+    hits = scan_package(masked, E)
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/styles.xml", 'ascii="[COMPANY_1] Sans"'),
+        ("word/fontTable.xml", 'name="[COMPANY_1] Sans"'),
+        ("word/theme/theme1.xml", 'typeface="[COMPANY_1] Sans"'),
+    ]
+
+
+def styles_part(*styles: str) -> bytes:
+    content = "".join(styles)
+    return xml(
+        f'<w:styles xmlns:w="{W_NS}"><w:latentStyles>'
+        '<w:lsdException w:name="Light Shading Accent 1"/></w:latentStyles>'
+        f"{content}</w:styles>"
+    )
+
+
+def test_built_in_styles_are_no_names_but_custom_ones_are(make_docx: MakeDocx) -> None:
+    title = KeyEntry("[COMPANY_1]", COMPANY, "Title Insurance Ltd", ["Title Insurance", "Title"])
+    accent = KeyEntry("[COMPANY_2]", COMPANY, "Accent Housing Ltd", ["Accent Housing", "Accent"])
+    built_in = styles_part(
+        '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/></w:style>',
+        '<w:style w:type="character" w:styleId="TitleChar"><w:name w:val="Title Char"/>'
+        '<w:link w:val="Title"/></w:style>',
+    )
+    body = '<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t>Agreement</w:t></w:r></w:p>'
+    path = make_docx(body, raw={"word/styles.xml": built_in})
+    assert scan_package(path, [title, accent]) == []
+    # A style of the template's own, named after the company, is a name like any text.
+    northwind = KeyEntry("[COMPANY_3]", COMPANY, "Northwind Trading B.V.", ["Northwind"])
+    custom = styles_part(
+        '<w:style w:type="paragraph" w:customStyle="1" w:styleId="Northwind">'
+        '<w:name w:val="Northwind Heading"/><w:basedOn w:val="Title"/></w:style>'
+    )
+    body = '<w:p><w:pPr><w:pStyle w:val="Northwind"/></w:pPr><w:r><w:t>Agreement</w:t></w:r></w:p>'
+    hits = scan_package(make_docx(body, raw={"word/styles.xml": custom}), [northwind])
+    assert [(hit.part, hit.context) for hit in hits] == [
+        ("word/document.xml", 'val="[COMPANY_3]"'),
+        ("word/styles.xml", 'styleId="[COMPANY_3]"'),
+        ("word/styles.xml", 'val="[COMPANY_3] Heading"'),
+    ]
+
+
+def test_word_s_own_styles_in_the_corpus_are_no_names(masked_docx: Path) -> None:
+    accent = KeyEntry("[COMPANY_1]", COMPANY, "Accent Housing Ltd", ["Accent Housing", "Accent"])
+    with zipfile.ZipFile(masked_docx) as archive:
+        assert b"Light Shading Accent 1" in archive.read("word/styles.xml")
+    assert scan_package(masked_docx, [accent]) == []
+
+
+# ---- names however they are punctuated (ruling R68) ----------------------------------------------
+
+
+def test_names_are_found_however_they_are_punctuated(make_docx: MakeDocx) -> None:
+    northwind = KeyEntry(
+        "[COMPANY_1]", COMPANY, "Northwind Trading B.V.", ["Northwind Trading", "Northwind"]
+    )
+    north_wind = KeyEntry(
+        "[COMPANY_2]", COMPANY, "North-Wind Logistics GmbH", ["North-Wind Logistics"]
+    )
+    acme = KeyEntry("[COMPANY_3]", COMPANY, "Acme B.V.", [])
+    body = (
+        para("North-wind shall pay.")
+        + para("Northwind Logistics shall pay.")
+        + para("Acme BV signs.")
+    )
+    hits = scan_package(make_docx(body), [northwind, north_wind, acme])
+    assert [(hit.placeholder, hit.context) for hit in hits] == [
+        ("[COMPANY_1]", "[COMPANY_1] shall pay."),
+        ("[COMPANY_2]", "[COMPANY_2] shall pay."),
+        ("[COMPANY_3]", "[COMPANY_3] signs."),
+    ]
+    # An initial's full stop before a word still parts them: "S.Hall" makes no "shall".
+    sarah = KeyEntry("[PERSON_1]", PERSON, "Sarah Hall", ["S.Hall", "S. Hall"])
+    assert scan_package(make_docx(para("The Supplier shall deliver.")), [sarah]) == []
+
+
+# ---- what a hit shows, and how many it is (ruling R69) -------------------------------------------
+
+
+def test_a_context_hides_every_spelling_of_a_value(make_docx: MakeDocx) -> None:
+    acme = KeyEntry("[COMPANY_2]", COMPANY, "Acme Holdings Ltd", ["Acme Holdings", "Acme"])
+    jane = KeyEntry("[PERSON_1]", PERSON, "Jane Smith", ["J. Smith"])
+    body = (
+        para("Acme2 and 2Acme and Acme_X.")
+        + para("Acme and AcmeHoldings sign.")
+        + para("Acme BV pays; Acme B.V. signs.")
+        + para("Jane Smith and SmithCo sign.")
+    )
+    hits = scan_package(make_docx(body), [acme, jane])
+    assert [(hit.context, hit.count) for hit in hits] == [
+        ("[COMPANY_2]2 and 2[COMPANY_2] and [COMPANY_2]_X.", 1),
+        ("[COMPANY_2] and [COMPANY_2] sign.", 1),
+        ("[COMPANY_2] BV pays; [COMPANY_2] B.V. signs.", 2),
+        ("[PERSON_1] and [PERSON_1]Co sign.", 1),
+    ]
+    assert_nothing_shown(hits, [acme, jane])
+
+
+def test_each_place_is_counted(make_docx: MakeDocx) -> None:
+    body = para("Signed for Northwind.") * 3
+    hits = scan_package(make_docx(body), E)
+    assert hits == [LeakHit("word/document.xml", "[COMPANY_1]", "Signed for [COMPANY_1].", 3)]
+    assert hits_by_placeholder(hits) == {"[COMPANY_1]": 3}
+    # A value shown as it is, and %-escaped in the link beside it, is in two places.
+    body = (
+        '<w:p><w:r><w:t xml:space="preserve">Northwind </w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">'
+        ' HYPERLINK "https://x.example/North%77ind" </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+    hits = scan_package(make_docx(body), E)
+    assert hits_by_placeholder(hits) == {"[COMPANY_1]": 2}
+    assert_nothing_shown(hits, E)
+    # The same bytes read two ways are one place.
+    blob = "NL91ABNA0417164300".encode("utf-16-le")
+    hits = scan_package(make_docx(para("Clean."), raw={"word/embeddings/x.bin": blob}), E)
+    assert hits_by_placeholder(hits) == {"[IBAN_1]": 1}
 
 
 # ---- where values hide --------------------------------------------------------------------------
