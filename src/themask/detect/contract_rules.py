@@ -69,11 +69,11 @@ _FUNCTION_WORDS = _vocabulary(
     dear please see note per via
     """
 )
-# The words that label a line of a signature or notice block.
+# The words that label a line of a signature, notice or bank details block.
 _LABEL_WORDS = _vocabulary(
     """
     name title date signature signed sign executed witness address tel telephone phone fax mobile
-    email e-mail website web contact position role attention attn fao
+    email e-mail website web contact position role attention attn fao iban bic swift vat
     """
 )
 # The parties' roles and the document's own words: defined terms, never names.
@@ -94,10 +94,53 @@ _MONTHS_AND_DAYS = _vocabulary(
     tuesday wednesday thursday friday saturday sunday
     """
 )
+_COUNTRIES = _vocabulary(
+    """
+    england wales scotland ireland britain kingdom uk gb netherlands holland germany deutschland
+    france belgium luxembourg spain portugal italy switzerland austria denmark sweden norway finland
+    iceland poland czechia czech slovakia hungary romania bulgaria greece croatia slovenia serbia
+    estonia latvia lithuania malta cyprus turkey türkiye usa america canada mexico brazil argentina
+    chile china japan korea india singapore australia zealand africa egypt morocco israel emirates
+    uae qatar europe eu eea
+    """
+)
+_CURRENCIES = _vocabulary(
+    """
+    euro euros eur pound pounds gbp sterling dollar dollars usd franc francs chf lira liras yen jpy
+    yuan renminbi cny rupee rupees krona kronor krone kroner zloty
+    """
+)
 # Words that never start or continue a name read after a label ("Name: Jane Smith Date: ...").
-# Months and days are names there ("Name: April Jones"); before a legal form they are not.
+# Months and days are names there ("Name: April Jones"); before a legal form they are not, and in
+# the parties clause neither are countries, currencies and "the Company" ("made between Monday and
+# Friday", "between England and Wales", "(1) The Company").
 _NOT_IN_A_NAME = _FUNCTION_WORDS | _LABEL_WORDS | _ROLE_WORDS
 _NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS
+_NOT_A_PARTY = _NOT_IN_A_COMPANY | _COUNTRIES | _CURRENCIES | frozenset({"company", "companies"})
+
+# The words of a contract's own headings ("TERMINATION", "GOVERNING LAW"): with the roles and the
+# labels, the words a part of a model finding may consist of and still name nobody.
+_HEADING_WORDS = _vocabulary(
+    """
+    operative provisions agreed terms term termination duration commencement renewal expiry notices
+    notice payment payments price prices pricing charges charge fees fee invoicing invoices costs
+    expenses taxes tax rebates discounts delivery deliveries supply products services scope
+    specification specifications quality warranty warranties representations liability limitation
+    indemnity indemnities insurance confidentiality intellectual property data protection privacy
+    security audit audits compliance force majeure assignment subcontracting general miscellaneous
+    governing law jurisdiction disputes dispute resolution arbitration execution signatures contents
+    index key personnel contacts validity variation variations amendment amendments waiver severance
+    severability entire counterparts remedies rights obligations responsibilities performance levels
+    credits reports reporting meetings governance records forecasts orders ordering acceptance risk
+    ownership retention packaging labelling transport shipping storage inspection testing training
+    support maintenance hosting access staff non-solicitation competition exclusivity survival
+    effect consequences return materials processing transfers breach breaches remedy part parts
+    attachment attachments date dates period periods effective completion closing exchange purpose
+    purposes and of the for to in on &
+    """
+)
+_CONTRACT_WORDS = _ROLE_WORDS | _LABEL_WORDS | _HEADING_WORDS
+_CONNECTING_WORDS = frozenset({"and", "of", "the", "for", "to", "in", "on", "&"})
 
 # Small words inside a name: "Van der Valk Hotels B.V.", "Jane van der Berg", "Banco de Sabadell".
 _NAME_PARTICLES = _vocabulary(
@@ -455,6 +498,19 @@ def is_job_title(text: str) -> bool:
     )
 
 
+def is_contract_wording(text: str) -> bool:
+    """Whether ``text`` is made of the contract's own words and names nobody: a role ("SUPPLIER",
+    "the Buyer"), a heading ("TERMINATION", "GOVERNING LAW") or a label ("Attention", "IBAN").
+    "JOHN CARTER" and "Northwind" are names.
+    """
+    words = [word.casefold().strip(".,:;()") for word in text.split()]
+    return (
+        bool(words)
+        and all(word in _CONTRACT_WORDS for word in words)
+        and any(word not in _CONNECTING_WORDS for word in words)
+    )
+
+
 def _name_finding(doc: _Document, name: _Name, kind: PlaceholderType) -> Finding:
     score = LEGAL_FORM_SCORE if name.legal_form else NAME_SCORE
     return _finding(doc, COMPANY if name.legal_form else kind, name.start, name.end, score)
@@ -495,8 +551,31 @@ _PERSON_PARTY = re.compile(
     r"|a[ \t]+sole[ \t]+trader)"
 )
 _AND_NEXT_PARTY = re.compile(r"[ \t]+(?i:and)[ \t]+")
+# The parties of a list: "Northwind Trading, Glenmore Freight and Kestrel Analytics".
+_LIST_COMMA = re.compile(r"[ \t]*,[ \t]*(?!(?i:and)\b)")
+_LIST_END = re.compile(r"[ \t]*,?[ \t]*(?i:and)[ \t]+")
 # How a line ends when the next one starts with a party: "BETWEEN:", "...(the "Supplier"); and".
 _ENDS_BEFORE_A_PARTY = re.compile(r"(?:[:;,]|\b(?i:and))\Z")
+# What shows that a line of the parties clause names a party: a company or a person described
+# ("a company registered in", "whose registered office", "of 12 Mill Lane", "an individual"), a
+# bracket that defines a party's short name, or a party's number in brackets ("(1)"). A legal form
+# on the line shows it too, and so does "This Agreement is made between" on the clause's first line.
+_PARTY_CONTEXT = re.compile(
+    r"(?i:\b(?:a|an)[ \t]+(?:(?:private|public)[ \t]+)?(?:limited[ \t]+(?:liability[ \t]+)?)?"
+    r"(?:company|corporation|partnership|individual|sole[ \t]+trader)\b"
+    r"|\b(?:incorporated|registered|established|organi[sz]ed)[ \t]+(?:in|under|at|with|and)\b"
+    r"|\bcompany[ \t]+(?:number|no\b|registration)|\bregistered[ \t]+(?:office|number|address)\b"
+    r"|\bprincipal[ \t]+(?:place[ \t]+of[ \t]+business|office)\b"
+    r"|\b(?:residing|resident)[ \t]+(?:at|in)\b|\bof[ \t]+\d|\bhereinafter\b)"
+    r"|\([ \t]*(?i:(?:the|each[ \t]+an?|together[ \t]+the)[ \t]+)?[\"\N{LEFT DOUBLE QUOTATION MARK}"
+    r"\N{LEFT SINGLE QUOTATION MARK}']"
+    r"|(?:^|(?<=\s))\((?:\d{1,2}|[A-Za-z]|[ivxIVX]{1,4})\)[ \t]",
+    re.MULTILINE,
+)
+_AGREEMENT_IS_MADE = re.compile(
+    r"\b(?i:this|the)[ \t]+(?i:agreement|contract|deed|memorandum|addendum|amendment)\b"
+    r"[^.\n]{0,80}?\b(?i:made|entered[ \t]+into|concluded|executed)\b"
+)
 
 
 def _is_heading_line(line: str) -> bool:
@@ -506,6 +585,15 @@ def _is_heading_line(line: str) -> bool:
     number = _HEADING_NUMBER.match(line)
     heading = line[number.end() if number else 0 :].strip()
     return bool(_letters(heading)) and heading.isupper() and not has_legal_form(heading)
+
+
+def _names_a_party(doc: _Document, start: int, end: int, companies: list[Finding]) -> bool:
+    """Whether the line (or rest of a line) from ``start`` to ``end`` shows that it names a party:
+    see _PARTY_CONTEXT, and ``companies`` (the names with a legal form).
+    """
+    if _PARTY_CONTEXT.search(doc.text, start, end):
+        return True
+    return any(company.start < end and start < company.end for company in companies)
 
 
 def _party_at(doc: _Document, offset: int, line_end: int) -> _Name | None:
@@ -518,10 +606,34 @@ def _party_at(doc: _Document, offset: int, line_end: int) -> _Name | None:
         return None
     if doc.word(i).casefold() == "the" and doc.joined(i + 1):
         i += 1  # "(1) THE NORTHWIND GROUP LIMITED"
-    name = _read_name(doc, i)
+    name = _read_name(doc, i, _NOT_A_PARTY)
     if name is None or is_job_title(" ".join(name.words)):
         return None
     return name
+
+
+def _listed_parties(doc: _Document, offset: int, end: int) -> list[_Name]:
+    """The parties after the first one of a list, from ``offset`` on: ", Glenmore Freight and
+    Kestrel Analytics". All of them, or none when the words after the commas are no list of names
+    ending in "and" and a name ("Acme Ltd, Amsterdam, the Netherlands").
+    """
+    names: list[_Name] = []
+    while True:
+        last = _LIST_END.match(doc.text, offset, end) if names else None
+        if last is not None:
+            name = _party_at(doc, last.end(), end)
+            return [*names, name] if name is not None else []
+        comma = _LIST_COMMA.match(doc.text, offset, end)
+        name = _party_at(doc, comma.end(), end) if comma else None
+        if name is None:
+            return []
+        names.append(name)
+        offset = name.end
+
+
+def _party_finding(doc: _Document, name: _Name) -> Finding:
+    person = name.honorific or _PERSON_PARTY.match(doc.text, name.end) is not None
+    return _name_finding(doc, name, PERSON if person else COMPANY)
 
 
 def _parties_on_line(doc: _Document, start: int, end: int, *, at_start: bool) -> list[Finding]:
@@ -534,42 +646,57 @@ def _parties_on_line(doc: _Document, start: int, end: int, *, at_start: bool) ->
     for offset in offsets:
         name = _party_at(doc, offset, end)
         while name is not None:
-            person = name.honorific or _PERSON_PARTY.match(doc.text, name.end) is not None
-            findings.append(_name_finding(doc, name, PERSON if person else COMPANY))
+            findings.append(_party_finding(doc, name))
             following = _AND_NEXT_PARTY.match(doc.text, name.end, end)
-            name = _party_at(doc, following.end(), end) if following else None
+            if following is None:
+                listed = _listed_parties(doc, name.end, end)
+                findings.extend(_party_finding(doc, party) for party in listed)
+                break
+            name = _party_at(doc, following.end(), end)
     return findings
 
 
-def _parties(doc: _Document) -> list[Finding]:
-    """The parties of every parties clause, read line by line.
+def _party_follows(doc: _Document, offset: int, limit: int) -> bool:
+    """Whether the next line from ``offset`` on that is not blank starts with a party's number."""
+    return _PARTY_MARKER.match(doc.text[offset:limit].lstrip()) is not None
 
-    A party's name starts after the clause's first word ("BETWEEN:"), after a marker ("(2)"), or
-    at the start of a line after one that ends in "and", ";", "," or ":". The clause ends with the
-    line of the last party (the one that ends in a full stop), at the first line after a party that
-    names none, or at a heading.
+
+def _parties(doc: _Document, companies: list[Finding]) -> list[Finding]:
+    """The parties of every parties clause, read line by line; ``companies`` are the names with a
+    legal form.
+
+    Only a line that shows it names a party is read (see _names_a_party). A party's name starts
+    after the clause's first word ("BETWEEN:"), after a marker ("(2)"), at the start of a line after
+    one that ends in "and", ";", "," or ":" or is just "AND", and after the commas of a list. The
+    clause ends with the line of the last party (one that ends in a full stop with no party's
+    number after it), at the first line after a party that names none, or at a heading.
     """
     findings = []
     for start in _PARTIES_START.finditer(doc.text, 0, PARTIES_WITHIN):
         offset, limit = start.end(), min(len(doc.text), start.end() + _PARTIES_LENGTH)
+        line_start = doc.text.rfind("\n", 0, start.start()) + 1
+        made = _AGREEMENT_IS_MADE.search(doc.text, line_start, start.end()) is not None
         first_line, party_due, found = True, True, False
         while offset < limit:
             end = doc.text.find("\n", offset, limit)
             end = limit if end < 0 else end
             line = doc.text[offset:end]
             content = line.strip()
-            if not first_line and (_PARTIES_END.match(line) or _is_heading_line(line)):
-                break
-            if content:
-                parties = _parties_on_line(doc, offset, end, at_start=party_due)
+            if content.casefold() == "and":
+                party_due = True  # "(1) ...\nAND\n(2) ..."
+            elif content:
+                if not first_line and (_PARTIES_END.match(line) or _is_heading_line(line)):
+                    break
+                named = (first_line and made) or _names_a_party(doc, offset, end, companies)
+                parties = _parties_on_line(doc, offset, end, at_start=party_due) if named else []
                 if not (parties or first_line or _PARTY_MARKER.match(line)) and (
                     found or not _ENDS_BEFORE_A_PARTY.search(content)
                 ):
                     break  # the clause is over
                 findings.extend(parties)
                 found = found or bool(parties)
-                if parties and content.endswith("."):
-                    break
+                if parties and content.endswith(".") and not _party_follows(doc, end, limit):
+                    break  # the last party
                 party_due = _ENDS_BEFORE_A_PARTY.search(content) is not None
             offset, first_line = end + 1, False
     return findings
@@ -590,9 +717,9 @@ _BLANK = re.compile(r"[ \t_.\N{EN DASH}\-]*\Z")
 # What stands between two names on one line: "Mr John Carter, Head of Sales" or "... and Ms Doe".
 _NEXT_NAME = re.compile(r"[ \t]*(?:[,;/&]|\b(?i:and)\b)[ \t]*")
 # A label at the start of a line: one to four words and a colon ("Name:", "Registered office:").
-_LINE_LABEL = re.compile(
-    r"[ \t]*((?:[^\W\d_][\w'\N{RIGHT SINGLE QUOTATION MARK}./-]*[ \t]*){1,4}):"
-)
+# The words must stand apart, so that a long word can be read in one way only (not as four words).
+_LABEL_WORD = r"[^\W\d_][\w'\N{RIGHT SINGLE QUOTATION MARK}./-]*"
+_LINE_LABEL = re.compile(r"[ \t]*(" + _LABEL_WORD + r"(?:[ \t]+" + _LABEL_WORD + r"){0,3})[ \t]*:")
 
 
 def _starts_with_a_label(line: str) -> bool:
@@ -891,13 +1018,17 @@ def _address_value(doc: _Document, offset: int) -> int | None:
     return k
 
 
-def _is_an_address(doc: _Document, start: int, end: int) -> bool:
-    """Whether the words after a label or phrase are an address: a number in them, or no word that
+def _is_an_address(doc: _Document, start: int, end: int, terms: frozenset[str]) -> bool:
+    """Whether the words after a label or phrase are an address: a number in them, or else none
+    of the contract's own words for a place. Those are a word after a small "the" ("Delivery
+    Address: the Site"), one of ``terms`` (the defined terms, in lower case), and a word that
     names a party or a part of the contract ("Address: the Supplier's registered office").
     """
     text = doc.text[start:end]
     if any(character.isdecimal() for character in text):
         return True
+    if text.startswith("the ") or text.casefold().removeprefix("the ") in terms:
+        return False
     words = doc.words[doc.first_word_from(start) : doc.first_word_from(end)]
     return not any(_core(word.text).casefold() in _ROLE_WORDS for word in words)
 
@@ -975,7 +1106,8 @@ def _postcode_anchors(doc: _Document) -> Iterable[int]:
             yield _with_street_before(doc, doc.first_word_from(match.start()))
 
 
-def _addresses(doc: _Document) -> list[Finding]:
+def _addresses(doc: _Document, terms: frozenset[str]) -> list[Finding]:
+    """The addresses; ``terms`` are the document's defined terms, in lower case."""
     spans: list[tuple[int, int, float]] = []
 
     def add(k: int | None, score: float, *, check: bool = False) -> None:
@@ -983,7 +1115,7 @@ def _addresses(doc: _Document) -> list[Finding]:
             return
         start = doc.words[k].start
         end = _address_end(doc, k)
-        if end is not None and (not check or _is_an_address(doc, start, end)):
+        if end is not None and (not check or _is_an_address(doc, start, end, terms)):
             spans.append((start, end, score))
 
     for label in _ADDRESS_LABEL.finditer(doc.text):
@@ -1052,9 +1184,12 @@ class _Term:
     text: str
     start: int
     end: int
+    # Where the definition begins: its bracket or its "hereinafter". None in a definitions clause
+    # ("Business Day" means ...), which never gives a party its short name.
+    anchor: int | None
 
 
-def _quoted_term(match: re.Match[str]) -> _Term | None:
+def _quoted_term(match: re.Match[str], anchor: int | None) -> _Term | None:
     group = next(group for group in ("q1", "q2", "q3", "q4") if match[group] is not None)
     start, end = match.span(group)
     text = match.string[start:end]
@@ -1065,7 +1200,7 @@ def _quoted_term(match: re.Match[str]) -> _Term | None:
     start = match.string.index(text, start) if text else start
     if not _letters(text) or len(text.split()) > _MAX_TERM_WORDS:
         return None
-    return _Term(text, start, start + len(text))
+    return _Term(text, start, start + len(text), anchor)
 
 
 def _definitions(doc: _Document) -> list[_Term]:
@@ -1076,9 +1211,9 @@ def _definitions(doc: _Document) -> list[_Term]:
         quoted = list(_QUOTED_TERM.finditer(text, bracket.start(1), bracket.end(1)))
         rest = _QUOTED_TERM.sub(" ", bracket[1])
         if quoted and all(w.casefold() in _DEFINING_WORDS for w in re.findall(r"\w+", rest)):
-            terms.extend(_quoted_term(match) for match in quoted)
-    terms.extend(_quoted_term(match) for match in _HEREINAFTER.finditer(text))
-    terms.extend(_quoted_term(match) for match in _MEANS.finditer(text))
+            terms.extend(_quoted_term(match, bracket.start()) for match in quoted)
+    terms.extend(_quoted_term(match, match.start()) for match in _HEREINAFTER.finditer(text))
+    terms.extend(_quoted_term(match, None) for match in _MEANS.finditer(text))
     unique = {(t.start, t.end): t for t in terms if t is not None}
     return [unique[span] for span in sorted(unique)]
 
@@ -1087,69 +1222,67 @@ def _initials(words: Iterable[str]) -> str:
     return "".join(word[0] for word in words if word[:1].isalpha()).casefold()
 
 
-# Initials name a company only in the definition straight after its name: Kestrel Analytics
-# Limited ("KAL"). Anywhere else, "KAL" may well be something else.
-_INITIALS_WITHIN = 40
-# A one-word short name may start with the first word of a company name when that word has at least
-# this many characters and is not one of COMMON_WORDS: "AcmeCo" for Acme Supplies Ltd.
-_MIN_NAME_START = 4
+def _short_forms(name: Finding) -> set[str]:
+    """The short forms of a name, normalised: Northwind Trading B.V. gives "northwind",
+    "northwindtrading" and the initials "nt" and "ntb"; Mr John Carter gives "johncarter", "john"
+    and "carter".
+    """
+    if name.type == PERSON:
+        words = [word for word in name.text.split() if not _is_honorific(word)]
+        return {normalize(form) for form in (" ".join(words), *words[:1], *words[-1:])}
+    words = strip_legal_form(name.text).split()
+    forms = {normalize(" ".join(words[:count])) for count in range(1, len(words) + 1)}
+    initials = {_initials(words), _initials(name.text.split())}
+    return forms | {initial for initial in initials if len(initial) >= 2}
 
 
 class _ShortNames:
-    """The names the rules found, by their short forms, normalised.
+    """Which defined terms are the short names of the names the rules found.
 
-    Northwind Trading B.V. is "northwind" and "northwindtrading", and the start of a one-word short
-    name ("NorthwindCo"); Mr John Carter is "johncarter", "john" and "carter". A company's initials
-    ("KAL" for Kestrel Analytics Limited) count in the definition straight after its name only.
+    A term is a short name when its definition comes after the name on the name's line, either
+    straight after it (Acme Supplies Ltd ("Acme"), Kestrel Analytics Limited ("KAL")) or at the
+    end of the party's description in the parties clause ("(1) Acme Supplies Ltd, a company ...,
+    whose registered office is at ... ("Acme")"), and it is one of the name's short forms. Any other
+    term is a defined term, even one that shares a word with a name: "Name: Laura Price" and (the
+    "Price"), Custom Foods Ltd (the "Customer").
     """
 
-    def __init__(self, names: list[Finding]) -> None:
-        self.forms: dict[str, PlaceholderType] = {}
-        self.starts: dict[str, PlaceholderType] = {}
-        self.initials: dict[str, set[str]] = {}
-        for name in names:
-            if name.type == PERSON:
-                words = [word for word in name.text.split() if not _is_honorific(word)]
-                forms = [" ".join(words), *words[:1], *words[-1:]] if words else []
-            else:
-                words = strip_legal_form(name.text).split()
-                forms = [" ".join(words[:count]) for count in range(1, len(words) + 1)]
-                first = normalize(words[0]) if words else ""
-                if len(first) >= _MIN_NAME_START and first not in _COMMON_FIRST_WORDS:
-                    self.starts.setdefault(first, name.type)
-                initials = {_initials(words), _initials(name.text.split())}
-                self.initials[name.text] = {i for i in initials if len(i) >= 2}
-            for form in forms:
-                self.forms.setdefault(normalize(form), name.type)
+    def __init__(self, doc: _Document, names: list[Finding], parties: set[tuple[int, int]]):
+        self.doc = doc
+        self.parties = parties
         self.names = sorted(names, key=lambda name: name.end)
         self.ends = [name.end for name in self.names]
 
-    def type_of(self, doc: _Document, term: _Term) -> PlaceholderType | None:
+    def type_of(self, term: _Term) -> PlaceholderType | None:
         """The type of the name ``term`` is a short name of, or None when it is a defined term."""
-        key = normalize(term.text)
-        if key in self.forms:
-            return self.forms[key]
-        if " " not in term.text:
-            for length in range(_MIN_NAME_START, len(key) + 1):
-                if key[:length] in self.starts:
-                    return self.starts[key[:length]]
-        low = bisect_left(self.ends, term.start - _INITIALS_WITHIN)
-        for name in self.names[low : bisect_right(self.ends, term.start)]:
-            between = re.findall(r"\w+", doc.text[name.end : term.start])
-            if key in self.initials.get(name.text, set()) and all(
-                word.casefold() in _DEFINING_WORDS for word in between
-            ):
-                return name.type
-        return None
+        if term.anchor is None:
+            return None
+        before = bisect_right(self.ends, term.anchor) - 1
+        if before < 0:
+            return None
+        name = self.names[before]
+        between = self.doc.text[name.end : term.anchor]
+        if "\n" in between:
+            return None
+        straight_after = all(
+            word.casefold() in _DEFINING_WORDS for word in re.findall(r"\w+", between)
+        )
+        if not straight_after and (name.start, name.end) not in self.parties:
+            return None
+        return name.type if normalize(term.text) in _short_forms(name) else None
 
 
-def _terms_and_short_names(doc: _Document, names: list[Finding]) -> tuple[set[str], list[Finding]]:
-    """The defined terms, and the short names among them as findings of their names' type."""
-    index = _ShortNames(names)
+def _terms_and_short_names(
+    doc: _Document, names: list[Finding], parties: set[tuple[int, int]], definitions: list[_Term]
+) -> tuple[set[str], list[Finding]]:
+    """The defined terms, and the short names among them as findings of their names' type.
+    ``parties`` holds the spans of the parties' names, ``definitions`` the terms the text defines.
+    """
+    index = _ShortNames(doc, names, parties)
     terms: set[str] = set()
     short_names: dict[str, list[Finding]] = {}
-    for term in _definitions(doc):
-        kind = index.type_of(doc, term)
+    for term in definitions:
+        kind = index.type_of(term)
         if kind is None:
             terms.add(term.text)
         else:
@@ -1171,24 +1304,27 @@ def _in_order(findings: Iterable[Finding]) -> list[Finding]:
     return [best[key] for key in sorted(best)]
 
 
-def _names(doc: _Document) -> list[Finding]:
-    return _in_order(
-        [
-            *_parties(doc),
-            *_legal_form_companies(doc),
-            *_signature_names(doc),
-            *_titled_names(doc),
-        ]
-    )
+def _names(doc: _Document) -> tuple[list[Finding], set[tuple[int, int]]]:
+    """The names the rules find, and the spans of those that are parties."""
+    companies = _legal_form_companies(doc)
+    parties = _parties(doc, companies)
+    names = _in_order([*parties, *companies, *_signature_names(doc), *_titled_names(doc)])
+    return names, {(party.start, party.end) for party in parties}
+
+
+def _defined(definitions: list[_Term]) -> frozenset[str]:
+    return frozenset(term.text.casefold() for term in definitions)
 
 
 def find_parties(text: str) -> list[Finding]:
     """The parties named in the parties clause ("BETWEEN: (1) ...; and (2) ..."), which must start
-    within the first 4,000 characters. A party with a legal form is a COMPANY (0.95); without one
-    it is a COMPANY (0.9) too, unless it is a person (an honorific, "of 12 Mill Lane", "an
-    individual").
+    within the first 4,000 characters, on lines that show they name a party (a legal form, "(1)", "a
+    company registered in", a defining bracket ...). A party with a legal form is a COMPANY (0.95);
+    without one it is a COMPANY (0.9) too, unless it is a person (an honorific, "of 12 Mill Lane",
+    "an individual"). Months, days, countries, currencies and "the Company" are no parties.
     """
-    return _in_order(_parties(_Document(text)))
+    doc = _Document(text)
+    return _in_order(_parties(doc, _legal_form_companies(doc)))
 
 
 def find_legal_form_companies(text: str) -> list[Finding]:
@@ -1218,19 +1354,23 @@ def find_addresses(text: str) -> list[Finding]:
     "Keizersgracht 123", "Büyükdere Caddesi No: 185"; 0.85) or a postcode with its town ("1015 CJ
     Amsterdam", "10117 Berlin", "London SW1A 2AA"; 0.8). It runs on over the parts after it, comma
     by comma, to the end of its postcode, town or country, and stops at "(", ";", " and ", a quote
-    or a line break. A jurisdiction ("the laws of the Netherlands") is no address.
+    or a line break. A jurisdiction ("the laws of the Netherlands") is no address, and neither is
+    the contract's own word for a place after a label ("Delivery Address: the Site").
     """
-    return _addresses(_Document(text))
+    doc = _Document(text)
+    return _addresses(doc, _defined(_definitions(doc)))
 
 
 def find_defined_terms(text: str) -> set[str]:
     """The terms the contract defines: (the "Supplier"), ("Buyer"), (hereinafter "Seller"),
     (each a "Party"), and "Business Day" means ..., in straight or typographic quotes.
 
-    A short name of a party is not a term: Acme Supplies Ltd ("Acme") defines no term.
+    A party's short name, defined after its name, is not a term: Acme Supplies Ltd ("Acme") defines
+    no term.
     """
     doc = _Document(text)
-    return _terms_and_short_names(doc, _names(doc))[0]
+    names, parties = _names(doc)
+    return _terms_and_short_names(doc, names, parties, _definitions(doc))[0]
 
 
 def apply_rules(text: str) -> tuple[list[Finding], set[str]]:
@@ -1238,6 +1378,8 @@ def apply_rules(text: str) -> tuple[list[Finding], set[str]]:
     terms. Short names of parties are among the findings.
     """
     doc = _Document(text)
-    names = _names(doc)
-    terms, short_names = _terms_and_short_names(doc, names)
-    return _in_order([*names, *_addresses(doc), *short_names]), terms
+    names, parties = _names(doc)
+    definitions = _definitions(doc)
+    terms, short_names = _terms_and_short_names(doc, names, parties, definitions)
+    addresses = _addresses(doc, _defined(definitions))
+    return _in_order([*names, *addresses, *short_names]), terms

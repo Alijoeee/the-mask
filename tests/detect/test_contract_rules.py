@@ -218,6 +218,73 @@ def test_parties_clause_ends_at_a_heading():
     assert texts(find_parties(t), t) == {"Northwind Trading", "Acme Supplies"}
 
 
+# Review, Important 1: "between" opens no parties clause without a party on its line.
+NOT_PARTIES = [
+    "made between Monday and Friday",
+    "entered into negotiations between January and March 2026",
+    "Shipments made between England and Wales",
+    "Between Completion and the Long Stop Date",
+    "Between the Effective Date and the Expiry Date",
+    "made between Rotterdam and Hamburg",
+    "made between Company and Consultant",
+    "BETWEEN:\n(1) The Company; and\n(2) The Executive.",
+    "4. PERIOD BETWEEN EXCHANGE AND COMPLETION",
+    "Deliveries are made between Euro and Sterling zones.",
+]
+
+
+@pytest.mark.parametrize("text", NOT_PARTIES)
+def test_no_parties_without_a_party(text):
+    assert find_parties(text) == []
+    fs, _ = apply_rules(text)
+    assert not [f for f in fs if f.type in {PERSON, COMPANY}]
+
+
+# Review, Important 3: the standard layouts with more than one party.
+def test_parties_separated_by_a_line_that_is_just_and():
+    t = (
+        "BETWEEN\n(1) NORTHWIND TRADING B.V., a company registered in the Netherlands\nAND\n"
+        "(2) WENDELIN ACHTERBERG of 12 Mill Lane, Leeds LS1 4AB"
+    )
+    assert {(f.type, f.text) for f in find_parties(t)} == {
+        (COMPANY, "NORTHWIND TRADING B.V."),
+        (PERSON, "WENDELIN ACHTERBERG"),
+    }
+
+
+def test_parties_that_each_end_in_a_full_stop():
+    # The Practical Law layout: each party ends in a full stop and its short name in brackets.
+    t = (
+        "PARTIES\n(1) NORTHWIND TRADING B.V. incorporated and registered in the Netherlands with"
+        " company number 12345678 whose registered office is at Keizersgracht 123, 1015 CJ"
+        " Amsterdam (Supplier).\n(2) GLENMORE FREIGHT incorporated and registered in England and"
+        " Wales with company number 01234567 whose registered office is at 12 Mill Lane, Leeds"
+        " LS1 4AB (Customer).\nBACKGROUND\n(A) The Supplier carries goods."
+    )
+    assert texts(find_parties(t), t) == {"NORTHWIND TRADING B.V.", "GLENMORE FREIGHT"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "This Agreement is made between Northwind Trading, Glenmore Freight and Kestrel Analytics.",
+        'made between Northwind Trading, Glenmore Freight and Kestrel Analytics (each a "Party").',
+        "BETWEEN:\n(1) Northwind Trading, Glenmore Freight and Kestrel Analytics (the Sellers); and",
+    ],
+)
+def test_parties_in_a_list(text):
+    assert texts(find_parties(text), text) == {
+        "Northwind Trading",
+        "Glenmore Freight",
+        "Kestrel Analytics",
+    }
+
+
+def test_a_list_that_runs_into_an_address_names_one_party():
+    t = 'BETWEEN:\n(1) Acme Supplies Ltd, Amsterdam, the Netherlands (the "Supplier"); and'
+    assert texts(find_parties(t), t) == {"Acme Supplies Ltd"}
+
+
 # --- find_legal_form_companies -------------------------------------------------------------------
 
 
@@ -549,6 +616,15 @@ def test_an_address_has_at_most_eight_parts():
     assert f.text == "12 Mill Lane, " + ", ".join(["Leeds"] * 7)
 
 
+def test_a_defined_term_after_an_address_label_is_no_address():
+    # Review, Important 2: "the Site" is the contract's own word for a place, not an address.
+    t = (
+        'Goods go to the warehouse at Kanaalweg 12, Utrecht (the "Site").\n'
+        "Delivery Address: the Site\nDelivery address: Site\nBilling address: the Premises"
+    )
+    assert texts(find_addresses(t), t) == {"Kanaalweg 12, Utrecht"}
+
+
 # --- find_defined_terms --------------------------------------------------------------------------
 
 
@@ -611,6 +687,40 @@ def test_a_short_name_of_a_person_is_hidden_not_a_term():
     assert (PERSON, "Carter") in {(f.type, f.text) for f in fs}
 
 
+def test_a_short_name_at_the_end_of_a_party_is_hidden_not_a_term():
+    t = (
+        "BETWEEN:\n(1) Acme Supplies Ltd, a company registered in England under number 01234567,"
+        ' whose registered office is at 10 High Street, London SW1A 2AA ("Acme"); and\n'
+        '(2) Northwind Trading B.V. (the "Buyer").'
+    )
+    fs, terms = apply_rules(t)
+    assert terms == {"Buyer"}
+    assert (COMPANY, "Acme") in {(f.type, f.text) for f in fs}
+
+
+@pytest.mark.parametrize(
+    "text,term",
+    [
+        # Review, Important 2: a term that shares a word with a name is still a term.
+        ('Name: Laura Price\nThe Buyer pays the price of the Goods (the "Price").', "Price"),
+        ('Custom Foods Ltd (the "Customer") buys the Goods.', "Customer"),
+        (
+            'Delivery Experts Ltd carries the Goods.\n"Delivery" means delivery to the Site.',
+            "Delivery",
+        ),
+        (
+            'Premier Services Ltd provides the Services.\n"Premier Services" means Schedule 1.',
+            "Premier Services",
+        ),
+    ],
+)
+def test_a_term_that_shares_a_word_with_a_name_stays_a_term(text, term):
+    fs, terms = apply_rules(text)
+    assert term in terms
+    assert term in find_defined_terms(text)
+    assert term not in texts(fs, text)
+
+
 # --- Never findings from the rules (controller decision 7) ---------------------------------------
 
 NEVER_FINDINGS = [
@@ -652,8 +762,19 @@ def test_rules_are_quick_on_a_long_contract():
         "Name: \nAttention: \nAddress: \n" * 5000,
         'Acme Supplies Ltd ("Acme"), ' * 3000,
         " ".join(f'Company{n} Ltd ("C{n}")' for n in range(3000)),
+        # Review, Important 4: one long word, or a long web address, on the line after a label.
+        "Name:\n" + "a" * 3000,
+        "Address:\n" + "northwind.example/" + "terms-and-conditions/" * 15,
     ],
-    ids=["addresses", "postcodes", "labels", "short-names", "distinct-short-names"],
+    ids=[
+        "addresses",
+        "postcodes",
+        "labels",
+        "short-names",
+        "distinct-short-names",
+        "long-word",
+        "long-web-address",
+    ],
 )
 def test_rules_are_quick_on_texts_made_to_be_slow(text):
     start = time.perf_counter()
@@ -719,3 +840,67 @@ def test_title_lines_and_job_titles_are_never_findings(engine):
     for title in ("Managing Director", "Chief Executive Officer", "Legal Counsel"):
         start = t.index(title)
         assert not [f for f in fs if f.start < start + len(title) and start < f.end]
+
+
+# Review, Critical 1: a signatory's name in capitals stands on a line of its own, and the model's
+# finding of it runs on to the line break; cutting it there must keep the name.
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        (
+            "Signed for and on behalf of Northwind Trading B.V. by:\nJOHN CARTER\nDirector\n",
+            "JOHN CARTER",
+        ),
+        ("For the Buyer:\nTOM BROWN\n", "TOM BROWN"),
+        ("SIGNED by the Supplier in the presence of:\nWitness signature\nTOM BROWN\n", "TOM BROWN"),
+        ("Signed for and on behalf of ACME SUPPLIES LTD\n\nJOHN CARTER\nDirector", "JOHN CARTER"),
+        ("NORTHWIND TRADING B.V.\nJANE SMITH\nManaging Director", "JANE SMITH"),
+    ],
+)
+def test_a_name_in_capitals_on_a_line_of_its_own_stays_found(engine, text, name):
+    start = text.index(name)
+    assert [f for f in engine.analyze(text) if f.start <= start and start + len(name) <= f.end]
+
+
+def test_a_part_of_a_job_title_is_no_name(engine):
+    # The model reads "JANE SMITH\nManaging": "Managing" is part of the title on its line.
+    t = "NORTHWIND TRADING B.V.\nJANE SMITH\nManaging Director"
+    title = t.index("Managing Director")
+    assert not [f for f in engine.analyze(t) if f.end > title]
+
+
+# Ruling R21: the model takes a short name for a place; such a place is hidden as the name it is
+# short for, as a finding to check.
+def test_a_short_name_taken_for_a_place_is_found_as_its_company(engine):
+    t = "Greystone Logistics Ltd shall provide the Services.\nGreystone / Brinkhof - Agreement"
+    footer = t.index("Greystone /")
+    (f,) = [f for f in engine.analyze(t) if f.start == footer]
+    assert (f.type, f.text, f.source, f.score) == (COMPANY, "Greystone", "model", 0.7)
+
+
+def test_an_initial_and_surname_taken_for_a_place_is_found_as_the_person(engine):
+    t = "Name: Hannah Field\n\nPrices agreed by C. Bibi and H. Field on 24 January 2026."
+    initial = t.index("H. Field")
+    (f,) = [f for f in engine.analyze(t) if f.start == initial]
+    assert (f.type, f.text, f.score) == (PERSON, "H. Field", 0.7)
+
+
+def test_a_defined_term_taken_for_a_place_is_not_found_as_a_name(engine):
+    # The model takes the defined term for a company in clause 3.1 and for a place in clause 4.2.
+    # Ruling R21 finds names the model took for places, not the contract's own terms.
+    t = (
+        '"Delivery Point" means the warehouse of the Buyer.\n3.1 Each order states the type and'
+        " quantity of Goods, the requested delivery date and the Delivery Point.\n4.2 Delivery is"
+        " complete when the Goods have been unloaded at the Delivery Point. Risk passes then."
+    )
+    place = t.rindex("the Delivery Point")
+    assert not [f for f in engine.analyze(t) if f.start == place]
+
+
+def test_a_place_that_is_no_name_still_stays_visible(engine):
+    t = (
+        "Greystone Logistics Ltd shall provide the Services. This Agreement is governed by the"
+        " laws of the Netherlands and the courts of Amsterdam."
+    )
+    assert not of_type(engine.analyze(t), ADDRESS)
+    assert texts(engine.analyze(t), t) == {"Greystone Logistics Ltd"}
