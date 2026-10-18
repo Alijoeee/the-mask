@@ -3,8 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from themask.netguard import install_network_guard
+
 # Tests never open a real window: Qt renders offscreen (set before any QApplication exists).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+# The whole suite runs with the network guard on, which proves that the app needs no network.
+# It goes on as this file is imported, before any fixture module is loaded.
+install_network_guard()
 
 # Every module in tests/fixtures/ is loaded as a pytest plugin, so a task that needs new fixtures
 # adds a file there instead of editing this one.
