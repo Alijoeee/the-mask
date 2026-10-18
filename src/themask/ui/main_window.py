@@ -226,6 +226,7 @@ class MainWindow(QMainWindow):
         self._review_action = self._build_navigation()
 
         self.home.drop_zone.filesDropped.connect(self._files_dropped)
+        self.review_screen.exportRequested.connect(self.show_export)
         self.analysisProgress.connect(self.home.show_progress)
         self._purge_expired_cases()
         if ctx.engine is None:
@@ -262,6 +263,9 @@ class MainWindow(QMainWindow):
         self.review_screen.load(review, combined_text(sources))
         self._review_action.setEnabled(True)
         self._show("review")
+
+    def show_export(self) -> None:
+        self._show("export")
 
     def show_restore(self) -> None:
         self._show("restore")
@@ -463,6 +467,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True
+        self.hide()  # the owner sees the window go, however long a thread takes to end
         self.wait_for_workers()
         super().closeEvent(event)
 

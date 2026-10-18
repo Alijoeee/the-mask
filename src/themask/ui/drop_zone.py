@@ -41,6 +41,9 @@ class DropZone(QFrame):
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
         self.setProperty("dragOver", False)
+        # Room for the title, the hint on two lines and the button: a label that wraps cannot say
+        # how tall it needs to be for the width it gets, so the layout would squeeze them.
+        self.setMinimumHeight(220)
         self.title_label = QLabel("Drop your contracts here")
         self.title_label.setObjectName("dropTitle")
         self.hint_label = QLabel(
