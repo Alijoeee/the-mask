@@ -638,13 +638,16 @@ def test_sources(engine):
     assert by_text[(AMOUNT, "EUR 1,250,000.00")] == "pattern"
     assert by_text[(PlaceholderType.PHONE, "+31 20 123 4567")] == "pattern"
     assert by_text[(PlaceholderType.EMAIL, "j.smith@northwind.example")] == "pattern"
-    assert {f.source for f in findings} <= {"pattern", "model"}
+    assert by_text[(PlaceholderType.COMPANY, "Northwind Trading B.V.")] == "rule"  # Task 7
+    assert {f.source for f in findings} <= {"pattern", "model", "rule"}
 
 
 def test_model_companies_keep_their_score(engine):
-    t = "Supplies are sourced from Baltic Fasteners GmbH and its affiliates."
+    # Presidio would lower the score of companies; nlp_config.yaml stops it. A company with a legal
+    # form that the contract rules leave alone (a legal form in lower case) keeps the model's score.
+    t = "Supplies are sourced from Baltic Fasteners gmbh and its affiliates."
     (f,) = [f for f in engine.analyze(t) if f.type == PlaceholderType.COMPANY]
-    assert f.text == "Baltic Fasteners GmbH" and f.source == "model" and f.score == 0.85
+    assert f.text == "Baltic Fasteners gmbh" and f.source == "model" and f.score == 0.85
 
 
 def test_money_percent_and_quantity_come_only_from_patterns(engine):

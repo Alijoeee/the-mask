@@ -2,7 +2,8 @@
 
 ``normalize`` is what the leak check uses to prove a value is really gone from a file, whatever its
 spacing or punctuation. ``variants_of`` is how one company, person or number is recognised in all
-its spellings. ``flexible_pattern`` finds those spellings in running text.
+its spellings. ``flexible_pattern`` finds those spellings in running text. ``has_legal_form`` and
+``strip_legal_form`` tell a company name by its legal form, for the variants and for detection.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from themask.model import PlaceholderType
 # the end of an ordinary word such as "Nabisco"), with or without their dots ("B.V." and "BV"), and
 # ignoring case ("GMBH", "ltd", "plc"). The one exception: "se", "ab" and "co" (and "as", which is
 # what "A/S" becomes without its slash) are ordinary words in lower case, so they only count when
-# they are capitalised ("SE", "AB", "Co.").
+# they are capitalised ("SE", "AB", "Co."). has_legal_form and strip_legal_form apply these rules.
 LEGAL_FORMS: tuple[str, ...] = (
     "B.V.",
     "N.V.",
@@ -43,6 +44,7 @@ LEGAL_FORMS: tuple[str, ...] = (
     "OHG",
     "A.Ş.",
     "Ltd. Şti.",
+    "Ltd. Sti.",  # "Ltd. Şti." typed without the Turkish letter
     "Oy",
     "AB",
     "ApS",
@@ -128,17 +130,17 @@ def normalize(s: str) -> str:
     folded, and then everything that is not a letter or a digit is dropped: every Unicode space
     (including the non-breaking and thin spaces Word puts inside numbers), quotes, brackets,
     slashes, hyphens and dashes, full stops, commas, and any other symbol or invisible character.
-    So ``1,250,000``, ``1.250.000`` and ``1 250 000`` all become ``1250000``.
+    So ``1,250,000``, ``1.250.000`` and ``1 250 000`` all become ``1250000``. The Turkish dotless
+    "ı" becomes "i", like the capital "I" that stands for it in capitals: "GIDA" equals "Gıda".
     """
     folded = unicodedata.normalize("NFKC", s).casefold()
+    folded = folded.replace("\N{LATIN SMALL LETTER DOTLESS I}", "i")
     return _NOT_A_LETTER_OR_DIGIT.sub("", folded)
 
 
 # --------------------------------------------------------------------------------------------
-# variants_of
+# has_legal_form and strip_legal_form
 # --------------------------------------------------------------------------------------------
-
-_HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
 
 # Legal forms grouped by how many words they are written in ("Ltd. Şti." is two, the rest one),
 # each as its normalised spelling, which is how "B.V.", "BV" and "b.v." come out the same. The
@@ -149,9 +151,63 @@ _LEGAL_FORM_KEYS: dict[int, frozenset[str]] = {
 }
 # Legal forms that are also ordinary words in lower case; see the note on LEGAL_FORMS.
 _ORDINARY_WORDS = frozenset({"se", "ab", "co", "as"})
-_COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 # What is left dangling in front of a legal form: "Smith & Co." leaves "Smith &".
 _CONNECTORS = frozenset({"", "and"})
+_WORD = re.compile(r"\S+")
+
+
+def _is_legal_form(text: str, words: int) -> bool:
+    key = normalize(text)
+    if key not in _LEGAL_FORM_KEYS[words]:
+        return False
+    return not (key in _ORDINARY_WORDS and text.islower())
+
+
+def _legal_form_words(tokens: list[str]) -> int:
+    """How many of the last ``tokens`` make up a legal form; 0 when they do not end in one."""
+    for words in _LEGAL_FORM_KEYS:
+        if len(tokens) >= words and _is_legal_form(" ".join(tokens[-words:]), words):
+            return words
+    return 0
+
+
+def has_legal_form(value: str) -> bool:
+    """Whether ``value`` ends in one of the ``LEGAL_FORMS``, as a word of its own.
+
+    "Northwind Trading B.V.", "ACME SUPPLIES LTD" and a legal form on its own ("GmbH") have one;
+    "Nabisco" and "Northwind Trading" have none. The rules are those of the note on LEGAL_FORMS:
+    dots are optional and case is ignored, except that "se", "ab", "co" and "as" count only when
+    they are capitalised.
+    """
+    return _legal_form_words(value.split()) > 0
+
+
+def strip_legal_form(value: str) -> str:
+    """``value`` without its legal form: "Northwind Trading B.V." gives "Northwind Trading".
+
+    What was left in front of the legal form goes too: a comma ("Acme, Inc." gives "Acme"), and an
+    "&" or "and" ("Smith & Co." gives "Smith"). Only one legal form is taken off ("Smith & Co. Ltd"
+    gives "Smith & Co."), the name keeps its own spelling and spacing, and a legal form on its own
+    gives "". A value that does not end in a legal form comes back unchanged.
+    """
+    words = list(_WORD.finditer(value))
+    form = _legal_form_words([word.group() for word in words])
+    if not form:
+        return value
+    name = words[:-form]
+    while name and normalize(name[-1].group()) in _CONNECTORS:
+        name.pop()
+    if not name:
+        return ""
+    return value[name[0].start() : name[-1].end()].rstrip(",;")
+
+
+# --------------------------------------------------------------------------------------------
+# variants_of
+# --------------------------------------------------------------------------------------------
+
+_HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
+_COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 _EDGE_PUNCTUATION = re.compile(r"^[\W_]+|[\W_]+$")
 _MIN_LETTERS_IN_FIRST_TOKEN = 4
 
@@ -194,22 +250,15 @@ def _person_variants(value: str) -> set[str]:
     return variants
 
 
-def _is_legal_form(text: str, words: int) -> bool:
-    key = normalize(text)
-    if key not in _LEGAL_FORM_KEYS[words]:
-        return False
-    return not (key in _ORDINARY_WORDS and text.islower())
-
-
 def _without_legal_form(tokens: list[str]) -> list[str] | None:
-    """``tokens`` minus one trailing legal form, or ``None`` when the name does not end in one."""
-    for words in _LEGAL_FORM_KEYS:
-        if len(tokens) > words and _is_legal_form(" ".join(tokens[-words:]), words):
-            name = tokens[:-words]
-            while name and normalize(name[-1]) in _CONNECTORS:
-                name = name[:-1]
-            return name
-    return None
+    """``tokens`` minus one trailing legal form, or ``None`` when no name ends in one."""
+    words = _legal_form_words(tokens)
+    if not words or words == len(tokens):  # a legal form on its own is no name
+        return None
+    name = tokens[:-words]
+    while name and normalize(name[-1]) in _CONNECTORS:
+        name = name[:-1]
+    return name
 
 
 def _company_variants(value: str) -> set[str]:
@@ -331,6 +380,9 @@ def variants_of(value: str, t: PlaceholderType) -> set[str]:
 
 _NOT_PRECEDED_BY_LETTER_OR_DIGIT = r"(?<![A-Za-z0-9])"
 _NOT_FOLLOWED_BY_LETTER_OR_DIGIT = r"(?![A-Za-z0-9])"
+# A full stop or comma between digits joins them into one number: "1,250" and "5,000.00".
+_NOT_AFTER_DIGITS_AND_SEPARATOR = r"(?<!\d[.,])"
+_NOT_BEFORE_SEPARATOR_AND_DIGITS = r"(?![.,]\d)"
 
 
 def flexible_pattern(value: str) -> re.Pattern[str]:
@@ -339,8 +391,9 @@ def flexible_pattern(value: str) -> re.Pattern[str]:
     Every run of whitespace in ``value`` matches any run of whitespace in the text (a space, a
     tab, a line break or a non-breaking space), and everything else is matched literally. When
     ``value`` starts or ends with a letter or digit, it must not touch another letter or digit
-    there, so "Smith" is not found inside "Smithson". A blank ``value`` is rejected, because its
-    pattern would match everywhere.
+    there, so "Smith" is not found inside "Smithson". When it starts or ends with a digit, it is
+    not found as part of a longer number either (ruling R11): "EUR 5" is not in "EUR 5,000.00", nor
+    "250" in "1,250". A blank ``value`` is rejected, because its pattern would match everywhere.
     """
     if not value.strip():
         raise ValueError("A blank value cannot be searched for.")
@@ -348,5 +401,9 @@ def flexible_pattern(value: str) -> re.Pattern[str]:
         r"\s+" if part.isspace() else re.escape(part) for part in re.split(r"(\s+)", value)
     )
     start = _NOT_PRECEDED_BY_LETTER_OR_DIGIT if value[0].isalnum() else ""
+    if value[0].isdecimal():
+        start += _NOT_AFTER_DIGITS_AND_SEPARATOR
     end = _NOT_FOLLOWED_BY_LETTER_OR_DIGIT if value[-1].isalnum() else ""
+    if value[-1].isdecimal():
+        end += _NOT_BEFORE_SEPARATOR_AND_DIGITS
     return re.compile(start + body + end, re.IGNORECASE)

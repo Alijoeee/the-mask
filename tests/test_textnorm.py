@@ -8,7 +8,9 @@ from themask.textnorm import (
     HONORIFICS,
     LEGAL_FORMS,
     flexible_pattern,
+    has_legal_form,
     normalize,
+    strip_legal_form,
     variants_of,
 )
 
@@ -96,6 +98,12 @@ def test_normalize_folds_case_beyond_ascii() -> None:
     assert normalize("İSTANBUL") == normalize("istanbul") == "istanbul"
 
 
+def test_normalize_folds_turkish_dotless_i() -> None:
+    # Capital I casefolds to a dotted "i", so the dotless "ı" of "Gıda" is folded the same way.
+    assert normalize("GIDA") == normalize("Gıda") == normalize("Gida") == "gida"
+    assert normalize("ANADOLU GIDA LTD. ŞTİ.") == normalize("Anadolu Gıda Ltd. Şti.")
+
+
 def test_normalize_applies_compatibility_forms() -> None:
     assert normalize("\N{LATIN SMALL LIGATURE FI}nance") == "finance"  # common in PDF text
     assert normalize("\N{FULLWIDTH DIGIT ONE}\N{FULLWIDTH DIGIT TWO}3") == "123"
@@ -148,6 +156,7 @@ def test_legal_forms_are_the_agreed_list() -> None:
         "OHG",
         "A.Ş.",
         "Ltd. Şti.",
+        "Ltd. Sti.",
         "Oy",
         "AB",
         "ApS",
@@ -218,6 +227,89 @@ def test_honorifics_are_the_agreed_list() -> None:
         "Herr",
         "Frau",
     )
+
+
+# --------------------------------------------------------------------------------------------
+# has_legal_form and strip_legal_form (the contract rules and the engine use them too)
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Northwind Trading B.V.",
+        "Northwind Trading BV",
+        "NORTHWIND TRADING B.V.",
+        "Acme Supplies Ltd",
+        "Acme Supplies Ltd.",
+        "ACME SUPPLIES LTD",
+        "acme supplies ltd",
+        "Baltic Fasteners GmbH",
+        "Smith & Co.",
+        "Volvo AB",
+        "Nordic Parts A/S",
+        "Anadolu Gıda A.Ş.",
+        "Marmara Tekstil Ltd. Şti.",
+        "Marmara Tekstil Ltd. Sti.",
+        "MARMARA TEKSTİL LTD. ŞTİ.",
+        "MARMARA TEKSTIL LTD. STI.",
+        "GmbH",
+    ],
+)
+def test_has_legal_form(value: str) -> None:
+    assert has_legal_form(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Northwind Trading",
+        "Nabisco",
+        "Zephyr Bvs",
+        "Zephyr Ventures se",  # the short forms count only when capitalised
+        "Zephyr Ventures co.",
+        "Ltd Partners",  # a legal form ends the name
+        "",
+        "   ",
+    ],
+)
+def test_has_no_legal_form(value: str) -> None:
+    assert not has_legal_form(value)
+
+
+@pytest.mark.parametrize(
+    "value,name",
+    [
+        ("Northwind Trading B.V.", "Northwind Trading"),
+        ("Northwind  Trading BV", "Northwind  Trading"),  # what is left keeps its own spelling
+        ("ACME SUPPLIES LTD", "ACME SUPPLIES"),
+        ("Acme, Inc.", "Acme"),
+        ("Smith & Co.", "Smith"),
+        ("Smith and Co.", "Smith"),
+        ("Smith & Co. Ltd", "Smith & Co."),  # one legal form at a time
+        ("Müller & Söhne GmbH", "Müller & Söhne"),
+        ("Marmara Tekstil Ltd. Şti.", "Marmara Tekstil"),
+        ("Marmara Tekstil Ltd. Sti.", "Marmara Tekstil"),
+        ("GmbH", ""),
+        ("Ltd. Şti.", ""),
+    ],
+)
+def test_strip_legal_form(value: str, name: str) -> None:
+    assert strip_legal_form(value) == name
+
+
+@pytest.mark.parametrize("value", ["Northwind Trading", "Zephyr Ventures se", "Nabisco", ""])
+def test_strip_legal_form_leaves_a_name_without_one_unchanged(value: str) -> None:
+    assert strip_legal_form(value) == value
+
+
+@pytest.mark.parametrize("form", LEGAL_FORMS)
+def test_legal_form_helpers_agree_with_the_company_variants(form: str) -> None:
+    for spelling in {form, form.replace(".", ""), form.upper()}:
+        value = f"Zephyr Ventures {spelling}"
+        assert has_legal_form(value), spelling
+        assert strip_legal_form(value) == "Zephyr Ventures", spelling
+        assert "Zephyr Ventures" in variants_of(value, PlaceholderType.COMPANY), spelling
 
 
 # --------------------------------------------------------------------------------------------
@@ -390,6 +482,7 @@ def test_company_dangling_ampersand_is_dropped() -> None:
             {"Rolls-Royce Holdings plc", "Rolls-Royce Holdings", "Rolls-Royce"},
         ),
         ("Marmara Tekstil Ltd. Şti.", {"Marmara Tekstil Ltd. Şti.", "Marmara Tekstil", "Marmara"}),
+        ("Marmara Tekstil Ltd. Sti.", {"Marmara Tekstil Ltd. Sti.", "Marmara Tekstil", "Marmara"}),
         ("Anadolu Gıda A.Ş.", {"Anadolu Gıda A.Ş.", "Anadolu Gıda", "Anadolu"}),
         ("ANADOLU GIDA LTD. ŞTİ.", {"ANADOLU GIDA LTD. ŞTİ.", "ANADOLU GIDA", "ANADOLU"}),
         ("Nordic Parts A/S", {"Nordic Parts A/S", "Nordic Parts", "Nordic"}),
@@ -757,6 +850,40 @@ def test_flexible_pattern_finds_every_occurrence() -> None:
     pattern = flexible_pattern("John Smith")
     spans = [m.span() for m in pattern.finditer("John Smith and john   smith")]
     assert spans == [(0, 10), (15, 27)]
+
+
+@pytest.mark.parametrize(
+    "value,text",
+    [
+        # Ruling R11: a number is not found as the start or the end of a longer number.
+        ("EUR 5", "a fee of EUR 5,000.00"),
+        ("EUR 5", "a fee of EUR 5.000,00"),
+        ("250", "a fee of 1,250"),
+        ("250", "a fee of 1.250"),
+        ("1,250", "a fee of 1,250,000"),
+        ("250.000", "a fee of 1.250.000"),
+        ("5%", "a rate of 2,5%"),
+    ],
+)
+def test_flexible_pattern_number_is_not_found_inside_a_longer_number(value: str, text: str) -> None:
+    assert not flexible_pattern(value).search(text)
+
+
+@pytest.mark.parametrize(
+    "value,text",
+    [
+        ("EUR 5", "a fee of EUR 5."),
+        ("EUR 5", "a fee of EUR 5, payable monthly"),
+        ("EUR 5", "a fee of EUR 5.- per unit"),
+        ("250", "a fee of 250, payable"),
+        ("250", "a fee of (250)"),
+        ("1,250", "a fee of EUR 1,250."),
+        ("1,250", "1,250 units"),
+        ("5%", "a rate of 5%."),
+    ],
+)
+def test_flexible_pattern_number_is_found_next_to_punctuation(value: str, text: str) -> None:
+    assert flexible_pattern(value).search(text)
 
 
 @pytest.mark.parametrize("value", ["", " ", "   ", "\n", NBSP])
