@@ -11,13 +11,16 @@ compared depends on its type; a variant is compared as its entry's type:
   the punctuation that has no space beside it dropped (ruling R68), so "Acme BV" is found for
   "Acme B.V." and "North-wind" for "Northwind"; an initial's full stop before a word still parts
   them ("S.Hall" is no "shall"). A match in either fold is a hit;
-* a number (AMOUNT, PERCENT, QUANTITY, IBAN, ID, PHONE) by its letters and digits alone
-  (``textnorm.normalize``), so "1.250.000" is found for "1,250,000" and "NL91ABNA0417164300" for
-  "NL91 ABNA 0417 1643 00". Where it starts or ends with a digit, it counts only where no other
-  digit touches it there in the text itself (ruling R65): right beside it, or beyond a single
-  space, full stop, comma or apostrophe ("1250" is not found in "11250", "EUR 1,250" not in
-  "EUR 12,500"). A tab, a line break or any other mark parts two numbers ("Instalment 2<tab>
-  125,000"), and so does a footnote mark; cents after it ("125,000.00") are no other number.
+* a number (AMOUNT, PERCENT, QUANTITY, IBAN, ID, PHONE) by its letters and digits alone, so
+  "1.250.000" is found for "1,250,000" and "NL91ABNA0417164300" for "NL91 ABNA 0417 1643 00";
+  only a decimal part stays apart (ruling R71: "1,250.00" and "1.250,00" alike are 1250 with 00
+  after the point, never 125000). Where it starts or ends with a digit, it counts only where no
+  other digit touches it there in the text itself (rulings R65, R70): right beside it, beyond a
+  single full stop, comma, apostrophe or non-breaking space, or beyond a plain space where the
+  digits beyond are a thousands group of three ("1250" is not found in "11250", "EUR 1,250" not
+  in "EUR 12,500", "1 250" not in "1 250 000"; "1,250" is in "In 2025 1,250 units"). A tab, a
+  line break or any other mark parts two numbers ("Instalment 2<tab>125,000"), and so does a
+  footnote mark; cents after it ("125,000.00") are no other number.
 
 It searches:
 
@@ -285,29 +288,67 @@ def _prefolded(text: str) -> str:
     return _MARKS.sub("", folded.replace("\N{LATIN SMALL LETTER DOTLESS I}", "i"))
 
 
+# Ruling R71: a number's decimal part stays apart when numbers are compared. A run of digit groups
+# is joined by full stops, commas, apostrophes or the spaces that only ever group thousands (a
+# plain space joins no run: it may stand between two numbers). Its last separator is a decimal
+# point when it is a full stop or a comma with one or two digits after it, and the groups between
+# the first and the last are thousands groups: "1,250.00", "1.250,00", "12,5"; not "1,250" nor
+# "06.12.34.56.78" (a telephone number) nor "18.10.26" (a date). The point is folded to this mark.
+_NUMBER_RUN = re.compile(r"\d+(?:[.,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}]\d+)+")
+_GROUP_SEPARATOR = re.compile(r"[.,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}]")
+_DECIMAL_MARK = "x"
+
+
+def _decimal_points(text: str) -> list[int]:
+    """Where ``text`` writes a number's decimal point (ruling R71)."""
+    points = []
+    for run in _NUMBER_RUN.finditer(text):
+        separators = list(_GROUP_SEPARATOR.finditer(run.group()))
+        groups = _GROUP_SEPARATOR.split(run.group())
+        last = separators[-1]
+        thousands = all(len(group) == 3 for group in groups[1:-1])
+        if (
+            last.group() in ".,"
+            and len(groups[-1]) <= 2
+            and thousands
+            and (len(groups) == 2 or len(groups[0]) <= 3)
+        ):
+            points.append(run.start() + last.start())
+    return points
+
+
 def _folds(text: str) -> tuple[str, str, str]:
     """``text`` folded the three ways it is searched: by its words (every run of anything else
     than letters and digits one space, none at either end: ruling R63), by its words with glued
-    punctuation dropped (ruling R68), and by its letters and digits alone (``normalize``)."""
+    punctuation dropped (ruling R68), and as numbers, by its letters and digits alone with each
+    decimal point a mark (rulings R14, R71)."""
     pre = _prefolded(text)
     words = _NOT_A_LETTER_OR_DIGIT.sub(" ", pre).strip()
     tight = _NOT_A_LETTER_OR_DIGIT.sub(" ", _GLUED.sub("", _INITIAL.sub(r"\1 ", pre))).strip()
+    points = _decimal_points(text)
+    if points:
+        marked = list(text)
+        for point in points:
+            marked[point] = _DECIMAL_MARK
+        pre = _prefolded("".join(marked))
     return words, tight, _NOT_A_LETTER_OR_DIGIT.sub("", pre)
 
 
-# The views of a folded text: by words, by words with glued punctuation dropped, by letters and
-# digits.
-_WORDS, _TIGHT, _COMPACT = 0, 1, 2
+# The views of a folded text: by words, by words with glued punctuation dropped, as numbers, and
+# by letters and digits alone (``normalize``), which is what a hit's context hides.
+_WORDS, _TIGHT, _COMPACT, _PLAIN = 0, 1, 2, 3
+# A number of digits only, with or without a decimal part.
+_NUMERIC = re.compile(rf"\d+(?:{_DECIMAL_MARK}\d{{1,2}})?")
 
 
 @dataclass(frozen=True)
 class _Trace:
-    """A text folded the three ways, with the start and the end in the text of what each folded
+    """A text folded the four ways, with the start and the end in the text of what each folded
     character comes from."""
 
-    folded: tuple[str, str, str]
-    starts: tuple[list[int], list[int], list[int]]
-    ends: tuple[list[int], list[int], list[int]]
+    folded: tuple[str, str, str, str]
+    starts: tuple[list[int], list[int], list[int], list[int]]
+    ends: tuple[list[int], list[int], list[int], list[int]]
 
     def source(self, match: _Match) -> tuple[int, int]:
         """Where in the text ``match``, found in one of the folded texts, comes from."""
@@ -348,16 +389,19 @@ def _traced(text: str) -> _Trace | None:
     glued = [False] * len(guarded)
     for run in _GLUED.finditer(guarded):
         glued[run.start() : run.end()] = [True] * (run.end() - run.start())
+    points = set(_decimal_points(text))
     views: list[tuple[str, list[int], list[int]]] = []
-    for kind in (_WORDS, _TIGHT, _COMPACT):
+    for kind in (_WORDS, _TIGHT, _COMPACT, _PLAIN):
         chars: list[str] = []
         starts: list[int] = []
         ends: list[int] = []
         for at, char in enumerate(guarded if kind == _TIGHT else prefolded):
             if kind == _TIGHT and glued[at]:
                 continue
-            if not (char.isalnum() and char != "_"):
-                if kind == _COMPACT or not chars or chars[-1] == " ":
+            if kind == _COMPACT and pre_starts[at] in points and char in ".,":
+                char = _DECIMAL_MARK
+            elif not (char.isalnum() and char != "_"):
+                if kind in (_COMPACT, _PLAIN) or not chars or chars[-1] == " ":
                     continue
                 char = " "
             chars.append(char)
@@ -366,21 +410,21 @@ def _traced(text: str) -> _Trace | None:
         if chars and chars[-1] == " ":
             del chars[-1], starts[-1], ends[-1]
         views.append(("".join(chars), starts, ends))
-    three = (views[0][0], views[1][0], views[2][0])
-    if three != _folds(text):
+    four = (views[0][0], views[1][0], views[2][0], views[3][0])
+    if four[:3] != _folds(text) or four[3] != normalize(text):
         return None
     return _Trace(
-        three,
-        (views[0][1], views[1][1], views[2][1]),
-        (views[0][2], views[1][2], views[2][2]),
+        four,
+        (views[0][1], views[1][1], views[2][1], views[3][1]),
+        (views[0][2], views[1][2], views[2][2], views[3][2]),
     )
 
 
 # A long text is traced only round what was found in it, in chunks of about this many characters
-# cut where two ASCII letters or digits stand on either side: every way of folding cuts there too,
-# so the folded chunks laid end to end are the folded text.
+# cut where two ASCII letters stand on either side: every way of folding cuts there too, so the
+# folded chunks laid end to end are the folded text (a cut between digits could part a number).
 _CHUNK = 2048
-_BETWEEN_LETTERS = re.compile(r"(?<=[A-Za-z0-9]{2})(?=[A-Za-z0-9]{2})")
+_BETWEEN_LETTERS = re.compile(r"(?<=[A-Za-z]{2})(?=[A-Za-z]{2})")
 
 
 def _source(text: str, match: _Match) -> tuple[int, int] | None:
@@ -430,8 +474,8 @@ class _Match:
 
     @property
     def digits(self) -> bool:
-        """Whether its needle is digits only."""
-        return self.key.replace(" ", "").isdigit()
+        """Whether its needle is a number of digits only, a decimal part allowed."""
+        return _NUMERIC.fullmatch(self.key.replace(" ", "")) is not None
 
     def shifted(self, by: int) -> _Match:
         return _Match(self.start + by, self.end + by, self.key, self.placeholder, self.view)
@@ -445,30 +489,39 @@ _WORD_EDGES = frozenset({"", " ", "\x00"})
 @dataclass(frozen=True)
 class _Needles:
     """The key as the scan looks for it: each name folded both ways by its words (rulings R63,
-    R68) and each number by its letters and digits, with its entry's placeholder. A form shorter
-    than ``MIN_LENGTH`` is left out; one that two entries share keeps the first one's placeholder.
+    R68) and each number as a number (rulings R14, R71), with its entry's placeholder; and every
+    form by its letters and digits alone (``plain``), the names among them in ``plain_names``,
+    for what a hit's context hides. A form shorter than ``MIN_LENGTH`` letters and digits is
+    left out; one that two entries share keeps the first one's placeholder.
     """
 
     names: dict[str, str]
     tight: dict[str, str]
     numbers: dict[str, str]
+    plain: dict[str, str] = field(default_factory=dict)
+    plain_names: frozenset[str] = frozenset()
 
     @classmethod
     def of(cls, entries: Iterable[KeyEntry]) -> _Needles:
         names: dict[str, str] = {}
         tight: dict[str, str] = {}
         numbers: dict[str, str] = {}
+        plain: dict[str, str] = {}
+        plain_names: set[str] = set()
         for entry in entries:
             for form in (entry.value, *entry.variants):
-                words, glued, compact = _folds(form)
-                if len(compact) < MIN_LENGTH:
+                words, glued, number = _folds(form)
+                letters = normalize(form)
+                if len(letters) < MIN_LENGTH:
                     continue
+                plain.setdefault(letters, entry.placeholder)
                 if entry.type in NAME_TYPES:
                     names.setdefault(words, entry.placeholder)
                     tight.setdefault(glued, entry.placeholder)
+                    plain_names.add(letters)
                 else:
-                    numbers.setdefault(compact, entry.placeholder)
-        return cls(names, tight, numbers)
+                    numbers.setdefault(number, entry.placeholder)
+        return cls(names, tight, numbers, plain, frozenset(plain_names))
 
     def __bool__(self) -> bool:
         return bool(self.names or self.numbers)
@@ -483,7 +536,8 @@ class _Needles:
 
         def wanted(key: str) -> bool:
             compact = key.replace(" ", "")
-            return len(compact) >= MIN_RAW_LENGTH and not compact.isdigit()
+            letters = _DECIMAL_POINT_IN_KEY.sub("", compact)
+            return len(letters) >= MIN_RAW_LENGTH and _NUMERIC.fullmatch(compact) is None
 
         return _Needles(
             {key: ph for key, ph in self.names.items() if wanted(key)},
@@ -491,7 +545,7 @@ class _Needles:
             {key: ph for key, ph in self.numbers.items() if wanted(key)},
         )
 
-    def find(self, folded: tuple[str, str, str]) -> Iterator[_Match]:
+    def find(self, folded: tuple[str, ...]) -> Iterator[_Match]:
         """Every place where a needle stands in a text folded the three ways: a name on the edges
         of words, a number anywhere (``_located`` judges the digits round it)."""
         for view, needles in ((_WORDS, self.names), (_TIGHT, self.tight)):
@@ -511,15 +565,20 @@ class _Needles:
                 at = compact.find(key, at + 1)
 
 
-# Ruling R65: what may stand between two digits of one number, and the cents after a number.
-_NUMBER_SEPARATORS = frozenset(" .,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}")
+# A decimal point in a folded number (ruling R71).
+_DECIMAL_POINT_IN_KEY = re.compile(rf"(?<=\d){_DECIMAL_MARK}(?=\d)")
+
+# Ruling R65: what may stand between two digits of one number, and the cents after a number. A
+# plain space stands between two digits of one number only before a thousands group (ruling R70).
+_NUMBER_SEPARATORS = frozenset(".,'\N{NO-BREAK SPACE}\N{NARROW NO-BREAK SPACE}")
 _CENTS = re.compile(r"[.,][0-9]{2}(?![0-9])")
 
 
 def _touched(text: str, start: int, end: int, key: str) -> bool:
     """Whether another digit touches the number found at ``text[start:end]`` on a side where its
-    needle ``key`` starts or ends with a digit (ruling R65): right beside it, or beyond a single
-    space, full stop, comma or apostrophe. A tab, a line break, any other mark or the end of the
+    needle ``key`` starts or ends with a digit (rulings R65, R70): right beside it, beyond a
+    single full stop, comma, apostrophe or non-breaking space, or beyond a plain space where the
+    digits beyond it are a thousands group. A tab, a line break, any other mark or the end of the
     text parts them, and so do cents after it."""
     if key[:1].isdecimal() and _digit_at(text, start - 1, -1):
         return True
@@ -533,7 +592,22 @@ def _digit_at(text: str, at: int, step: int) -> bool:
     if text[at].isdecimal():
         return True
     beyond = at + step
-    return text[at] in _NUMBER_SEPARATORS and 0 <= beyond < len(text) and text[beyond].isdecimal()
+    if not (0 <= beyond < len(text) and text[beyond].isdecimal()):
+        return False
+    if text[at] == " ":
+        return _thousands_group(text, beyond, step)
+    return text[at] in _NUMBER_SEPARATORS
+
+
+def _thousands_group(text: str, at: int, step: int) -> bool:
+    """Whether the run of digits that ``text[at]`` begins, read in the direction of ``step``, is
+    exactly three digits long: a group of thousands, which a plain space may stand before (ruling
+    R70)."""
+    length = 0
+    while 0 <= at < len(text) and text[at].isdecimal():
+        length += 1
+        at += step
+    return length == 3
 
 
 Located = list[tuple[int, int, _Match]]
@@ -594,10 +668,8 @@ class _Hider:
 
     def __init__(self, needles: _Needles, people: list[tuple[KeyEntry, list[str]]]) -> None:
         self._needles = needles
-        self._keys: dict[str, str] = {}  # normalised forms, with their placeholders
-        for key, placeholder in [*needles.names.items(), *needles.numbers.items()]:
-            self._keys.setdefault(key.replace(" ", ""), placeholder)
-        self._name_keys = {key.replace(" ", "") for key in needles.names}
+        self._keys = dict(needles.plain)  # normalised forms, with their placeholders
+        self._name_keys = set(needles.plain_names)
         for entry, forms in people:
             for form in forms:
                 compact = normalize(form)
@@ -649,8 +721,8 @@ class _Hider:
         trace = _traced(text)
         if trace is None:
             return None
-        compact = trace.folded[_COMPACT]
-        starts, ends = trace.starts[_COMPACT], trace.ends[_COMPACT]
+        compact = trace.folded[_PLAIN]
+        starts, ends = trace.starts[_PLAIN], trace.ends[_PLAIN]
         spans = []
         for key, placeholder in self._keys.items():
             if not names and key in self._name_keys:

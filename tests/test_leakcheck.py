@@ -445,6 +445,38 @@ def test_what_parts_a_number_from_a_number(make_docx: MakeDocx) -> None:
     assert scan_package(make_docx(other), [deposit]) == []
 
 
+def test_a_plain_space_parts_numbers_unless_a_thousands_group_follows(make_docx: MakeDocx) -> None:
+    units = KeyEntry("[QUANTITY_1]", QUANTITY, "1 250 units", ["1 250"])
+    register = KeyEntry("[ID_1]", ID, "12345678", [])
+    # Beyond a plain space, three digits continue the number (ruling R70).
+    inside = para("A cap of 1 250 000 applies.") + para("A cap of 1250 000 applies.")
+    assert scan_package(make_docx(inside), [units, register]) == []
+    # Any other run of digits beyond it is another number.
+    apart = para("In 2025 1,250 units shall be delivered.") + para("Article 4 12345678 applies.")
+    hits = scan_package(make_docx(apart), [units, register])
+    assert [hit.context for hit in hits] == [
+        "In 2025 [QUANTITY_1] shall be delivered.",  # the value, "1,250 units", whole
+        "Article 4 [ID_1] applies.",
+    ]
+
+
+def test_a_decimal_part_stays_apart(make_docx: MakeDocx) -> None:
+    big = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 125,000", ["125,000"])
+    small = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 1,250", ["1,250"])
+    million = KeyEntry("[AMOUNT_3]", AMOUNT, "EUR 1,250,000", ["1,250,000"])
+    # 1,250.00 is 1250 with cents, not 125000 (ruling R71).
+    assert scan_package(make_docx(para("A fee of EUR 1,250.00 applies.")), [big]) == []
+    shown = para("A fee of EUR 1,250.00 applies.") + para("A cap of 1.250.000,00 applies.")
+    hits = scan_package(make_docx(shown), [small, million])
+    assert [hit.context for hit in hits] == [
+        "A fee of [AMOUNT_2].00 applies.",
+        "A cap of [AMOUNT_3],00 applies.",
+    ]
+    # Three digits after the last separator are a group of thousands, not decimals: 1,250.125 is
+    # the number 1250125, and holds no 1,250.
+    assert scan_package(make_docx(para("A rate of 1,250.125 applies.")), [small]) == []
+
+
 # ---- the file format's names, and those it was given (rulings R66, R67) --------------------------
 
 
