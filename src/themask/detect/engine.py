@@ -43,7 +43,7 @@ MIN_SCORE = 0.3
 # keeps at most this score: it is hidden, but marked for the owner to check.
 UNCONFIRMED_COMPANY_SCORE = 0.6
 # A place the model finds that is a short form of a name in the document (ruling R21) is that name,
-# with at most this score: hidden, and marked for checking.
+# with at most this score: hidden, and not marked for checking (the pipeline marks scores below 0.7).
 SHORT_NAME_PLACE_SCORE = 0.7
 
 # The countries whose phone numbers are found in their national form too ("020 123 4567"); a
@@ -141,6 +141,15 @@ _MIN_PART_CHARACTERS = 2
 _MIN_SHORT_FORM_LETTERS = 4
 _COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 _LEADING_THE = re.compile(r"\A(?i:the)\s+")
+# A colon straight after a word: the word labels its line ("Country: Netherlands").
+_LABELS_ITS_LINE = re.compile(r"[ \t]*:")
+# A label and its value in one part: "BIC: DEUTDEBB".
+_LABEL_AND_VALUE = re.compile(r"[^\W\d_][\w\-]*[ \t]*:[ \t]*(?P<value>\S.*)")
+# What comes before the place of a law or a court: "the laws of", "the courts of", "court in".
+_JURISDICTION_BEFORE = re.compile(
+    r"\b(?i:laws?|courts?|tribunals?|jurisdiction|arbitration|seat)[ \t]+(?i:of|in)[ \t]+"
+    r"(?i:the[ \t]+)?\Z"
+)
 
 
 class Engine:
@@ -247,7 +256,8 @@ def _checked_by_rules(
     for part in parts:
         if part.source == "model" and part.type == _ADDRESS and not _at(part, addresses):
             kind = short_names.get(normalize(_LEADING_THE.sub("", part.text)))
-            if kind is not None:  # the footer's "Greystone" for Greystone Logistics Ltd
+            if kind is not None and not _is_a_jurisdiction(text, part):
+                # the footer's "Greystone" for Greystone Logistics Ltd
                 checked.append(
                     replace(part, type=kind, score=min(part.score, SHORT_NAME_PLACE_SCORE))
                 )
@@ -279,15 +289,47 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
 
 def _names_nobody(text: str, start: int, end: int) -> bool:
     """Whether ``text[start:end]``, a part of a model finding, names nobody: it is made of the
-    contract's own words ("CUSTOMER", "Attention", "TERMINATION"), or is a job title, or is part of
-    the job title its line holds ("Managing" of "Managing Director"). A name in capitals on a line
-    of its own, as a signatory's name stands ("JOHN CARTER"), is a name.
+    contract's own words ("CUSTOMER", "Attention", "SCHEDULE 1"), or is a job title, or part of the
+    job title its line holds ("Managing" of "Managing Director"); it is one word that labels its
+    line ("Country:", "Bank:"); it is a label with its code ("BIC: DEUTDEBB"); or it is a number or
+    a code ("7.5", "DE63100700006745119824"). A name in capitals on a line of its own, as a
+    signatory's name stands ("JOHN CARTER"), is a name.
     """
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
-    line = text[line_start : len(text) if line_end < 0 else line_end].strip()
+    line_end = len(text) if line_end < 0 else line_end
     part = text[start:end]
+    if " " not in part and (_LABELS_ITS_LINE.match(text, end, line_end) or _is_a_number(part)):
+        return True
+    label = _LABEL_AND_VALUE.fullmatch(part)
+    if label is not None and _is_a_code(label["value"]):
+        return True
+    line = text[line_start:line_end].strip()
     return is_contract_wording(part) or is_job_title(part) or is_job_title(line)
+
+
+def _is_a_number(text: str) -> bool:
+    """Whether ``text`` is a number or a code with digits, no name: no letter at all, or digits
+    and no lower-case letter ("7.5", "DE63100700006745119824", "NL91 ABNA 0417 1643 00").
+    """
+    if not any(character.isalpha() for character in text):
+        return True
+    has_digit = any(character.isdigit() for character in text)
+    return has_digit and not any(character.islower() for character in text)
+
+
+def _is_a_code(text: str) -> bool:
+    """Whether ``text``, the value after a label, is a code: a number, or one word in capitals
+    ("BIC: DEUTDEBB"). On a line of its own, a word in capitals may be a name ("ACME").
+    """
+    return _is_a_number(text) or (" " not in text.strip() and text.isupper())
+
+
+def _is_a_jurisdiction(text: str, place: Finding) -> bool:
+    """Whether ``place`` is the place of a law or a court ("the courts of Frankfurt"), which stays
+    visible whatever company shares its name.
+    """
+    return _JURISDICTION_BEFORE.search(text, max(0, place.start - 40), place.start) is not None
 
 
 def _types_of_short_forms(findings: list[Finding], defined: set[str]) -> dict[str, PlaceholderType]:

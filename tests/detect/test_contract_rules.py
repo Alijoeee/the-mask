@@ -16,9 +16,11 @@ from themask.detect.contract_rules import (
     find_legal_form_companies,
     find_parties,
     find_signature_blocks,
+    is_contract_wording,
     is_job_title,
 )
 from themask.model import Finding, PlaceholderType
+from themask.textnorm import has_legal_form
 
 PERSON = PlaceholderType.PERSON
 COMPANY = PlaceholderType.COMPANY
@@ -230,6 +232,11 @@ NOT_PARTIES = [
     "BETWEEN:\n(1) The Company; and\n(2) The Executive.",
     "4. PERIOD BETWEEN EXCHANGE AND COMPLETION",
     "Deliveries are made between Euro and Sterling zones.",
+    # Re-review: a name without a legal form needs its own sign of being a party.
+    "This Agreement is made between Rotterdam and Hamburg.",
+    "This Agreement is made between Frankfurt, Hamburg and Berlin.",
+    # A plain list of names without legal forms could be towns, so it names no party either.
+    "This Agreement is made between Northwind Trading, Glenmore Freight and Kestrel Analytics.",
 ]
 
 
@@ -267,9 +274,9 @@ def test_parties_that_each_end_in_a_full_stop():
 @pytest.mark.parametrize(
     "text",
     [
-        "This Agreement is made between Northwind Trading, Glenmore Freight and Kestrel Analytics.",
+        # A list of names without legal forms counts when a bracket defines them as parties.
         'made between Northwind Trading, Glenmore Freight and Kestrel Analytics (each a "Party").',
-        "BETWEEN:\n(1) Northwind Trading, Glenmore Freight and Kestrel Analytics (the Sellers); and",
+        'BETWEEN:\n(1) Northwind Trading, Glenmore Freight and Kestrel Analytics (the "Sellers"); and',
     ],
 )
 def test_parties_in_a_list(text):
@@ -280,9 +287,83 @@ def test_parties_in_a_list(text):
     }
 
 
+def test_parties_with_legal_forms_in_a_list():
+    t = (
+        "This Agreement is made between Northwind Trading B.V., Glenmore Freight Ltd and Kestrel"
+        " Analytics Limited."
+    )
+    assert texts(find_parties(t), t) == {
+        "Northwind Trading B.V.",
+        "Glenmore Freight Ltd",
+        "Kestrel Analytics Limited",
+    }
+
+
 def test_a_list_that_runs_into_an_address_names_one_party():
     t = 'BETWEEN:\n(1) Acme Supplies Ltd, Amsterdam, the Netherlands (the "Supplier"); and'
     assert texts(find_parties(t), t) == {"Acme Supplies Ltd"}
+
+
+# Re-review, Important 1: the town after a party is no party, and the jurisdiction stays visible.
+@pytest.mark.parametrize(
+    "text,towns",
+    [
+        (
+            (
+                "This Agreement is made between Kronberg Medical AG, Frankfurt and Larchfield Foods"
+                " Limited, London."
+            ),
+            {"Frankfurt", "London"},
+        ),
+        (
+            (
+                "This Agreement is made between Acme Supplies Ltd, Leeds and Northwind Trading B.V.,"
+                " Rotterdam."
+            ),
+            {"Leeds", "Rotterdam"},
+        ),
+        (
+            (
+                "This Agreement is made between Northwind Trading B.V., Amsterdam, and Acme Supplies"
+                ' Ltd, London (together the "Parties").'
+            ),
+            {"Amsterdam", "London"},
+        ),
+        (
+            (
+                "This Agreement is made between Northwind Trading B.V., Amsterdam and Acme Supplies"
+                ' Ltd (together the "Parties").'
+            ),
+            {"Amsterdam"},
+        ),
+        (
+            (
+                "This Agreement is made between Acme Supplies Ltd, New York and Northwind Trading"
+                " B.V., Springfield."
+            ),
+            {"New York", "Springfield"},
+        ),
+        (
+            "This Agreement is made between Kronberg Medical AG, Frankfurt, Hamburg and Berlin.",
+            {"Frankfurt", "Hamburg", "Berlin"},
+        ),
+    ],
+)
+def test_a_town_after_a_party_is_no_party(text, towns):
+    fs, _ = apply_rules(text)
+    assert not towns & texts(fs, text)
+    assert all(f.type == COMPANY and has_legal_form(f.text) for f in fs)
+
+
+def test_recitals_after_the_last_party_are_no_parties():
+    # Re-review, regression 5: "(A)" starts the recitals, not another party.
+    t = (
+        'BETWEEN:\n(1) Northwind Trading B.V. (the "Supplier"); and\n(2) Acme Supplies Ltd (the'
+        ' "Buyer").\n(A) Delivery of goods is required at the Site.\n(B) Payment is due monthly.'
+    )
+    assert texts(find_parties(t), t) == {"Northwind Trading B.V.", "Acme Supplies Ltd"}
+    fs, _ = apply_rules(t)
+    assert not {"Delivery", "Payment"} & texts(fs, t)
 
 
 # --- find_legal_form_companies -------------------------------------------------------------------
@@ -483,6 +564,36 @@ def test_job_titles(title):
 )
 def test_names_are_not_job_titles(name):
     assert not is_job_title(name)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "SUPPLIER",
+        "CUSTOMER:",
+        "the Buyer",
+        "TERMINATION",
+        "GOVERNING LAW AND JURISDICTION",
+        "Attention",
+        "Telephone:",
+        "IBAN",
+        "SCHEDULE 1",
+        "EXHIBIT A",
+        "APPENDIX 1",
+        "ANNEX II",
+        "Schedule 3 Prices",
+    ],
+)
+def test_contract_wording(text):
+    assert is_contract_wording(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["JOHN CARTER", "Northwind", "Northwind Trading B.V.", "Ms Laura Price", "1", "A", "and", ""],
+)
+def test_names_and_bare_references_are_not_contract_wording(text):
+    assert not is_contract_wording(text)
 
 
 # --- find_addresses ------------------------------------------------------------------------------
@@ -698,6 +809,44 @@ def test_a_short_name_at_the_end_of_a_party_is_hidden_not_a_term():
     assert (COMPANY, "Acme") in {(f.type, f.text) for f in fs}
 
 
+# Re-review, Important 2: the short name belongs to the party whose description holds it, also
+# when another name or a line break stands between them.
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            'BETWEEN:\n(1) Acme Supplies Ltd, represented by Mr John Carter, its director ("Acme"); and\n'
+            '(2) Northwind Trading B.V. (the "Buyer").'
+        ),
+        (
+            'BETWEEN:\n(1) Acme Supplies Ltd, a subsidiary of Northwind Group Ltd ("Acme"); and\n'
+            '(2) Kestrel Analytics Limited (the "Buyer").'
+        ),
+        'Acme Supplies Ltd\n("Acme") shall deliver the Goods to the Buyer.',
+        (
+            "BETWEEN:\n(1) Acme Supplies Ltd, a company registered in England,\nwhose registered office"
+            ' is at 10 High Street, London SW1A 2AA ("Acme"); and\n(2) Northwind Trading B.V. (the'
+            ' "Buyer").'
+        ),
+    ],
+    ids=["representative between", "other company between", "line break", "soft line break"],
+)
+def test_a_short_name_in_its_partys_description_is_hidden_not_a_term(text):
+    fs, terms = apply_rules(text)
+    assert "Acme" not in terms
+    assert (COMPANY, "Acme") in {(f.type, f.text) for f in fs}
+
+
+def test_a_short_name_of_another_company_in_a_partys_description_is_hidden_too():
+    t = (
+        'BETWEEN:\n(1) Acme Supplies Ltd, a subsidiary of Northwind Group Ltd ("Northwind Group");'
+        ' and\n(2) Kestrel Analytics Limited (the "Buyer").'
+    )
+    fs, terms = apply_rules(t)
+    assert terms == {"Buyer"}
+    assert (COMPANY, "Northwind Group") in {(f.type, f.text) for f in fs}
+
+
 @pytest.mark.parametrize(
     "text,term",
     [
@@ -867,6 +1016,66 @@ def test_a_part_of_a_job_title_is_no_name(engine):
     t = "NORTHWIND TRADING B.V.\nJANE SMITH\nManaging Director"
     title = t.index("Managing Director")
     assert not [f for f in engine.analyze(t) if f.end > title]
+
+
+# Re-review, regressions 3 and 4: what the model swallows from the next line names nobody either:
+# a heading that refers to a part of the contract, a label, or a label with its code.
+@pytest.mark.parametrize(
+    "text,piece",
+    [
+        (
+            "Northwind Trading B.V.\nSCHEDULE 1\n\nThe Supplier shall deliver the Goods.",
+            "SCHEDULE 1",
+        ),
+        ("Northwind Trading B.V.\nEXHIBIT A\n\nThe Supplier shall deliver the Goods.", "EXHIBIT A"),
+        ("Name: Jane Smith\nJane Smith\nCountry: Netherlands", "Country"),
+        ("Northwind Trading B.V.\nBank: ABN AMRO\nAccount: 12345678", "Bank"),
+        (
+            (
+                "Account name: Elbtal Rechenzentrum GmbH\nIBAN: DE63100700006745119824\nBIC: DEUTDEBB\n"
+                "7.5 For invoicing purposes, the VAT number of the Processor is DE123456789."
+            ),
+            "BIC: DEUTDEBB",
+        ),
+    ],
+)
+def test_a_heading_or_label_on_the_next_line_is_no_name(engine, text, piece):
+    start = text.index(piece)
+    assert not [
+        f
+        for f in engine.analyze(text)
+        if f.type in {PERSON, COMPANY} and f.start < start + len(piece) and start < f.end
+    ]
+
+
+def test_a_clause_number_or_code_on_the_next_line_is_no_name(engine):
+    # The model reads "DE63100700006745119824\nBIC: DEUTDEBB\n7.5" as one person.
+    t = (
+        "Account name: Elbtal Rechenzentrum GmbH\nIBAN: DE63100700006745119824\nBIC: DEUTDEBB\n"
+        "7.5 For invoicing purposes, the VAT number of the Processor is DE123456789."
+    )
+    assert not of_type(engine.analyze(t), PERSON)
+
+
+def test_a_one_word_name_in_capitals_on_the_next_line_stays_found(engine, monkeypatch):
+    # A word in capitals is a code only after a label ("BIC: DEUTDEBB"); on a line of its own it
+    # may be a name. The model's reading is given here, as it seldom gives this one by itself.
+    t = "NORTHWIND TRADING B.V.\nACME\nDirector"
+    read = Finding(COMPANY, 0, t.index("\nDirector"), "NORTHWIND TRADING B.V.\nACME", 0.85, "model")
+    monkeypatch.setattr(engine, "_presidio_findings", lambda text: [read])
+    found = {(f.type, f.text, f.source) for f in engine.analyze(t)}
+    assert (COMPANY, "ACME", "model") in found
+
+
+def test_the_jurisdiction_after_parties_with_towns_stays_visible(engine):
+    # Re-review, Important 1: "Frankfurt" was a party, and through ruling R21 the jurisdiction too.
+    t = (
+        "This Agreement is made between Kronberg Medical AG, Frankfurt and Larchfield Foods"
+        " Limited, London. Each party agrees that the courts of Frankfurt shall have exclusive"
+        " jurisdiction."
+    )
+    found = texts(engine.analyze(t), t)
+    assert found == {"Kronberg Medical AG", "Larchfield Foods Limited"}
 
 
 # Ruling R21: the model takes a short name for a place; such a place is hidden as the name it is
