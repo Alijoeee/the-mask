@@ -77,10 +77,12 @@ _MAGNITUDE = "(?:" + _SPACE + r"?(?i:thousand|million|billion|trillion|mln|mio|m
 
 # A number in words, from "one" up: "twenty-five thousand", "two hundred and fifty thousand".
 # Tens and teens are tried before ones, so that "seventy" and "seventeen" are not read as "seven".
+# A hyphen is only ever the gap between two words, so "twenty-one" can be read in one way only: with
+# two readings, a long run of such words took exponential time to match.
 _ONES = "one|two|three|four|five|six|seven|eight|nine"
 _TEENS = "ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
 _TENS = "twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
-_BELOW_HUNDRED = _any_of("(?:" + _TENS + ")(?:-(?:" + _ONES + "))?", _TEENS, _ONES)
+_BELOW_HUNDRED = _any_of(_TENS, _TEENS, _ONES)
 _WORD_GAP = _any_of(_SPACE + "+(?:and" + _SPACE + "+)?", "-")
 _NUMBER_PART = _any_of("hundred|thousand|million|billion", _BELOW_HUNDRED)
 _NUMBER_WORDS = r"(?i:\b" + _BELOW_HUNDRED + "(?:" + _WORD_GAP + _NUMBER_PART + r")*\b)"
@@ -452,7 +454,10 @@ class RegistrationNumberRecognizer(CheckedPatternRecognizer):
 
 # A BIC: bank (4 letters), country (2 letters), location (2 letters or digits), maybe a branch (3).
 _BIC = r"(?<![A-Za-z0-9])[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?(?![A-Za-z0-9])"
-_BIC_LABEL = re.compile(r"\b" + _any_case("bic", "swift", "bank" + _SPACE + "+identifier") + r"\b")
+# Its label, on the same line and directly before it: "BIC:", "SWIFT code", "BIC/SWIFT (code):".
+_BIC_NAME = _any_case("bic", "swift", "bank" + _SPACE + "+identifier")
+_BIC_WORDS = r"\b" + _BIC_NAME + r"(?:[ /()]*" + _any_case("bic", "swift", "code") + r"\)?)*"
+_BIC_LABEL = re.compile(_BIC_WORDS + _LABEL_TO_VALUE + r"\Z")
 
 
 class BicRecognizer(CheckedPatternRecognizer):
@@ -460,7 +465,8 @@ class BicRecognizer(CheckedPatternRecognizer):
 
     In form, many upper-case contract words are BICs: SUPPLIER is bank SUPP in Liechtenstein, and
     TERMINATION a branch in India. So a valid code also needs one of these: schwifty's bank
-    registry knows it, it has a digit (no word has one), or "BIC" or "SWIFT" comes shortly before.
+    registry knows it, it has a digit (no word has one), or its label ("BIC:", "SWIFT") comes
+    directly before it on the same line.
     """
 
     def __init__(self) -> None:
@@ -478,15 +484,19 @@ class BicRecognizer(CheckedPatternRecognizer):
         return 0.0
 
 
+# Account numbers and sort codes come directly after their label, on the same line.
 _ACCOUNT_SEP = "[" + _SPACE_CHARS + r"\-]?"
-_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)[^\n\d]{0,20}"
+_ACCOUNT_NUMBER_WORD = "(?:" + _SPACE + r"+(?i:number|no|nr)\b\.?)?"
+_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
 _ACCOUNT_DIGITS = r"(?P<value>\d(?:" + _ACCOUNT_SEP + r"\d){5,17})(?!\d)"
-_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)[^\n\d]{0,10}"
+_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)" + _LABEL_TO_VALUE
 _SORT_CODE_DIGITS = r"(?P<value>\d{2}" + _ACCOUNT_SEP + r"\d{2}" + _ACCOUNT_SEP + r"\d{2})(?!\d)"
+# A date written with hyphens (01-03-2026, 2026-03-01) is not an account number.
+_HYPHENATED_DATE = re.compile(r"\d{1,2}-\d{1,2}-\d{4}|\d{4}-\d{1,2}-\d{1,2}")
 
 
 class AccountNumberRecognizer(CheckedPatternRecognizer):
-    """Bank account numbers and sort codes, found by the words before them.
+    """Bank account numbers and sort codes, found by the label directly before them.
 
     "Account number: 12345678" · "A/C 87654321" · "Sort code: 12-34-56". An IBAN on an account
     line is left to Presidio's IBAN recognizer, which checks it.
@@ -500,6 +510,9 @@ class AccountNumberRecognizer(CheckedPatternRecognizer):
                 Pattern("Sort code", _SORT_CODE_LABEL + _SORT_CODE_DIGITS, 0.7),
             ],
         )
+
+    def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
+        return 0.0 if _HYPHENATED_DATE.fullmatch(match["value"]) else pattern.score
 
 
 _BSN = "Dutch BSN"
@@ -618,18 +631,29 @@ class EmailAddressRecognizer(EmailRecognizer):
         return any(character.isalpha() for character in top_level_domain)
 
 
-# Top-level domains for a domain name written without "https://" or "www.": every two-letter
-# (country) domain and the common generic ones. Lower case only, so that a missing space after a
-# full stop ("the Goods.It shall") is not read as a domain in Italy.
+# Top-level domains for a domain name written without "https://" or "www.". Only known ones count,
+# in lower case, so that a full stop with no space after it ("the warehouse.of the Buyer", "the
+# Goods.It shall") is not read as a web address: generic domains, and those of the countries a
+# party is likely to be in.
 _TOP_LEVEL_DOMAINS = (
-    "com|net|org|info|biz|edu|gov|int|mil|eu|asia|app|dev|tech|online|site|shop|store|cloud"
-    "|digital|email|legal|law|company|group|global|world|services|solutions|consulting|partners"
-    "|finance|bank|insurance|capital|holdings|industries|international|london|berlin|amsterdam"
-    "|paris|example|[a-z]{2}"
+    "com|net|org|info|biz|eu|int|edu|gov|io|co|ai|example"
+    "|uk|de|nl|fr|ch|ie|tr|es|dk|se|pl|fi|pt|gr|cz|sk|hu|ro|bg|hr|si|lt|lv|ee|lu|mt|cy|li|rs|ru|ua"
+    "|ca|au|nz|jp|cn|hk|sg|kr|tw|br|mx|za|ae|il"
+)
+# Top-level domains that are also English words count only in a name written all in lower case:
+# "acme.it" is a web address, but "the Supplier.it shall" is a sentence with a space missing.
+_WORD_TOP_LEVEL_DOMAINS = (
+    "at|be|it|no|us|in|app|dev|tech|online|site|shop|store|cloud|digital|email|legal|law|company"
+    "|group|global|world|services|solutions|consulting|partners|finance|bank|insurance|capital"
 )
 _DOMAIN_LABEL = r"[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?"
+_DOMAIN_LABELS = _DOMAIN_LABEL + r"(?:\." + _DOMAIN_LABEL + r")*\."
 _HOST = (
-    _DOMAIN_LABEL + r"(?:\." + _DOMAIN_LABEL + r")*\.(?-i:" + _TOP_LEVEL_DOMAINS + r")(?![\w\-])"
+    _any_of(
+        "(?i:" + _DOMAIN_LABELS + ")(?-i:" + _TOP_LEVEL_DOMAINS + ")",
+        "(?-i:" + _DOMAIN_LABELS + "(?:" + _WORD_TOP_LEVEL_DOMAINS + "))",
+    )
+    + r"(?![\w\-])"
 )
 # Not part of a longer name, an e-mail address or a path.
 _DOMAIN_START = r"(?<![\w.@/\-])"

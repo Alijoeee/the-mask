@@ -2,8 +2,9 @@
 
 ``Engine.analyze`` turns the analyzer's results into ``Finding`` objects. Presidio's entity names
 become placeholder types, each finding says whether a pattern or the language model found it, and
-findings scored below ``MIN_SCORE`` are dropped. Overlapping findings are all kept: the analysis
-pipeline decides between them.
+findings scored below ``MIN_SCORE`` are dropped. Dates stay visible: so does a number that lies
+within one, such as 01.03.2026 read as an Italian phone number. Overlapping findings are all kept:
+the analysis pipeline decides between them.
 """
 
 from __future__ import annotations
@@ -74,7 +75,15 @@ _PRESIDIO_TYPES = {
 _ENTITY_TYPES = {t.value: t for t in PlaceholderType} | _PRESIDIO_TYPES
 
 # Dates and nationalities stay visible.
-_DROPPED_ENTITIES = frozenset({"DATE_TIME", "NRP"})
+_DATE = "DATE_TIME"
+_DROPPED_ENTITIES = frozenset({_DATE, "NRP"})
+
+# The types a numeric date can pass for: "01.03.2026" is a valid phone number in Italy and
+# "2026-03-01" one in Denmark. A finding of one of these types that lies within a date found by
+# Presidio's DateRecognizer is dropped, so that the date stays visible.
+_DATE_SHAPED_TYPES = frozenset(
+    {PlaceholderType.PHONE, _ID, PlaceholderType.AMOUNT, PlaceholderType.QUANTITY}
+)
 
 # Presidio's recognizers that ours replace: the e-mail and URL recognizers (patterns.py says why)
 # and the phone recognizer, which is set up again for PHONE_REGIONS.
@@ -134,10 +143,12 @@ class Engine:
 
     def _presidio_findings(self, text: str) -> list[Finding]:
         """What Presidio's analyzer finds, as findings; a value found twice is kept once."""
+        results = self._analyzer.analyze(text=text, language="en")
+        dates = [(r.start, r.end) for r in results if r.entity_type == _DATE]
         best: dict[tuple[PlaceholderType, int, int], Finding] = {}
-        for result in self._analyzer.analyze(text=text, language="en"):
+        for result in results:
             finding = self._finding(text, result)
-            if finding is None:
+            if finding is None or _within_a_date(finding, dates):
                 continue
             key = (finding.type, finding.start, finding.end)
             if key not in best or finding.score > best[key].score:
@@ -170,6 +181,13 @@ def _nlp_engine(model_name: str) -> NlpEngine:
         provider = NlpEngineProvider(conf_file=path)
     provider.nlp_configuration["models"] = [{"lang_code": "en", "model_name": model_name}]
     return provider.create_engine()
+
+
+def _within_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
+    """Whether ``finding`` is a number that lies within one of the ``dates`` (start, end)."""
+    return finding.type in _DATE_SHAPED_TYPES and any(
+        start <= finding.start and finding.end <= end for start, end in dates
+    )
 
 
 def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:

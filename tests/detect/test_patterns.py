@@ -5,6 +5,8 @@ A test that a recognizer does not fire runs that recognizer on its own, so that 
 recognizer in the same text cannot hide its mistake.
 """
 
+import time
+
 import pytest
 
 from themask.detect.engine import MIN_SCORE, PHONE_REGIONS, Engine
@@ -277,11 +279,26 @@ def test_bic(engine):
         ("BIC RABONL2U", "RABONL2U"),
         ("SWIFT: DEUTDEFF", "DEUTDEFF"),
         ("SWIFT code DEUTDEFF500", "DEUTDEFF500"),
+        ("BIC/SWIFT code: DEUTDEFF", "DEUTDEFF"),
+        ("BIC (SWIFT): DEUTDEFF", "DEUTDEFF"),
+        ("IBAN DE89 3704 0044 0532 0130 00, BIC DEUTDEFF", "DEUTDEFF"),
         ("Bank: HSBC UK, HSBCGB2L", "HSBCGB2L"),
     ],
 )
 def test_bic_in_more_forms(text, needle):
     assert found_by(BicRecognizer(), text) == {needle: 0.9}
+
+
+# A BIC's label counts only on its own line, directly before the code.
+HEADINGS_AFTER_A_BIC = (
+    "IBAN: NL91 ABNA 0417 1643 00\nBIC: ABNANL2A\nSUPPLIER: Northwind Trading B.V.\n"
+    "CUSTOMER: Acme Supplies Ltd"
+)
+
+
+def test_headings_after_a_bic_are_never_findings(engine):
+    assert not {"SUPPLIER", "CUSTOMER"} & {f.text for f in engine.analyze(HEADINGS_AFTER_A_BIC)}
+    assert found_by(BicRecognizer(), HEADINGS_AFTER_A_BIC) == {"ABNANL2A": 0.9}
 
 
 @pytest.mark.parametrize(
@@ -294,6 +311,8 @@ def test_bic_in_more_forms(text, needle):
         "ARBITRATION",
         "abnanl2a",
         "ABNAXX2A",
+        "SWIFT\nDEUTDEFF",
+        "the BIC of the SUPPLIER",
     ],
 )
 def test_bic_needs_a_real_one(text):
@@ -322,6 +341,11 @@ def test_account_numbers(engine, text, needle):
         "Account: NL91 ABNA 0417 1643 00",
         "12345678",
         "the account holder is Acme Supplies Ltd",
+        "the account holder, 12345678",
+        "taking into account the 01-03-2026 forecast",
+        "Account: 01-03-2026",
+        "account 2026-03-01",
+        "account\n12345678",
     ],
 )
 def test_account_number_needs_its_label(text):
@@ -519,7 +543,12 @@ def test_email_addresses(text, needle):
         ("(see https://acme.example/terms)", "https://acme.example/terms"),
         ("Visit www.acme.example, or call", "www.acme.example"),
         ("Visit acme.com for the terms", "acme.com"),
+        ("Visit Acme.com for the terms", "Acme.com"),
         ("http://shop.acme.co.uk/terms?lang=en", "http://shop.acme.co.uk/terms?lang=en"),
+        ("see northwind.example", "northwind.example"),
+        ("see acme.co.uk", "acme.co.uk"),
+        ("see acme.it/terms", "acme.it/terms"),
+        ("see https://www.acme.to/terms", "https://www.acme.to/terms"),
     ],
 )
 def test_web_addresses(engine, text, needle):
@@ -533,10 +562,17 @@ def test_web_addresses(engine, text, needle):
         "The Goods.It shall be delivered",
         "e.g. the Goods, i.e. all of them",
         "Acme Ltd. and Northwind B.V.",
+        # A missing space after a full stop: no top-level domain, or not one in this list, or a
+        # word that counts as one only in a name written all in lower case.
+        "the warehouse.of the Buyer",
+        "the Supplier.to the Buyer",
+        "the Goods.it shall be delivered",
+        "the Supplier.in good time",
     ],
 )
-def test_web_address_needs_a_whole_domain(text):
+def test_web_address_needs_a_whole_domain(engine, text):
     assert found_by(WebAddressRecognizer(), text) == {}
+    assert PlaceholderType.URL not in {f.type for f in engine.analyze(text)}
 
 
 # Numbers in their national form. Apart from the first two, Presidio's default regions (US, GB, DE,
@@ -621,6 +657,39 @@ def test_dates_stay_visible(engine):
     assert not [f for f in engine.analyze(t) if "2026" in f.text or "2027" in f.text]
 
 
+# Numeric dates pass for phone numbers (01.03.2026 in Italy, 2026-03-01 in Denmark) and for
+# account numbers; they must still stay visible.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "on 01.03.2026",  # dd.mm.yyyy
+        "on 01-03-2026",  # dd-mm-yyyy
+        "on 31-12-2026",
+        "on 2026-03-01",  # yyyy-mm-dd
+        "on 2026-12-31",
+        "on 01/03/2026",  # dd/mm/yyyy
+        "on 1 March 2026",
+        "on March 1, 2026",
+        "This Agreement commences on 2026-03-01 and ends on 01.09.2027.",
+        "taking into account the 01-03-2026 forecast",
+    ],
+)
+def test_dates_are_not_findings(engine, text):
+    assert engine.analyze(text) == []
+
+
+def test_a_phone_number_next_to_a_date_is_still_found(engine):
+    t = "call +31 20 123 4567 on 01.03.2026"
+    assert texts_of(engine, t, PlaceholderType.PHONE) == {"+31 20 123 4567"}
+
+
+def test_long_runs_of_number_words_are_quick(engine):
+    text = "-".join(["twenty", "one"] * 20)  # 40 hyphenated number words
+    start = time.perf_counter()
+    engine.analyze(text)
+    assert time.perf_counter() - start < 1.0
+
+
 @pytest.mark.parametrize(
     "text,needle,placeholder_type",
     [
@@ -651,11 +720,15 @@ def test_four_level_clause_numbers_stay_visible(engine, text):
     [
         "product code A1234",  # was a US driver's licence
         "code AB1234563",  # was a US DEA (medical licence) number
-        "bank reference 123456789012",  # was a US bank account number
     ],
 )
-def test_codes_are_not_ids(engine, text):
-    assert ID not in {f.type for f in engine.analyze(text)}
+def test_codes_are_not_findings(engine, text):
+    assert engine.analyze(text) == []
+
+
+def test_a_bank_reference_is_not_an_id(engine):
+    # Was a US bank account number. As a bare number of 1,000 and more it is still an amount.
+    assert ID not in {f.type for f in engine.analyze("bank reference 123456789012")}
 
 
 def test_ip_addresses_are_not_found(engine):
