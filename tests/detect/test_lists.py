@@ -52,6 +52,9 @@ NO_CASE = CaseLists([], [], set())
         *("Exhibit", "Clause", "Section", "Article", "Recital", "City", "Country", "Date"),
         *("Signature", "Title", "Name", "Attention", "Confidential", "Draft", "Page", "Total"),
         *("Subtotal", "Amount", "Price", "Site"),
+        # nationality and language adjectives (ruling R53): "English law", "Dutch courts"
+        *("English", "Dutch", "German", "French", "Turkish", "British", "Luxembourgish"),
+        *("Swiss", "Irish", "Polish", "Czech", "Hungarian", "Romanian", "Greek", "Chinese"),
     ],
 )
 def test_default_never_hide_holds(term):

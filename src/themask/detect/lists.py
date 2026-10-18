@@ -1,8 +1,9 @@
 """The owner's lists: what to hide in every document, and what never to hide.
 
 ``DEFAULT_NEVER_HIDE`` holds the words the AI needs to read a contract: the parties' roles, the
-document's own words, legal vocabulary, months, weekdays, currencies and countries, and the single
-words the language model takes for a company or a person in a contract ("VAT", "Schedule",
+document's own words, legal vocabulary, the public bodies a contract cites, months, weekdays,
+currencies, countries, nationality and language adjectives ("English law"), and the single words
+the language model takes for a company or a person in a contract ("VAT", "Schedule",
 "Signature"). ``UserLists`` are the owner's own lists, kept for every document in the data
 folder's ``lists.json``; ``CaseLists`` are the lists of one case, with the terms its contracts
 define ("the Supplier", "Business Day"), which stay visible too.
@@ -161,6 +162,21 @@ _COUNTRIES = _terms(
     EEA, Europe, Benelux, Scandinavia
     """
 )
+# Nationality and language adjectives, as "English law", "the Dutch courts" and "German-language"
+# use them (ruling R53). A person named by one of them ("Tom English") is still hidden where the
+# word stands as their name, but the group is marked for checking (rulings R42, R50).
+_NATIONALITIES = _terms(
+    """
+    English, British, Scottish, Welsh, Irish, Northern Irish, Dutch, Flemish, German, French,
+    Belgian, Luxembourgish, Swiss, Austrian, Italian, Spanish, Portuguese, Catalan, Basque, Greek,
+    Danish, Swedish, Norwegian, Finnish, Icelandic, Polish, Czech, Slovak, Slovenian, Croatian,
+    Serbian, Hungarian, Romanian, Bulgarian, Estonian, Latvian, Lithuanian, Maltese, Cypriot,
+    Turkish, Russian, Ukrainian, European, American, Canadian, Mexican, Brazilian, Argentinian,
+    Chilean, Australian, Chinese, Japanese, Korean, Indian, Pakistani, Singaporean, Malaysian,
+    Indonesian, Thai, Vietnamese, Arabic, Arab, Emirati, Saudi, Israeli, Hebrew, Egyptian,
+    Moroccan, Nigerian, Kenyan, South African, Latin, Mandarin, Cantonese, Hindi, Persian
+    """
+)
 # The single words the language model takes for a company or a person in a contract: labels,
 # headings and codes.
 _MISTAKEN_FOR_NAMES = _terms(
@@ -181,6 +197,7 @@ DEFAULT_NEVER_HIDE: frozenset[str] = (
     | _WEEKDAYS
     | _CURRENCIES
     | _COUNTRIES
+    | _NATIONALITIES
     | _MISTAKEN_FOR_NAMES
 )
 

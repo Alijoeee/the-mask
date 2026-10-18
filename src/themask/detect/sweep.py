@@ -74,8 +74,16 @@ def after_a_determiner(text: str, start: int) -> bool:
 
 
 def stands_as_a_name(text: str, start: int, end: int) -> bool:
-    """Whether ``text[start:end]``, a person's bare name, stands there as a name (ruling R50):
-    capitalised (its particles aside: "van der Berg"), and not after a determiner ("the Mill").
+    """Whether ``text[start:end]``, an occurrence of a person's bare name (see ``is_bare_name``),
+    stands there as that person's name (rulings R50, R52): every word of it but the surname's
+    particles is capitalised ("Price", "PRICE", "van der Berg"), and the word before it on its
+    line, particles aside, is none of the ``DETERMINERS`` ("the Price", "a Mill", "the van der
+    Berg file" are the words, not the names).
+
+    ``text`` is any text the occurrence was found in, a whole document's or one paragraph's
+    raw text, and ``start``-``end`` the occurrence's span in it. The sweep takes a bare name
+    only where this holds, and the leak check looks for one the same way, so the occurrences a
+    sweep left visible on purpose do not count as leaks.
     """
     words = [word for word in text[start:end].split() if word.casefold() not in NAME_PARTICLES]
     return all(word[:1].isupper() for word in words) and not after_a_determiner(text, start)

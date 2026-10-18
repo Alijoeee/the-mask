@@ -514,6 +514,27 @@ def test_a_case_entrys_bare_surname_stays_a_name(lists):
     assert masked(a) == "[PERSON_4] shall attend; the Price is fixed."
 
 
+def test_a_surname_that_is_a_nationality_is_checked(engine, lists):
+    # Ruling R53: "English" is a default word, so hiding it as Tom English's surname marks the
+    # group for checking (R42's attribution: one person found ends with it, no determiner).
+    t = (
+        "Tom English signs for the Supplier. This Agreement is governed by English law and the"
+        " parties submit to the English courts."
+    )
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        "[PERSON_1] signs for the Supplier. This Agreement is governed by [PERSON_1] law and the"
+        " parties submit to the English courts."
+    )
+    (person,) = a.groups
+    assert person.needs_check
+
+
+def test_a_nationality_without_a_person_of_that_name_stays(engine, lists):
+    a = analyze(one("This Agreement is governed by Dutch law."), engine, lists)
+    assert a.groups == []
+
+
 def test_a_rule_name_with_its_legal_form_keeps_its_end(engine, lists):
     # Ruling R45 (and R46 for the passport number): the model ran on into "Passport".
     t = "Name: Jane Doe, for Acme Supplies Ltd. Passport number: 534412786."
