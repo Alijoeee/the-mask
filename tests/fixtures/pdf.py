@@ -13,7 +13,8 @@ only an ``owner_password`` it is encrypted too but opens without one (the owner'
 guards permissions such as copying).
 
 ``hand_pdf`` writes a PDF whose objects are written out by hand, for what reportlab cannot write:
-text in a layer (optional content) and a font without a map to Unicode.
+text in layers (optional content), in a form XObject of a layer, and in a font without a map to
+Unicode.
 """
 
 from __future__ import annotations
@@ -119,43 +120,67 @@ def make_pdf(tmp_path: Path) -> MakePdf:
 
 # ---- PDFs written by hand --------------------------------------------------------------------
 
-LAYER = "Internal notes"  # the name of the layer /oc1 of a hand-written PDF
+LAYER = "Internal notes"  # the layer /oc1, which a test's ``layers`` can turn off
+SHOWN_LAYER = "Body"  # the layer /oc2, which no test turns off
 
-_COMMON = [
-    b"<< /Type /OCG /Name (%s) >>" % LAYER.encode(),  # 3: the layer /oc1
-    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",  # 4: /F1
-    # 5, 6 and 7: /F2, a font whose glyphs have no map to Unicode, so a reader gets their codes.
+_OBJECTS = [
+    b"<< /Type /OCG /Name (%s) >>" % LAYER.encode(),  # 3: /oc1
+    b"<< /Type /OCG /Name (%s) >>" % SHOWN_LAYER.encode(),  # 4: /oc2
+    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",  # 5: /F1
+    # 6, 7 and 8: /F2, a font whose glyphs have no map to Unicode, so a reader gets their codes.
     (
         b"<< /Type /Font /Subtype /Type0 /BaseFont /Codes /Encoding /Identity-H"
-        b" /DescendantFonts [6 0 R] >>"
+        b" /DescendantFonts [7 0 R] >>"
     ),
     (
         b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Codes /CIDSystemInfo"
-        b" << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 7 0 R"
+        b" << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R"
         b" /DW 500 >>"
     ),
     (
         b"<< /Type /FontDescriptor /FontName /Codes /Flags 4 /FontBBox [0 0 1000 1000]"
         b" /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>"
     ),
+    # 9 and 10: /md1 and /md2, the memberships of both layers that show their content when all
+    # of them are on, and when any of them is.
+    b"<< /Type /OCMD /OCGs [3 0 R 4 0 R] /P /AllOn >>",
+    b"<< /Type /OCMD /OCGs [3 0 R 4 0 R] /P /AnyOn >>",
 ]
-_RESOURCES = b"<< /Font << /F1 4 0 R /F2 5 0 R >> /Properties << /oc1 3 0 R >> >>"
+_FORM = 11  # the form XObject /Fx, whose own /OC puts it in the layer /oc1
+_RESOURCES = (
+    b"<< /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /Fx 11 0 R >>"
+    b" /Properties << /oc1 3 0 R /oc2 4 0 R /md1 9 0 R /md2 10 0 R >> >>"
+)
 
 
-def hand_pdf(path: Path, contents: Sequence[bytes], *, layers: bytes | None = None) -> Path:
+def hand_pdf(
+    path: Path,
+    contents: Sequence[bytes],
+    *,
+    layers: bytes | None = None,
+    form: bytes = b"",
+    catalog: bytes = b"",
+) -> Path:
     """Write a PDF with one A4 page for each content stream in ``contents``; returns ``path``.
 
-    The pages can use the fonts /F1 (Helvetica) and /F2 (glyph codes only) and the layer /oc1,
-    named ``LAYER``. ``layers`` is the default configuration of the layers (the /D dictionary of
-    the catalog's /OCProperties); without it the PDF has no layers.
+    The pages can use the fonts /F1 (Helvetica) and /F2 (glyph codes only), the layers /oc1
+    (``LAYER``) and /oc2 (``SHOWN_LAYER``), the memberships /md1 and /md2 of both, and the form
+    XObject /Fx, which draws ``form`` and belongs to /oc1. ``layers`` is the default
+    configuration of the layers (the /D dictionary of the catalog's /OCProperties); without it
+    the PDF has no layers. ``catalog`` is written into the catalog as it is.
     """
-    first = 3 + len(_COMMON)  # the number of the first page object
+    first = _FORM + 1  # the number of the first page object
     kids = b" ".join(b"%d 0 R" % (first + 2 * n) for n in range(len(contents)))
-    optional = b" /OCProperties << /OCGs [3 0 R] /D %s >>" % layers if layers else b""
+    optional = b" /OCProperties << /OCGs [3 0 R 4 0 R] /D %s >>" % layers if layers else b""
+    form_object = (
+        b"<< /Length %d /Type /XObject /Subtype /Form /BBox [0 0 595 842] /OC 3 0 R"
+        b" /Resources << /Font << /F1 5 0 R >> >> >>\nstream\n%s\nendstream" % (len(form), form)
+    )
     objects = [
-        b"<< /Type /Catalog /Pages 2 0 R%s >>" % optional,
+        b"<< /Type /Catalog /Pages 2 0 R%s%s >>" % (optional, catalog),
         b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, len(contents)),
-        *_COMMON,
+        *_OBJECTS,
+        form_object,
     ]
     for n, content in enumerate(contents):
         objects.append(

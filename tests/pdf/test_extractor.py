@@ -4,12 +4,14 @@ The brief's tests run on the corpus: supply-01 (five text pages, each with the r
 the footer "Page N of 5 · Confidential", and a pricing table on page 4), scanned-01 (pictures only)
 and mixed-01 (page 2 a picture). The corpus PDFs are typeset from the same contracts as their Word
 twins, so the paragraphs read from a PDF can be checked against the Word file's, one for one.
-Small PDFs made by ``make_pdf`` cover what the corpus does not have: bare page numbers, numbered
-headings at the tops of pages, scans with stamped page numbers, a PDF without any text, headings
-told by their weight, body text in 12 pt, paragraphs set close together, text drawn twice, lines
-that end in a hyphen, a table with text beside a short row, and PDFs that are locked or damaged.
-PDFs written by hand (``hand_pdf``) have text in a hidden layer and glyphs without Unicode.
-supply-01 typeset again with a watermark shows that rotated text is left out.
+Small PDFs made by ``make_pdf`` cover what the corpus does not have: bare page numbers and
+footers that number pages in other words, a running title in bold, numbered headings at the tops
+of pages, scans stamped with page or Bates numbers, a PDF without any text, headings told by their
+weight, body text in 12 pt, paragraphs set close together, text drawn twice, lines that end in a
+hyphen, a table with text beside a short row, a dense table, and PDFs that are locked or damaged.
+PDFs written by hand (``hand_pdf``) have text in layers, hidden or shown, nested in other marked
+content or in a form XObject, layers that cannot be read, and glyphs without Unicode. supply-01
+typeset again with a watermark shows that rotated text is left out.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import pytest
 
 from tests.fixtures.pdf import LAYER, PICTURE, Line, MakePdf, Page, Picture, Rule, hand_pdf
 from themask.errors import ProtectedFileError, ScannedPdfError, UnsupportedFileError
-from themask.pdf.extractor import SCANNED_PDF_MESSAGE, extract_blocks
+from themask.pdf.extractor import LAYERS_MESSAGE, SCANNED_PDF_MESSAGE, extract_blocks
 
 HEADER = "Northwind / Thamesgate \N{EM DASH} Supply Agreement"
 FOOTER = "Page 1 of 5 \N{MIDDLE DOT} Confidential"
@@ -35,6 +37,7 @@ LETTER_LABEL = re.compile(r"^\([a-z]\) ")  # "(a) ": Word numbers these items it
 NOTE = b"/OC /oc1 BDC BT /F1 10 Tf 72 700 Td (Hidden note: walk-away EUR 2,000,000) Tj ET EMC"
 CLAUSE = b"BT /F1 10 Tf 72 650 Td (Visible clause text.) Tj ET"
 CODES = b"BT /F2 10 Tf 72 700 Td <004E006F007200740068> Tj ET"
+LAYER_OFF = b"<< /Order [3 0 R 4 0 R] /OFF [3 0 R] >>"  # /oc1 off, /oc2 on
 
 
 def test_blocks_and_report(corpus: Path) -> None:
@@ -108,6 +111,43 @@ def test_bare_page_numbers_are_running_lines(make_pdf: MakePdf) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "footer", ["Pagina {n} van 3", "Sayfa {n} / 3", "Supply Agreement \N{EN DASH} {n}"]
+)
+def test_footers_that_number_their_pages_in_other_words(make_pdf: MakePdf, footer: str) -> None:
+    """A footer holding its page's own number numbers that page, whatever its words."""
+    pages: list[Page] = [
+        [
+            Line(120, f"Clause {n}. The Buyer shall pay within 30 days."),
+            Line(812, footer.format(n=n)),
+        ]
+        for n in (1, 2, 3)
+    ]
+    blocks, report = extract_blocks(make_pdf("footers.pdf", pages))
+    assert report.repeated_lines_removed == [footer.format(n=1)]
+    assert [b.text for b in blocks] == [
+        footer.format(n=1),
+        *(f"Clause {n}. The Buyer shall pay within 30 days." for n in (1, 2, 3)),
+    ]
+
+
+def test_a_running_title_in_bold_is_a_running_line(make_pdf: MakePdf) -> None:
+    """A title in 11 pt bold over 10 pt text is shaped like a heading, and repeats word for word."""
+    pages: list[Page] = [
+        [
+            Line(50, "NORTHWIND SUPPLY AGREEMENT", size=11, bold=True),
+            Line(120, f"Clause {n}. The Buyer shall pay within 30 days."),
+            Line(134, "The Supplier shall deliver the Goods to the warehouse of the Buyer."),
+            Line(812, f"Page {n} of 3"),
+        ]
+        for n in (1, 2, 3)
+    ]
+    blocks, report = extract_blocks(make_pdf("bold-title.pdf", pages))
+    assert report.repeated_lines_removed == ["NORTHWIND SUPPLY AGREEMENT", "Page 1 of 3"]
+    joined = "\n".join(b.text for b in blocks)
+    assert joined.count("NORTHWIND SUPPLY AGREEMENT") == 1 and joined.count("Page") == 1
+
+
 def test_a_line_on_one_page_only_is_no_running_line(make_pdf: MakePdf) -> None:
     pdf = make_pdf(
         "short.pdf", [[Line(60, "Letterhead"), Line(400, "Body"), Line(800, "Footnote")]]
@@ -144,8 +184,9 @@ def test_numbered_headings_at_the_tops_of_pages_are_kept(make_pdf: MakePdf) -> N
     ]
 
 
-def test_a_heading_is_never_a_running_line(make_pdf: MakePdf) -> None:
-    """ "Price page 1" to "Price page 3" would repeat as a page number does; they are headings."""
+def test_numbered_headings_with_the_word_page_are_kept(make_pdf: MakePdf) -> None:
+    """A line shaped like a heading is compared whole: "Price page 1" to "Price page 3" would
+    repeat as page numbers do, but the three differ."""
     pages: list[Page] = [
         [
             Line(84, f"Price page {n}", size=12, bold=True),
@@ -210,6 +251,36 @@ def test_a_stamped_scan_between_text_pages_is_listed(make_pdf: MakePdf) -> None:
     ]
 
 
+def _bates(layout: str) -> list[Page]:
+    """Like ``_stamped``, but each page stamped with a Bates number, "NW000123" and on."""
+    pages: list[Page] = []
+    for n, kind in enumerate(layout, 1):
+        stamp = Line(812, f"NW{122 + n:06d}", size=9, x=450)
+        if kind == "s":
+            pages.append(Picture([stamp]))
+        else:
+            pages.append([Line(120, f"Clause {n}. The Buyer shall pay within 30 days."), stamp])
+    return pages
+
+
+def test_scans_stamped_with_bates_numbers_are_refused(make_pdf: MakePdf) -> None:
+    with pytest.raises(ScannedPdfError):
+        extract_blocks(make_pdf("bates.pdf", _bates("sss")))
+
+
+def test_a_scan_stamped_with_a_bates_number_between_text_pages_is_listed(
+    make_pdf: MakePdf,
+) -> None:
+    blocks, report = extract_blocks(make_pdf("bates.pdf", _bates("tst")))
+    assert report.image_only_pages == [2]
+    assert [(b.text, b.page) for b in blocks] == [
+        ("Clause 1. The Buyer shall pay within 30 days.", 1),
+        ("NW000123", 1),
+        ("Clause 3. The Buyer shall pay within 30 days.", 3),
+        ("NW000125", 3),
+    ]
+
+
 def test_a_pdf_of_glyph_codes_only_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ScannedPdfError):
         extract_blocks(hand_pdf(tmp_path / "codes.pdf", [CODES]))
@@ -221,11 +292,19 @@ def test_a_page_of_glyph_codes_is_listed_and_left_out(tmp_path: Path) -> None:
     assert report.image_only_pages == [2]
 
 
-def test_a_few_glyph_codes_in_a_line_are_left_out(tmp_path: Path) -> None:
-    content = b"BT /F1 10 Tf 72 700 Td (Payment within thirty days) Tj /F2 10 Tf <0001> Tj ET"
+@pytest.mark.parametrize(
+    ("codes", "note"),
+    [
+        (b"<0001>", "page 1: 1 unreadable character left out"),
+        (b"<000100020003>", "page 1: 3 unreadable characters left out"),
+    ],
+)
+def test_a_few_glyph_codes_in_a_line_are_left_out(tmp_path: Path, codes: bytes, note: str) -> None:
+    content = b"BT /F1 10 Tf 72 700 Td (Payment within thirty days) Tj /F2 10 Tf %s Tj ET" % codes
     blocks, report = extract_blocks(hand_pdf(tmp_path / "some-codes.pdf", [content]))
     assert [b.text for b in blocks] == ["Payment within thirty days"]
     assert report.image_only_pages == []
+    assert report.notes == [note]
 
 
 # ---- hidden layers ---------------------------------------------------------------------------
@@ -251,6 +330,75 @@ def test_text_in_a_layer_that_is_shown_is_read(tmp_path: Path) -> None:
         "Visible clause text.",
     ]
     assert report.hidden_layers == []
+
+
+def test_hidden_text_nested_in_marked_content_is_left_out(tmp_path: Path) -> None:
+    """A tagged PDF puts its text in /P sequences, inside the layer's /OC sequence."""
+    content = (
+        b"/OC /oc1 BDC /P <</MCID 0>> BDC BT /F1 10 Tf 72 700 Td (Hidden nested note EUR"
+        b" 2,000,000) Tj ET EMC BT /F1 10 Tf 72 680 Td (Hidden after nested EUR 3,000,000) Tj ET"
+        b" EMC\n" + CLAUSE
+    )
+    blocks, report = extract_blocks(hand_pdf(tmp_path / "nested.pdf", [content], layers=LAYER_OFF))
+    assert [b.text for b in blocks] == ["Visible clause text."]
+    assert report.hidden_layers == [LAYER]
+
+
+def test_a_form_in_a_hidden_layer_is_left_out(tmp_path: Path) -> None:
+    form = b"BT /F1 10 Tf 72 700 Td (Hidden XObject note EUR 4,000,000) Tj ET"
+    pdf = hand_pdf(tmp_path / "form.pdf", [b"/Fx Do\n" + CLAUSE], layers=LAYER_OFF, form=form)
+    blocks, report = extract_blocks(pdf)
+    assert [b.text for b in blocks] == ["Visible clause text."]
+    assert report.hidden_layers == [LAYER]
+
+
+def test_text_in_a_shown_layer_is_kept_while_another_is_hidden(tmp_path: Path) -> None:
+    """No content of the hidden layer is left out, so the report names no layer."""
+    shown = b"/OC /oc2 BDC BT /F1 10 Tf 72 700 Td (Body clause in the shown layer.) Tj ET EMC"
+    plain = b"BT /F1 10 Tf 72 700 Td (Page two text outside any layer.) Tj ET"
+    blocks, report = extract_blocks(
+        hand_pdf(tmp_path / "shown.pdf", [shown, plain], layers=LAYER_OFF)
+    )
+    assert [(b.text, b.page) for b in blocks] == [
+        ("Body clause in the shown layer.", 1),
+        ("Page two text outside any layer.", 2),
+    ]
+    assert (report.image_only_pages, report.hidden_layers) == ([], [])
+
+
+@pytest.mark.parametrize(("membership", "read"), [("md1", False), ("md2", True)])
+def test_text_in_a_membership_of_layers(tmp_path: Path, membership: str, read: bool) -> None:
+    """/md1 shows its content when both layers are on (not by default), /md2 when either is."""
+    note = b"/OC /%s BDC BT /F1 10 Tf 72 700 Td (Member note.) Tj ET EMC\n" % membership.encode()
+    pdf = hand_pdf(tmp_path / "member.pdf", [note + CLAUSE], layers=LAYER_OFF)
+    blocks, report = extract_blocks(pdf)
+    assert [b.text for b in blocks] == ["Member note.", "Visible clause text."][not read :]
+    assert report.hidden_layers == ([] if read else [LAYER])
+
+
+@pytest.mark.parametrize(
+    ("content", "catalog", "layers"),
+    [
+        (b"/OC /nosuch BDC " + CLAUSE + b" EMC", b"", LAYER_OFF),  # names no property list
+        (CLAUSE, b" /OCProperties << /OCGs [3 0 R 4 0 R] >>", None),  # no default configuration
+        (CLAUSE, b"", b"<< /OFF 3 0 R >>"),  # /OFF not an array
+    ],
+    ids=["unknown-property", "no-configuration", "off-not-an-array"],
+)
+def test_layers_that_cannot_be_read_refuse_the_pdf(
+    tmp_path: Path, content: bytes, catalog: bytes, layers: bytes | None
+) -> None:
+    pdf = hand_pdf(tmp_path / "layers.pdf", [content], layers=layers, catalog=catalog)
+    with pytest.raises(UnsupportedFileError) as refused:
+        extract_blocks(pdf)
+    assert (
+        refused.value.user_message
+        == LAYERS_MESSAGE
+        == (
+            "This PDF uses layers that The MASK cannot separate from the visible text. Please"
+            " flatten it (for example print it to a new PDF) and try again."
+        )
+    )
 
 
 # ---- locked and damaged files ----------------------------------------------------------------
@@ -486,7 +634,12 @@ def test_a_watermark_and_a_note_up_the_margin_are_left_out(
         bare_amount=planned.bare_amount,
     )
     pdf_writer.write_pdf(spec, tmp_path / "draft.pdf")
-    assert extract_blocks(tmp_path / "draft.pdf") == extract_blocks(corpus / "supply-01.pdf")
+    blocks, report = extract_blocks(tmp_path / "draft.pdf")
+    clean_blocks, clean_report = extract_blocks(corpus / "supply-01.pdf")
+    assert blocks == clean_blocks
+    assert report.notes == [f"page {n}: rotated text left out" for n in range(1, 6)]
+    report.notes = []
+    assert report == clean_report
 
 
 # ---- tables ----------------------------------------------------------------------------------
@@ -544,6 +697,32 @@ def test_text_beside_a_short_row_of_a_table_is_read(make_pdf: MakePdf) -> None:
         ),
         ("paragraph", "Agreed by G. Baker"),
         ("paragraph", "A paragraph under the table."),
+    ]
+
+
+def test_dense_tables_are_read_cell_by_cell(make_pdf: MakePdf) -> None:
+    """Five pages, each a ruled table of 60 rows of 10 cells over a line of text."""
+    rows, columns, top, left, height, width = 60, 10, 60, 30, 12, 53.5
+    rules = [
+        Rule(left, top + r * height, left + columns * width, top + r * height) for r in range(61)
+    ]
+    rules += [Rule(left + k * width, top, left + k * width, top + rows * height) for k in range(11)]
+    cells = [
+        Line(top + r * height + 9, f"EUR {r * 10 + k:,}.00", size=7, x=left + k * width + 2)
+        for r in range(rows)
+        for k in range(columns)
+    ]
+    words = ("one", "two", "three", "four", "five")
+    pages: list[Page] = [[*rules, *cells, Line(802, f"Total of part {word}.")] for word in words]
+    pdf = make_pdf("dense.pdf", pages)
+    started = time.perf_counter()
+    blocks, _ = extract_blocks(pdf)
+    assert time.perf_counter() - started < 5
+    expected = [[f"EUR {r * 10 + k:,}.00" for k in range(columns)] for r in range(rows)]
+    assert [(b.kind, b.rows if b.kind == "table" else b.text) for b in blocks] == [
+        item
+        for word in words
+        for item in (("table", expected), ("paragraph", f"Total of part {word}."))
     ]
 
 

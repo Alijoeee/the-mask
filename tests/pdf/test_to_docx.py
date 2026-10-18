@@ -3,7 +3,7 @@
 The brief's test checks that every secret of supply-01 reaches the Word file, and runs on each of
 the six text PDFs that have a Word twin. The others check how the blocks are written (headings,
 paragraphs, a table with a bold first row), where a note stands for a page with nothing to read
-(a picture, also one stamped with its page number), that nothing but text comes from the PDF and
+(a picture, also one stamped with a page or a Bates number), that nothing but text comes from the PDF and
 none of python-docx's own properties stay, and that characters a Word file cannot hold are left
 out.
 """
@@ -89,6 +89,25 @@ def test_a_note_stands_for_a_scan_stamped_with_its_page_number(
         "Clause 1 of the Agreement.",
         IMAGE_PAGE_NOTE.format(page=2),
         "Clause 3 of the Agreement.",
+    ]
+
+
+def test_a_note_stands_for_a_scan_stamped_with_a_bates_number(
+    make_pdf: MakePdf, tmp_path: Path
+) -> None:
+    pages = [
+        [Line(100, "Clause 1 of the Agreement."), Line(812, "NW000123", size=9, x=450)],
+        Picture([Line(812, "NW000124", size=9, x=450)]),
+        [Line(100, "Clause 3 of the Agreement."), Line(812, "NW000125", size=9, x=450)],
+    ]
+    out = tmp_path / "bates.docx"
+    pdf_to_docx(make_pdf("bates.pdf", pages), out)
+    assert [p.text for p in docx.Document(str(out)).paragraphs] == [
+        "Clause 1 of the Agreement.",
+        "NW000123",
+        IMAGE_PAGE_NOTE.format(page=2),
+        "Clause 3 of the Agreement.",
+        "NW000125",
     ]
 
 
