@@ -1,14 +1,22 @@
-"""The detection engine: Presidio's analyzer over spaCy's English model, with our recognizers.
+"""The detection engine: Presidio's analyzer over spaCy's English model, with our recognizers and
+the contract rules.
 
 ``Engine.analyze`` turns the analyzer's results into ``Finding`` objects. Presidio's entity names
-become placeholder types, each finding says whether a pattern or the language model found it, and
-findings scored below ``MIN_SCORE`` are dropped. Dates stay visible: so does a number that lies
-within one, such as 01.03.2026 read as an Italian phone number. Overlapping findings are all kept:
-the analysis pipeline decides between them.
+become placeholder types, each finding says whether a pattern, the language model or a contract rule
+found it, and findings scored below ``MIN_SCORE`` are dropped. Dates stay visible: so does a number
+that lies within one, such as 01.03.2026 read as an Italian phone number.
+
+The contract rules (``contract_rules``) check the language model: a place it finds is an address
+only next to an address the rules found ("the laws of the Netherlands" stays visible), a company it
+finds with neither a legal form nor a rule behind it is marked for checking, a job title is no
+name, and a finding never runs from one line into the next. Overlapping findings are kept, for the
+analysis pipeline to decide between, except that a rule's finding replaces the model's on the same
+span.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import resources
 from pathlib import Path
 
@@ -21,11 +29,17 @@ from presidio_analyzer.predefined_recognizers import (
     UkNinoRecognizer,
 )
 
+from themask.detect.contract_rules import apply_rules, is_job_title
 from themask.detect.patterns import contract_recognizers
 from themask.model import Finding, FindingSource, PlaceholderType
+from themask.textnorm import has_legal_form
 
 # A finding scored below this is too unlikely to show the owner.
 MIN_SCORE = 0.3
+
+# A company the language model finds without a legal form and without a contract rule behind it
+# keeps at most this score: it is hidden, but marked for the owner to check.
+UNCONFIRMED_COMPANY_SCORE = 0.6
 
 # The countries whose phone numbers are found in their national form too ("020 123 4567"); a
 # number written with its country code ("+31 20 123 4567") is found whatever its country.
@@ -49,6 +63,9 @@ PHONE_REGIONS = (
 )
 
 _ID = PlaceholderType.ID
+_PERSON = PlaceholderType.PERSON
+_COMPANY = PlaceholderType.COMPANY
+_ADDRESS = PlaceholderType.ADDRESS
 
 # Presidio's entities as placeholder types. Our own recognizers report placeholder types already.
 # An entity that is in neither is an identifier of some kind, and becomes an ID.
@@ -109,6 +126,12 @@ _TRAILING_PUNCTUATION = frozenset(
 )
 _CLOSING_BRACKETS = {")": "(", "]": "[", "}": "{"}
 
+# A place the model finds counts as part of an address the rules found when it overlaps it or is
+# at most this many characters away ("Keizersgracht 123" in "Keizersgracht 123, 1015 CJ ...").
+_PLACE_GAP = 2
+# A part of a model finding that stands on a line of its own needs this many visible characters.
+_MIN_PART_CHARACTERS = 2
+
 
 class Engine:
     """Finds the confidential values in a text: patterns, checksums and an English language model.
@@ -134,9 +157,11 @@ class Engine:
     def analyze(self, text: str) -> list[Finding]:
         """Every value in ``text`` that may be confidential, in text order.
 
-        Overlapping findings are all kept, for the analysis pipeline to decide between.
+        The analyzer's findings and the contract rules' are merged as the module docstring says.
+        Overlapping findings are kept, for the analysis pipeline to decide between.
         """
-        findings = self._presidio_findings(text)
+        rules, _terms = apply_rules(text)
+        findings = rules + _checked_by_rules(text, self._presidio_findings(text), rules)
         return sorted(
             (f for f in findings if f.score >= MIN_SCORE), key=lambda f: (f.start, f.end, f.type)
         )
@@ -181,6 +206,91 @@ def _nlp_engine(model_name: str) -> NlpEngine:
         provider = NlpEngineProvider(conf_file=path)
     provider.nlp_configuration["models"] = [{"lang_code": "en", "model_name": model_name}]
     return provider.create_engine()
+
+
+def _checked_by_rules(text: str, findings: list[Finding], rules: list[Finding]) -> list[Finding]:
+    """The analyzer's ``findings`` that stand next to the contract ``rules``' findings.
+
+    A model finding is cut into its lines, and a part that is a heading or a label goes. Then a
+    model finding on the same span as a rule's goes (the rule's stands), and so does a job title
+    found as a name, and a place that is no part of an address the rules found. A company with
+    neither a legal form nor a rule's finding over it is marked for checking.
+    """
+    rule_spans = {(rule.start, rule.end) for rule in rules}
+    addresses = [rule for rule in rules if rule.type == _ADDRESS]
+    checked = []
+    for finding in findings:
+        for part in _lines_of(text, finding):
+            if part.source == "model" and (
+                (part.start, part.end) in rule_spans
+                or _is_job_title_name(part)
+                or (part.type == _ADDRESS and not _at(part, addresses))
+            ):
+                continue  # the rule's finding stands; a job title; "the laws of the Netherlands"
+            checked.append(_marked_if_unconfirmed(part, rules))
+    return checked
+
+
+def _lines_of(text: str, finding: Finding) -> list[Finding]:
+    """A model finding cut at its line breaks, keeping each part with at least two visible
+    characters that is no heading or label: the model can swallow the heading on the next line
+    ("Northwind Trading B.V.\\nCUSTOMER") or the label of the next line ("...\\nAttention:").
+    """
+    if finding.source != "model" or "\n" not in finding.text:
+        return [finding]
+    parts = []
+    offset = finding.start
+    for line in finding.text.split("\n"):
+        stripped = line.strip()
+        start = offset + line.find(stripped)
+        end = start + len(stripped)
+        offset += len(line) + 1
+        visible = sum(not character.isspace() for character in stripped)
+        if visible >= _MIN_PART_CHARACTERS and not _is_heading_or_label(text, start, end):
+            parts.append(replace(finding, start=start, end=end, text=stripped))
+    return parts
+
+
+def _is_heading_or_label(text: str, start: int, end: int) -> bool:
+    """Whether ``text[start:end]`` labels a line ("Attention:") or is a heading in capitals that
+    fills its line ("CUSTOMER"), and so no name.
+    """
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    rest_of_line = text[end : len(text) if line_end < 0 else line_end]
+    if rest_of_line.lstrip(" \t").startswith(":"):
+        return True
+    part = text[start:end]
+    fills_its_line = not text[line_start:start].strip() and not rest_of_line.strip()
+    return fills_its_line and part.isupper() and not has_legal_form(part)
+
+
+def _is_job_title_name(finding: Finding) -> bool:
+    """Whether the model took a job title for a name: "Managing Director", "Legal Counsel"."""
+    return (
+        finding.source == "model"
+        and finding.type in {_PERSON, _COMPANY}
+        and is_job_title(finding.text)
+    )
+
+
+def _at(place: Finding, addresses: list[Finding]) -> bool:
+    """Whether ``place`` overlaps one of the ``addresses`` or is at most _PLACE_GAP away."""
+    return any(
+        place.start - address.end <= _PLACE_GAP and address.start - place.end <= _PLACE_GAP
+        for address in addresses
+    )
+
+
+def _marked_if_unconfirmed(finding: Finding, rules: list[Finding]) -> Finding:
+    """``finding``, its score capped when it is a model company that nothing confirms: no legal
+    form in it and no rule's finding over it.
+    """
+    if finding.source != "model" or finding.type != _COMPANY or has_legal_form(finding.text):
+        return finding
+    if any(rule.start < finding.end and finding.start < rule.end for rule in rules):
+        return finding
+    return replace(finding, score=min(finding.score, UNCONFIRMED_COMPANY_SCORE))
 
 
 def _within_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
