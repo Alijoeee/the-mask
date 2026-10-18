@@ -35,7 +35,7 @@ from themask.docx.reader import DocText, extract_text, paragraph_nodes
 from themask.docx.restorer import replace_in_paragraph
 from themask.instruction import BANNER_TEXT
 from themask.model import MaskPlan, Replacement
-from themask.textnorm import normalize
+from themask.textnorm import flexible_pattern, normalize
 
 W = NS["w"]
 R = NS["r"]
@@ -535,6 +535,210 @@ def test_bookmarks_named_after_a_value_are_renamed_with_their_references(
     assert b"acme" not in pkg.raw("word/document.xml").lower()
 
 
+def test_hidden_bookmarks_dangling_anchors_and_glued_references_are_renamed(
+    make_docx: MakeDocx,
+) -> None:
+    # Ruling R27. A bookmark Word hides ("_...") stays hidden; an anchor that names no bookmark,
+    # and an instruction word with the value glued to other letters, where no pattern finds it,
+    # are renamed like a bookmark, and the same old name always gets the same new one.
+    body = (
+        '<w:p><w:bookmarkStart w:id="0" w:name="_RefAcme"/>'
+        '<w:r><w:t>Acme Supplies Ltd</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p>'
+        '<w:p><w:hyperlink w:anchor="_RefAcme"><w:r><w:t>above</w:t></w:r></w:hyperlink>'
+        '<w:hyperlink w:anchor="AcmeOld"><w:r><w:t xml:space="preserve"> and the old one</w:t>'
+        "</w:r></w:hyperlink></w:p>"
+        '<w:p><w:fldSimple w:instr=" REF AcmeOld \\h "><w:r><w:t>old</w:t></w:r></w:fldSimple></w:p>'
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> PAGEREF AcmeArchive \\h </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    # As the sweep finds it: "Acme" on its own, not inside "AcmeArchive".
+    plan = MaskPlan(
+        [
+            Replacement(m.start(), m.end(), "[COMPANY_1]")
+            for m in flexible_pattern("Acme").finditer(dt.text)
+        ]
+    )
+    assert len(plan.replacements) == 1
+    report = apply_mask(pkg, dt, plan)
+    assert report == MaskReport(
+        replaced=1, hyperlinks_unwrapped=0, instr_fields_masked=2, bookmarks_renamed=1
+    )
+    root = pkg.xml("word/document.xml")
+    assert [b.get(f"{{{W}}}name") for b in root.iter(f"{{{W}}}bookmarkStart")] == ["_bm1"]
+    assert [h.get(f"{{{W}}}anchor") for h in root.iter(f"{{{W}}}hyperlink")] == ["_bm1", "bm2"]
+    assert root.find(".//w:fldSimple", NS).get(f"{{{W}}}instr") == " REF bm2 \\h "
+    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" PAGEREF bm3 \\h "]
+    assert b"acme" not in pkg.raw("word/document.xml").lower()
+
+
+def test_field_names_switches_and_formats_are_never_renamed(make_docx: MakeDocx) -> None:
+    # "Link", "Page" and "Format" are in HYPERLINK, PAGEREF, NUMPAGES and MERGEFORMAT, glued to
+    # other letters; those words name the field and its format, not the companies. After REF,
+    # though, a word names a bookmark whatever it spells: the bookmark "Link" is renamed, and
+    # the reference to it follows.
+    simple = (
+        "<w:p><w:fldSimple w:instr=' HYPERLINK \\l \"_Ref1\" '><w:r><w:t>a</w:t></w:r></w:fldSimple>"
+        "<w:fldSimple w:instr=' PAGEREF _Ref1 \\h \\* MERGEFORMAT '><w:r><w:t>b</w:t></w:r>"
+        '</w:fldSimple><w:fldSimple w:instr=" REF Link \\h "><w:r><w:t>c</w:t></w:r></w:fldSimple>'
+        "</w:p>"
+    )
+    bookmark = (
+        '<w:p><w:bookmarkStart w:id="0" w:name="Link"/><w:r><w:t>Terms</w:t></w:r>'
+        '<w:bookmarkEnd w:id="0"/></w:p>'
+    )
+    body = (
+        p("Link Group, Format Ltd and Page Industries sign.")
+        + bookmark
+        + simple
+        + field_code(" NUMPAGES ")
+    )
+    pkg = DocxPackage.open(make_docx(body))
+    dt = extract_text(pkg)
+    plan = plan_of(dt, {"Link": "[COMPANY_1]", "Format": "[COMPANY_2]", "Page": "[COMPANY_3]"})
+    report = apply_mask(pkg, dt, plan)
+    assert report == MaskReport(3, 0, 1, 1)
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//w:bookmarkStart", NS).get(f"{{{W}}}name") == "bm1"
+    assert [f.get(f"{{{W}}}instr") for f in root.iter(f"{{{W}}}fldSimple")] == [
+        ' HYPERLINK \\l "_Ref1" ',
+        " PAGEREF _Ref1 \\h \\* MERGEFORMAT ",
+        " REF bm1 \\h ",
+    ]
+    assert [i.text for i in root.iter(f"{{{W}}}instrText")] == [" NUMPAGES "]
+
+
+def test_short_values_neither_unwrap_links_nor_rename_bookmarks(make_docx: MakeDocx) -> None:
+    # Ruling R27: the "5" of "5%" is in too many addresses and names to mean anything there,
+    # even where no other digit touches it ("_Toc5", "terms-5").
+    bookmarks = "".join(
+        f'<w:p><w:bookmarkStart w:id="{n}" w:name="{name}"/><w:r><w:t>Terms</w:t></w:r>'
+        f'<w:bookmarkEnd w:id="{n}"/></w:p>'
+        for n, name in enumerate(("_Toc150", "_Toc5"))
+    )
+    body = (
+        p("A 5% discount applies.")
+        + bookmarks
+        + '<w:p><w:hyperlink w:anchor="_Toc5"><w:r><w:t>see the terms</w:t></w:r></w:hyperlink>'
+        '<w:hyperlink r:id="rId1"><w:r><w:t xml:space="preserve"> online</w:t></w:r>'
+        '</w:hyperlink><w:hyperlink r:id="rId2"><w:r><w:t xml:space="preserve"> or here</w:t>'
+        "</w:r></w:hyperlink></w:p>"
+        '<w:p><w:fldSimple w:instr=" PAGEREF _Toc150 \\h "><w:r><w:t>3</w:t></w:r></w:fldSimple></w:p>'
+    )
+    targets = links("https://www.example.org/terms-2025", "https://www.example.org/terms-5")
+    pkg = DocxPackage.open(make_docx(body, raw={"word/_rels/document.xml.rels": targets}))
+    dt = extract_text(pkg)
+    report = apply_mask(pkg, dt, plan_for(dt, "5%", "[PERCENT_1]"))
+    assert report == MaskReport(1, 0, 0, 0)
+    root = pkg.xml("word/document.xml")
+    names = [b.get(f"{{{W}}}name") for b in root.iter(f"{{{W}}}bookmarkStart")]
+    assert names == ["_Toc150", "_Toc5"]
+    assert root.find(".//w:hyperlink", NS).get(f"{{{W}}}anchor") == "_Toc5"
+    assert root.find(".//w:fldSimple", NS).get(f"{{{W}}}instr") == " PAGEREF _Toc150 \\h "
+    rels = pkg.raw("word/_rels/document.xml.rels")
+    assert b"terms-2025" in rels and b"terms-5" in rels
+
+
+def test_digits_count_only_where_no_other_digit_touches_them(make_docx: MakeDocx) -> None:
+    # A phone number is digits only once normalised. The leak check (ruling R14) finds it in a
+    # tel: address, so that link is unwrapped; "2,025" is not the 2025 inside "120250".
+    body = (
+        p("Call +31 20 451 2473 about the 2,025 units.")
+        + '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>call us</w:t></w:r></w:hyperlink>'
+        '<w:hyperlink r:id="rId2"><w:r><w:t xml:space="preserve"> or see the offer</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+        '<w:p><w:bookmarkStart w:id="0" w:name="_Ref120250"/><w:r><w:t>Units</w:t></w:r>'
+        '<w:bookmarkEnd w:id="0"/></w:p>'
+    )
+    targets = links("tel:+31204512473", "https://www.example.org/offer-120250")
+    pkg = DocxPackage.open(make_docx(body, raw={"word/_rels/document.xml.rels": targets}))
+    dt = extract_text(pkg)
+    plan = plan_of(dt, {"+31 20 451 2473": "[PHONE_1]", "2,025": "[QUANTITY_1]"})
+    report = apply_mask(pkg, dt, plan)
+    assert report == MaskReport(2, 1, 0, 0)
+    rels = pkg.raw("word/_rels/document.xml.rels")
+    assert b"31204512473" not in rels and b"offer-120250" in rels
+    root = pkg.xml("word/document.xml")
+    assert root.find(".//w:bookmarkStart", NS).get(f"{{{W}}}name") == "_Ref120250"
+
+
+def field_code(*instructions: str) -> str:
+    """A paragraph holding one field, its instruction split over ``instructions``."""
+    runs = "".join(
+        f'<w:r><w:instrText xml:space="preserve">{instruction}</w:instrText></w:r>'
+        for instruction in instructions
+    )
+    return (
+        f'<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>{runs}'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>link</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>'
+    )
+
+
+ESCAPED = {
+    "John Smith": "[PERSON_1]",
+    "1 Main Street": "[ADDRESS_1]",
+    "jane.doe@acme.example": "[EMAIL_1]",
+}
+EMILE = "\N{LATIN CAPITAL LETTER E WITH ACUTE}mile Dupont"
+MEETING = "mailto:office@example.org?subject=Meeting%20John%20Smith%20at%201%20Main%20Street"
+MASKED_MEETING = "mailto:office@example.org?subject=Meeting%20[PERSON_1]%20at%20[ADDRESS_1]"
+
+
+def test_escaped_values_in_simple_field_instructions_are_masked(make_docx: MakeDocx) -> None:
+    # Ruling R26: an address may %-escape a value ("%20" for a space, "%40" for "@"). Only the
+    # escaped value is replaced; the other escapes stay, so the %22 quotes do not end the address.
+    pkg = DocxPackage.open(
+        make_docx(
+            p("Meet John Smith at 1 Main Street, or write to jane.doe@acme.example.")
+            + f"<w:p><w:fldSimple w:instr=' HYPERLINK \"{MEETING}&amp;body=%22Hi%22\" '>"
+            "<w:r><w:t>book</w:t></w:r></w:fldSimple></w:p>"
+            + "<w:p><w:fldSimple w:instr=' HYPERLINK \"mailto:jane.doe%40acme.example\" '>"
+            "<w:r><w:t>write</w:t></w:r></w:fldSimple></w:p>"
+            + p(f"Copy to {EMILE}.")
+            # "É" is two escapes: the placeholder replaces both, not just the second.
+            + "<w:p><w:fldSimple w:instr=' HYPERLINK \"mailto:office@example.org?subject=For"
+            "%20%C3%89mile%20Dupont\" '><w:r><w:t>copy</w:t></w:r></w:fldSimple></w:p>"
+        )
+    )
+    dt = extract_text(pkg)
+    report = apply_mask(pkg, dt, plan_of(dt, ESCAPED | {EMILE: "[PERSON_2]"}))
+    assert report.replaced == 4 and report.instr_fields_masked == 3
+    fields = pkg.xml("word/document.xml").iter(f"{{{W}}}fldSimple")
+    assert [f.get(f"{{{W}}}instr") for f in fields] == [
+        f' HYPERLINK "{MASKED_MEETING}&body=%22Hi%22" ',
+        ' HYPERLINK "mailto:[EMAIL_1]" ',
+        ' HYPERLINK "mailto:office@example.org?subject=For%20[PERSON_2]" ',
+    ]
+
+
+def test_escaped_values_in_field_codes_are_masked_even_across_nodes(make_docx: MakeDocx) -> None:
+    # Ruling R26, for the w:instrText of a field: the text map holds the instruction, but the
+    # plan's search does not find a value %-escaped in it. The second instruction is split over
+    # two nodes in the middle of the escaped address.
+    pkg = DocxPackage.open(
+        make_docx(
+            p("Meet John Smith at 1 Main Street, or write to jane.doe@acme.example.")
+            + field_code(f' HYPERLINK "{MEETING}" ')
+            + field_code(' HYPERLINK "mailto:jane.doe%40ac', 'me.example" ')
+        )
+    )
+    dt = extract_text(pkg)
+    plan = plan_of(dt, ESCAPED)
+    assert len(plan.replacements) == 3  # in the first paragraph only
+    report = apply_mask(pkg, dt, plan)
+    assert report.replaced == 3 and report.instr_fields_masked == 2
+    paragraphs = pkg.xml("word/document.xml").findall("w:body/w:p", NS)[1:]
+    assert ["".join(i.text for i in para.iter(f"{{{W}}}instrText")) for para in paragraphs] == [
+        f' HYPERLINK "{MASKED_MEETING}" ',
+        ' HYPERLINK "mailto:[EMAIL_1]" ',
+    ]
+    assert b"acme" not in pkg.raw("word/document.xml")
+
+
 def test_a_replacement_across_paragraphs_is_refused_before_anything_changes(
     make_docx: MakeDocx,
 ) -> None:
@@ -650,6 +854,23 @@ def layout(pkg: DocxPackage) -> list[bytes]:
     ]
 
 
+def leak_check_finds(values: list[str], text: str) -> bool:
+    """Whether the leak check (ruling R14) finds one of ``values`` in ``text``: normalised, as
+    written or %-decoded, four characters or more, a value of digits only where no digit
+    touches it."""
+    for form in (text, unquote(text)):
+        folded = normalize(form)
+        for key in {normalize(value) for value in values}:
+            if len(key) < 4:
+                continue
+            if key.isdigit():
+                if re.search(rf"(?<!\d){key}(?!\d)", folded):
+                    return True
+            elif key in folded:
+                return True
+    return False
+
+
 def link_targets(pkg: DocxPackage) -> list[str]:
     """The target of every hyperlink relationship in the package."""
     return [
@@ -678,9 +899,8 @@ def test_the_corpus_masked_with_its_truth(corpus: Path, tmp_path: Path) -> None:
         assert [f for f in forms if f in text] == [], path.name
         assert layout(pkg) == shape, path.name
         assert {n: pkg.raw(n) for n in untouched} == untouched, path.name
-        values = {normalize(dt.text[r.start : r.end]) for r in plan.replacements}
-        for target in link_targets(pkg):
-            assert not [v for v in values if v in normalize(unquote(target))], path.name
+        values = [dt.text[r.start : r.end] for r in plan.replacements]
+        assert [t for t in link_targets(pkg) if leak_check_finds(values, t)] == [], path.name
         pkg.save(tmp_path / path.name)
         masked_paragraphs = docx.Document(str(tmp_path / path.name)).paragraphs
         assert len(masked_paragraphs) == len(docx.Document(str(path)).paragraphs), path.name
