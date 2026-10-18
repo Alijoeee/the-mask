@@ -1,5 +1,6 @@
 """The encrypted case store: what is on disk, what is listed and what is deleted."""
 
+import errno
 import os
 import stat
 from collections.abc import Callable
@@ -249,6 +250,25 @@ def test_list_skips_a_file_that_is_not_an_intact_case_and_reports_it(
     bad = plant(case_store, keystore, sample_case, damage)
     assert [s.id for s in case_store.list()] == ["B2C3"]
     assert case_store.unreadable == [bad]
+
+
+def test_a_file_that_cannot_be_read_is_unreadable_not_an_error(
+    case_store: CaseStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case_store.save(make_case("B2C3"))
+    refused = case_store.save(make_case("K4F7"))
+    read_bytes = Path.read_bytes
+
+    def read(self: Path) -> bytes:
+        if self == refused:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    assert [s.id for s in case_store.list()] == ["B2C3"]
+    assert case_store.unreadable == [refused]
+    assert case_store.purge_expired(datetime(2030, 1, 1, tzinfo=UTC)) == ["B2C3"]  # no crash
+    assert refused.exists()  # a file nobody can read is left alone
 
 
 def test_unreadable_is_made_again_by_every_listing(

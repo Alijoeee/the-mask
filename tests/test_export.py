@@ -279,6 +279,13 @@ def test_only_word_and_pdf_files_are_read(corpus: Path, tmp_path: Path) -> None:
     assert [s.kind for s in load_sources([capitals], False)] == ["docx"]
 
 
+def test_an_old_doc_file_is_told_to_be_saved_as_docx(fixtures: Path) -> None:
+    # The interface shows this message as it is: a .doc file gets the advice the owner can act on.
+    with pytest.raises(UnsupportedFileError) as refused:
+        load_sources([fixtures / "not-a-docx.doc"], False)
+    assert "open it in Word and save as .docx" in refused.value.user_message
+
+
 # ---- what is masked -----------------------------------------------------------------------------
 
 
