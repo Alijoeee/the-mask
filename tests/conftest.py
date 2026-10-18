@@ -16,6 +16,11 @@ pytest_plugins = sorted(
 
 
 @pytest.fixture
-def data_dir(tmp_path: Path) -> Path:
-    """An empty directory that stands in for the application's data folder."""
-    return tmp_path
+def data_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An empty directory that stands in for the application's data folder.
+
+    THEMASK_DATA_DIR points at it in every test (tests/fixtures/lists.py). It is a fresh folder
+    beside the test's ``tmp_path``, not in it, so what the app writes there never mixes with a
+    test's own files.
+    """
+    return tmp_path_factory.mktemp("data")
