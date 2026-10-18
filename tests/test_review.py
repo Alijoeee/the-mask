@@ -241,6 +241,14 @@ def test_hide_text_cannot_cross_a_line_break(lists):
     assert review.groups == []
 
 
+def test_hide_text_never_touches_a_placeholder_the_text_holds(lists):
+    review = hand_made("[CUSTOM_4] and Orion.", [], lists)
+    for value in ("[CUSTOM_4]", "CUSTOM_4"):  # a placeholder inside a placeholder breaks both
+        with pytest.raises(ValueError):
+            review.hide_text(value, CUSTOM)
+    assert review.groups == [] and review.mask_plan().replacements == []
+
+
 def test_new_numbers_follow_the_exact_placeholders_the_text_holds(lists):
     # Only [TYPE_N] counts (ruling R44): "custom_9" is text, "[CUSTOM_4]" is taken.
     review = hand_made("[CUSTOM_4] and custom_9: Orion signs.", [], lists)
@@ -396,11 +404,47 @@ def test_split_cannot_empty_a_group_or_use_a_missing_occurrence(review):
 # --- The lists --------------------------------------------------------------------------------
 
 
-def test_add_never_hide_persists_and_disables_the_groups_it_matches(review):
-    review.add_never_hide("THE ACME")  # matches the variant "Acme", the way the lists match
+def test_add_never_hide_persists_and_switches_off_the_group_whose_value_it_matches(review):
+    review.add_never_hide("THE ACME SUPPLIES LTD")  # the value, the way the lists match
     assert [g.enabled for g in review.groups] == [False, True, True, True]
-    assert UserLists.load(lists_path()).never_hide == ["THE ACME"]
+    assert UserLists.load(lists_path()).never_hide == ["THE ACME SUPPLIES LTD"]
     assert len(review.mask_plan().replacements) == 6 - 2
+
+
+def test_add_never_hide_of_a_shorter_form_switches_off_only_those_occurrences(review):
+    # "Acme" is a form of Acme Supplies Ltd, not its value: the full name is no term, so it stays.
+    review.add_never_hide("THE ACME")
+    acme = review.groups[0]
+    assert acme.enabled and acme.disabled == {1} and "Acme" not in acme.variants
+    assert [review.text[r.start : r.end] for r in review.mask_plan().replacements] == [
+        "Acme Supplies Ltd",
+        "Northwind Trading B.V.",
+        "John Smith",
+        "Project Falcon",
+        "Project Falcon",
+    ]
+
+
+def test_add_never_hide_of_a_surname_keeps_the_full_name_hidden(lists):
+    text = "Mark Price signs. Price pays."
+    findings = [spot(P, text, "Mark Price"), spot(P, text, "Price", 1)]
+    mark = group(P, "[PERSON_1]", "Mark Price", findings, variants=["Price"])
+    review = hand_made(text, [mark], lists)
+    review.add_never_hide("Price")
+    g = review.groups[0]
+    assert g.enabled and g.disabled == {1} and g.variants == {"Mark Price"}
+    assert [review.text[r.start : r.end] for r in review.mask_plan().replacements] == ["Mark Price"]
+    assert [e.variants for e in review.key_entries()] == [["Mark Price"]]
+
+
+def test_add_never_hide_switches_off_a_group_whose_every_occurrence_is_the_term(lists):
+    # The value "Acme Supplies Ltd" is the case key's; this file only says "Acme".
+    text = "Acme signs. Acme pays."
+    findings = [spot(C, text, "Acme"), spot(C, text, "Acme", 1)]
+    acme = group(C, "[COMPANY_1]", "Acme Supplies Ltd", findings, variants=["Acme"])
+    review = hand_made(text, [acme], lists)
+    review.add_never_hide("Acme")
+    assert not review.groups[0].enabled and review.mask_plan().replacements == []
 
 
 def test_add_never_hide_of_a_value_nothing_has_still_persists(review):
@@ -415,6 +459,32 @@ def test_add_always_hide_persists_and_hides_the_value_here(lists):
     [g] = review.groups
     assert (g.type, g.placeholder, len(g.findings)) == (CUSTOM, "[CUSTOM_1]", 2)
     assert UserLists.load(lists_path()).always_hide == ["Orion"]
+
+
+def test_a_plain_always_hide_entry_joins_the_group_that_has_it_and_keeps_its_type(lists):
+    # Ruling R62: a plain entry names no type, so the group keeps the one the analysis gave it.
+    text = "Acme Supplies Ltd signs. Acme pays."
+    found = [spot(C, text, "Acme Supplies Ltd")]
+    acme = group(C, "[COMPANY_1]", "Acme Supplies Ltd", found, variants=["Acme"])
+    review = hand_made(text, [acme], lists)
+    review.add_always_hide("Acme")
+    [g] = review.groups
+    assert (g.id, g.type, g.placeholder) == (acme.id, C, "[COMPANY_1]")
+    assert [(f.text, f.type, f.source) for f in g.findings] == [
+        ("Acme Supplies Ltd", C, "model"),
+        ("Acme", C, "user"),
+    ]
+    assert UserLists.load(lists_path()).always_hide == ["Acme"]
+
+
+def test_a_typed_always_hide_entry_re_types_the_group_that_has_it(lists):
+    text = "Acme Supplies Ltd signs. Acme pays."
+    found = [spot(C, text, "Acme Supplies Ltd")]
+    acme = group(C, "[COMPANY_1]", "Acme Supplies Ltd", found, variants=["Acme"])
+    review = hand_made(text, [acme], lists)
+    review.add_always_hide("CUSTOM:Acme")  # an explicit type, even CUSTOM, is the owner's choice
+    [g] = review.groups
+    assert (g.id, g.type, g.placeholder, len(g.findings)) == (acme.id, CUSTOM, "[CUSTOM_1]", 2)
 
 
 def test_add_always_hide_hides_a_typed_entry_as_its_type(lists):

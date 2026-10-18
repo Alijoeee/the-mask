@@ -196,28 +196,40 @@ class ReviewState:
 
     def add_always_hide(self, value: str) -> None:
         """Add ``value`` to the owner's always-hide list, saved for every document, and hide it
-        here: as ``TYPE:value`` writes it, else as CUSTOM. A value this document lacks is only
-        added. Raises ValueError for a blank value.
+        here: as ``TYPE:value`` writes it, else as CUSTOM. A plain value that a group has among
+        its forms joins that group and keeps its type; only a ``TYPE:value`` entry re-types it
+        (ruling R62). A value this document lacks is only added. Raises ValueError for a blank
+        value.
         """
         self.user_lists.add_always(value)
         self.user_lists.save(lists_path())
         kind, text = always_hide_entry(value)
         if is_searchable(text):
-            self._hide(text, kind)
+            self._hide(text, kind, retype=text != value.strip())
 
     def add_never_hide(self, value: str) -> None:
-        """Add ``value`` to the owner's never-hide list, saved for every document, and switch off
-        the groups whose value or any variant it matches the way the lists match: whatever the
-        case, in the singular or the plural, with or without a leading "the". Raises ValueError
-        for a blank value.
+        """Add ``value`` to the owner's never-hide list, saved for every document, and stop
+        hiding it, the way the lists match: whatever the case, in the singular or the plural,
+        with or without a leading "the". A group is switched off when its canonical form is
+        the term, or every occurrence is. Of any other group only the occurrences that are the
+        term are switched off, and the variants that are the term go: a longer text that holds
+        a term is no term, so "Mark Price" stays hidden when "Price" is never hidden. Raises
+        ValueError for a blank value.
         """
         self.user_lists.add_never(value)
         self.user_lists.save(lists_path())
         only_this, no_case = UserLists([], [value]), CaseLists([], [], set())
+
+        def is_term(form: str) -> bool:
+            return on_never_hide_list(form, only_this, no_case)
+
         for group in self.groups:
-            forms = (group.canonical, *group.variants)
-            if any(on_never_hide_list(form, only_this, no_case) for form in forms):
+            terms = {i for i, f in enumerate(group.findings) if is_term(f.text)}
+            if is_term(group.canonical) or len(terms) == len(group.findings):
                 group.enabled = False
+            else:
+                group.disabled |= terms
+                group.variants = {v for v in group.variants if not is_term(v)}
 
     # --- Merging and splitting -------------------------------------------------------------------
 
@@ -337,18 +349,21 @@ class ReviewState:
                 return group
         raise ValueError("There is no such group.")
 
-    def _hide(self, value: str, kind: PlaceholderType) -> Group | None:
-        """Hide ``value`` as ``kind`` (see ``hide_text``); None when nothing could be hidden."""
+    def _hide(self, value: str, kind: PlaceholderType, retype: bool = True) -> Group | None:
+        """Hide ``value`` as ``kind`` (see ``hide_text``); None when nothing could be hidden.
+        Without ``retype`` a group of another type that has the value keeps its type.
+        """
         group = self._holding(value, kind)
         if group is None:
             group = Group(uuid.uuid4().hex, kind, value, {value}, [], self._next_placeholder(kind))
             self.groups.append(group)
-        elif group.type is not kind:
+        elif retype and group.type is not kind:
             group.placeholder = self._next_placeholder(kind)
             group.type, group.needs_check = kind, False
             group.findings = [
                 replace(f, type=kind, score=1.0, source="user") for f in group.findings
             ]
+        kind = group.type
         group.enabled = True
         known = {id(f) for f in group.findings}
         taken = Spans(
