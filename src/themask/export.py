@@ -10,14 +10,16 @@ is then prepared like any other. The review works on the text of those prepared 
 
 ``export_case`` masks a copy of each prepared version with its part of the review's plan, and takes
 every value of the case's key out of its link addresses, field instructions and bookmark names
-(ruling R82). It puts the banner on top and saves the file under a neutral name in a private
-temporary folder, where the leak check searches it for every value of the key. A value found in
-more places than the owner left it visible on purpose (ruling R60) blocks the export: the files
-are deleted and nothing is saved. Otherwise the detection runs again on the masked files, for what
-nobody marked; the files are written into the output folder, never over a file that is there; and
-the case's key is saved. If the key cannot be saved, the files written go again: a masked file
-without its key could never be restored. A file added to an existing case keeps the case's code,
-continues the numbering of its files and adds to its key. Nothing here writes to the log.
+(ruling R82): the review's key, or for a file added to a case the case's whole key as it will be
+saved (ruling R83). It puts the banner on top and saves the file under a neutral name in a
+private temporary folder, where the leak check searches it for every value of that key. A value
+found in more places than the owner left it visible on purpose (ruling R60) blocks the export:
+the files are deleted and nothing is saved. Otherwise the detection runs again on the masked
+files, for what nobody marked; the files are written into the output folder, never over a file
+that is there; and the case's key is saved. If the key cannot be saved, the files written go
+again: a masked file without its key could never be restored. A file added to an existing case
+keeps the case's code, continues the numbering of its files and adds to its key. Nothing here
+writes to the log.
 """
 
 from __future__ import annotations
@@ -169,10 +171,11 @@ def export_case(
 
     The files are named ``MASKED-<code>.docx`` for one file, ``-1``, ``-2`` ... for several, and
     ``-before`` and ``-after`` for the two versions of a redline (``-1-before`` among several).
-    Every file has the values of ``review.key_entries()`` taken out of its addresses,
-    instructions and bookmark names, the values marked in the other files too (ruling R82), and
-    is checked for all of them; a placeholder found in more places than the owner switched off
-    one by one blocks the export (ruling R60). Not blocked, the files go into
+    The key is ``review.key_entries()``, or for a file added to a case the case's key merged with
+    it, as the case will be saved (ruling R83). Every file has the key's values taken out of its
+    addresses, instructions and bookmark names, the values marked in the other files too (ruling
+    R82), and is checked for all of them; a placeholder found in more places than the owner left
+    visible on purpose blocks the export (ruling R60). Not blocked, the files go into
     ``options.out_dir`` and the case is passed to ``save_case``.
 
     Raises ValueError, before anything is written, when there is no file, when ``review`` was not
@@ -189,23 +192,26 @@ def export_case(
     names = _file_names(code, sources, existing)
     plans = _plans(review.mask_plan(), combined)
     entries = review.key_entries()
-    not_checkable = unverifiable(entries)
+    # A file added to a case is masked and checked for the whole key the case will keep: also for
+    # the values its own review did not find in its text (ruling R83).
+    key = _merged(existing.entries, entries) if existing is not None else entries
+    not_checkable = unverifiable(key)
     # The files in the order they are listed: by source, a redline's version before first.
     order = sorted(range(len(views)), key=lambda i: (views[i].index, views[i].side == "after"))
     staging = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX))
     try:
         staged = [
-            _mask(views[i], plans[i], entries, staging / names[views[i].index, views[i].side])
+            _mask(views[i], plans[i], key, staging / names[views[i].index, views[i].side])
             for i in order
         ]
-        found = [scan_package(path, entries) for path in staged]
+        found = [scan_package(path, key) for path in staged]
         blocking = _blocking([hit for hits in found for hit in hits], _allowances(review.groups))
         if blocking:
             hits = _named(found, staged)
             allowed = [hit for hit in hits if hit.placeholder not in blocking]
             return ExportResult(None, [], hits, [], AI_INSTRUCTION, True, allowed, not_checkable)
-        unmarked = _unmarked(staged, engine, user_lists, entries)
-        outputs, case = _save(staged, sources, entries, code, options, save_case)
+        unmarked = _unmarked(staged, engine, user_lists, key)
+        outputs, case = _save(staged, sources, key, code, options, save_case)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     hits = _named(found, outputs)  # by the names the files were written under
@@ -373,28 +379,29 @@ def _numbers_used(case: Case) -> int:
 # ---- masking and checking -----------------------------------------------------------------------
 
 
-def _mask(view: _View, plan: MaskPlan, entries: list[KeyEntry], out: Path) -> Path:
-    """Masks a copy of the version ``view`` with ``plan`` and the case's key ``entries``, puts
-    the banner on top and saves it at ``out``. The prepared package stays as it was, so the same
-    sources can be exported again.
+def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:
+    """Masks a copy of the version ``view`` with ``plan`` and the case's ``key``, puts the banner
+    on top and saves it at ``out``. The prepared package stays as it was, so the same sources can
+    be exported again.
     """
     pkg = view.pkg.copy()
     doc_text = extract_text(pkg)  # the copy has paragraphs of its own
     if doc_text.text != view.text.text:
         raise ValueError("A file has changed since it was read; load it again.")
-    apply_mask(pkg, doc_text, plan, entries=entries)
+    apply_mask(pkg, doc_text, plan, entries=key)
     insert_banner(pkg)
     pkg.save(out)
     return out
 
 
 def _allowances(groups: list[Group]) -> dict[str, int]:
-    """For each placeholder, how many of its occurrences the owner left visible on purpose: those
-    switched off one by one in a group that is on (ruling R60).
+    """For each placeholder, how many of its occurrences the owner left visible on purpose (ruling
+    R60): those switched off one by one, and all those of a group switched off whole. The key
+    holds such a group's value only when a file is added to a case that has it (ruling R83).
     """
     allowed: dict[str, int] = {}
     for group in groups:
-        off = len(group.findings) - len(group.active_findings()) if group.enabled else 0
+        off = len(group.findings) - len(group.active_findings())
         if off:
             allowed[group.placeholder] = allowed.get(group.placeholder, 0) + off
     return allowed
@@ -445,7 +452,7 @@ def _unmarked(
 def _save(
     staged: list[Path],
     sources: list[SourceDoc],
-    entries: list[KeyEntry],
+    key: list[KeyEntry],
     code: str,
     options: ExportOptions,
     save_case: Callable[[Case], object],
@@ -461,7 +468,7 @@ def _save(
             data = path.read_bytes()
             written.append(_write_new(options.out_dir, path.name, data))
             files.append(MaskedFile(written[-1].name, hashlib.sha256(data).hexdigest()))
-        case = _case(code, sources, files, entries, options)
+        case = _case(code, sources, files, key, options)
         save_case(case)
     except BaseException:
         for path in written:
@@ -496,20 +503,20 @@ def _case(
     code: str,
     sources: list[SourceDoc],
     files: list[MaskedFile],
-    entries: list[KeyEntry],
+    key: list[KeyEntry],
     options: ExportOptions,
 ) -> Case:
-    """The case to save: a new one, or the existing case with the new files and values added."""
+    """The case to save with ``key``: a new one, or the existing case with the new files added."""
     names = [source.path.name for source in sources]
     existing = options.existing_case
     if existing is None:
-        return Case(code, datetime.now(UTC), names, files, entries, options.retention_days)
+        return Case(code, datetime.now(UTC), names, files, key, options.retention_days)
     return Case(
         existing.id,
         existing.created_at,
         [*existing.source_files, *names],
         [*existing.masked_files, *files],
-        _merged(existing.entries, entries),
+        key,
         options.retention_days,
     )
 

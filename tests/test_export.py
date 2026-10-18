@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from themask.detect.lists import UserLists
 
 COMPANY = PlaceholderType.COMPANY
+EMAIL = PlaceholderType.EMAIL
 PERCENT = PlaceholderType.PERCENT
 PERSON = PlaceholderType.PERSON
 
@@ -81,10 +82,16 @@ def body_text(path: Path) -> str:
 
 
 def by_hand(
-    source: SourceDoc, user_lists: UserLists, *hidden: tuple[str, PlaceholderType]
+    source: SourceDoc,
+    user_lists: UserLists,
+    *hidden: tuple[str, PlaceholderType],
+    reserved: Collection[str] = (),
 ) -> ReviewState:
-    """A review of ``source`` in which nothing was found and the owner hid ``hidden`` by hand."""
-    review = ReviewState(combined_text([source]).text, [], [], user_lists, CaseLists([], [], set()))
+    """A review of ``source`` in which nothing was found and the owner hid ``hidden`` by hand;
+    ``reserved`` are the placeholders of the case the file is added to (ruling R61).
+    """
+    text = combined_text([source]).text
+    review = ReviewState(text, [], [], user_lists, CaseLists([], [], set()), reserved)
     for value, kind in hidden:
         review.hide_text(value, kind)
     return review
@@ -613,6 +620,89 @@ def test_a_file_added_to_a_case_continues_its_numbering(
     options = ExportOptions(tmp_path / "out", redline_split=redline, existing_case=case)
     res = export_case([source], by_hand(source, lists), options, engine, lists, lambda c: None)
     assert [p.name for p in res.outputs] == expected
+
+
+def northwind_case() -> Case:
+    """A case of one file, whose key holds the company and its sales address."""
+    return Case(
+        "TEST",
+        datetime(2026, 10, 1, 9, 30, tzinfo=UTC),
+        ["Supply Agreement.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [
+            KeyEntry("[COMPANY_1]", COMPANY, "Northwind Trading B.V.", ["Northwind Trading B.V."]),
+            KeyEntry("[EMAIL_1]", EMAIL, "sales@northwind.example", []),
+        ],
+    )
+
+
+def test_a_value_of_the_case_leaves_a_file_added_that_never_shows_it(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R83: the annex shows neither value of the case, so its review finds neither, but it
+    # links to the case's sales address.
+    case = northwind_case()
+    link = (
+        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        "</w:hyperlink></w:p>"
+    )
+    rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
+    annex = make_docx(para("Burren Logistics Limited carries the goods.") + link, raw=rels)
+    (source,) = load_sources([annex], False)
+    reserved = [entry.placeholder for entry in case.entries]
+    review = by_hand(source, lists, ("Burren Logistics Limited", COMPANY), reserved=reserved)
+    saved: list[Case] = []
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    res = export_case([source], review, options, engine, lists, saved.append)
+    assert not res.blocked and res.leak_hits == []
+    assert res.outputs == [tmp_path / "out" / "MASKED-TEST-2.docx"]
+    targets = DocxPackage.open(res.outputs[0]).raw("word/_rels/document.xml.rels")
+    assert b"northwind" not in targets.lower()
+    assert "Write to the sales desk." in body_text(res.outputs[0])
+    assert [e.placeholder for e in saved[0].entries] == ["[COMPANY_1]", "[EMAIL_1]", "[COMPANY_2]"]
+
+
+def test_a_leftover_of_a_value_of_the_case_in_a_file_added_blocks(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R83: a run of the annex is set in a font named after the case's company, which the
+    # annex's text never names.
+    case = northwind_case()
+    font = (
+        '<w:p><w:r><w:rPr><w:rFonts w:ascii="Northwind Trading B.V."/></w:rPr>'
+        "<w:t>Delivery is free.</w:t></w:r></w:p>"
+    )
+    annex = make_docx(para("Burren Logistics Limited carries the goods.") + font)
+    (source,) = load_sources([annex], False)
+    reserved = [entry.placeholder for entry in case.entries]
+    review = by_hand(source, lists, ("Burren Logistics Limited", COMPANY), reserved=reserved)
+    saved: list[Case] = []
+    out = tmp_path / "out"
+    res = export_case(
+        [source], review, ExportOptions(out, existing_case=case), engine, lists, saved.append
+    )
+    assert res.blocked and res.outputs == [] and saved == [] and not out.exists()
+    assert [(hit.placeholder, hit.count) for hit in res.leak_hits] == [("[COMPANY_1]", 1)]
+    assert res.allowed_hits == []
+
+
+def test_a_value_of_the_case_left_visible_in_a_file_added_is_allowed(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # The owner switched off the whole group of a value of the case: each place it stands in the
+    # file added is left visible on purpose (ruling R60), now that the case's key is checked there.
+    case = northwind_case()
+    annex = make_docx(para(SUPPLY) + para("Northwind Trading B.V. delivers to every site."))
+    (source,) = load_sources([annex], False)
+    text = combined_text([source]).text
+    seeded = group_of(text, "[COMPANY_1]", COMPANY, "Northwind Trading B.V.")
+    seeded.enabled = False
+    reserved = [entry.placeholder for entry in case.entries]
+    review = ReviewState(text, [seeded], [], lists, CaseLists([], [], set()), reserved)
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    res = export_case([source], review, options, engine, lists, lambda c: None)
+    assert not res.blocked and res.outputs
+    assert sum(hit.count for hit in res.leak_hits) == 2 and res.allowed_hits == res.leak_hits
 
 
 # ---- what an export refuses ---------------------------------------------------------------------
