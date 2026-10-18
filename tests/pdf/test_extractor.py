@@ -5,7 +5,9 @@ the footer "Page N of 5 · Confidential", and a pricing table on page 4), scanne
 and mixed-01 (page 2 a picture). The corpus PDFs are typeset from the same contracts as their Word
 twins, so the paragraphs read from a PDF can be checked against the Word file's, one for one.
 Small PDFs made by ``make_pdf`` cover what the corpus does not have: bare page numbers, a PDF
-without any text, headings told by their weight, and paragraphs set close together.
+without any text, headings told by their weight, body text in 12 pt, paragraphs set close
+together, and PDFs that are locked or damaged. supply-01 typeset again with a watermark shows that
+rotated text is left out.
 """
 
 from __future__ import annotations
@@ -13,12 +15,13 @@ from __future__ import annotations
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import docx
 import pytest
 
 from tests.fixtures.pdf import PICTURE, Line, MakePdf
-from themask.errors import ScannedPdfError
+from themask.errors import ProtectedFileError, ScannedPdfError, UnsupportedFileError
 from themask.pdf.extractor import SCANNED_PDF_MESSAGE, extract_blocks
 
 HEADER = "Northwind / Thamesgate \N{EM DASH} Supply Agreement"
@@ -124,11 +127,52 @@ def test_a_blank_page_is_no_image_page(make_pdf: MakePdf) -> None:
     assert [(b.text, b.page) for b in blocks] == [("Text", 1)]
 
 
+# ---- locked and damaged files ----------------------------------------------------------------
+
+
+def test_a_pdf_that_asks_for_a_password_is_refused(make_pdf: MakePdf) -> None:
+    locked = make_pdf("locked.pdf", [[Line(100, "Secret terms")]], user_password="secret")
+    with pytest.raises(ProtectedFileError) as refused:
+        extract_blocks(locked)
+    assert refused.value.user_message == (
+        "This PDF is protected or encrypted. Please provide an unprotected copy."
+    )
+
+
+def test_a_pdf_locked_only_against_copying_is_read(make_pdf: MakePdf) -> None:
+    """Encrypted with an owner's password only, a PDF opens without one, so it is read."""
+    pdf = make_pdf("owner.pdf", [[Line(100, "Open terms")]], owner_password="owner")
+    blocks, _ = extract_blocks(pdf)
+    assert [b.text for b in blocks] == ["Open terms"]
+
+
+@pytest.mark.parametrize("damage", ["garbage", "truncated", "empty"])
+def test_a_damaged_pdf_is_refused(corpus: Path, tmp_path: Path, damage: str) -> None:
+    whole = (corpus / "supply-01.pdf").read_bytes()
+    damaged = {
+        "garbage": b"This is not a PDF at all.",
+        "truncated": whole[: len(whole) // 2],
+        "empty": b"",
+    }
+    path = tmp_path / f"{damage}.pdf"
+    path.write_bytes(damaged[damage])
+    with pytest.raises(UnsupportedFileError) as refused:
+        extract_blocks(path)
+    assert refused.value.user_message == (
+        "This is not a readable PDF. It may be damaged or incomplete. Please provide another copy."
+    )
+
+
 # ---- paragraphs and headings -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["supply-01", "supply-04", "supply-05", "supply-10"])
-def test_the_paragraphs_are_those_of_the_word_twin(corpus: Path, name: str) -> None:
+@pytest.mark.parametrize(
+    ("name", "paragraphs"),
+    [("supply-01", 107), ("supply-04", 107), ("supply-05", 107), ("supply-10", 370)],
+)
+def test_the_paragraphs_are_those_of_the_word_twin(
+    corpus: Path, name: str, paragraphs: int
+) -> None:
     """Every paragraph and heading of the PDF is one of its Word twin, whole and in order.
 
     These four contracts have no footnotes, whose marks and notes a PDF writes differently.
@@ -136,8 +180,10 @@ def test_the_paragraphs_are_those_of_the_word_twin(corpus: Path, name: str) -> N
     blocks, report = extract_blocks(corpus / f"{name}.pdf")
     read = [LETTER_LABEL.sub("", b.text) for b in blocks if b.kind != "table"]
     word = [p.text for p in docx.Document(str(corpus / f"{name}.docx")).paragraphs]
+    word = [text for text in word if text.strip()]
     assert read[:2] == report.repeated_lines_removed
-    assert read[2:] == [text for text in word if text.strip()]
+    assert (len(read) - 2, len(word)) == (paragraphs, paragraphs)
+    assert read[2:] == word
 
 
 def test_headings_and_their_sizes(corpus: Path) -> None:
@@ -174,6 +220,28 @@ def test_headings_by_size_or_by_weight(make_pdf: MakePdf) -> None:
     ]
 
 
+def test_body_text_in_12_pt_is_no_heading(make_pdf: MakePdf) -> None:
+    """A heading is larger than the body text of its page: 12 pt alone does not make one."""
+    lines = [
+        Line(100, "1. DEFINITIONS", size=14, bold=True),
+        Line(130, "1.1 The Buyer shall pay the Supplier", size=12),
+        Line(145.6, "within thirty days of the invoice.", size=12),
+        Line(169.2, "BETWEEN:", size=12, bold=True),
+        Line(192.8, "1.2 Each party shall keep the terms of this Agreement secret.", size=12),
+    ]
+    blocks, _ = extract_blocks(make_pdf("twelve.pdf", [lines]))
+    assert [(b.kind, b.text, b.size) for b in blocks] == [
+        ("heading", "1. DEFINITIONS", 14),
+        (
+            "paragraph",
+            "1.1 The Buyer shall pay the Supplier within thirty days of the invoice.",
+            12,
+        ),
+        ("paragraph", "BETWEEN:", 12),
+        ("paragraph", "1.2 Each party shall keep the terms of this Agreement secret.", 12),
+    ]
+
+
 def test_paragraphs_set_close_together(make_pdf: MakePdf) -> None:
     """1 pt of white between the lines of a paragraph, 4 pt between paragraphs.
 
@@ -197,14 +265,18 @@ def test_paragraphs_set_close_together(make_pdf: MakePdf) -> None:
 
 
 def test_small_print_under_a_large_title(make_pdf: MakePdf) -> None:
-    """Two lines of 8 pt text 9.6 pt apart, on a page where most of the text is 30 pt."""
+    """Two lines of 8 pt text 9.6 pt apart, on a page where most of the text is 30 pt.
+
+    The lines stay apart (read together, their letters would interleave). The title is the
+    page's median size, so it is no heading here: a heading is larger than the page's text.
+    """
     title = ["MASTER SUPPLY", "AGREEMENT", "OF THE PARTIES"]
     lines = [Line(120 + 40 * n, text, size=30, bold=True) for n, text in enumerate(title)]
     lines += [Line(300, "Small print one", size=8), Line(309.6, "Small print two", size=8)]
     blocks, _ = extract_blocks(make_pdf("cover.pdf", [lines]))
-    assert [(b.kind, b.text) for b in blocks] == [
-        ("heading", "MASTER SUPPLY AGREEMENT OF THE PARTIES"),
-        ("paragraph", "Small print one Small print two"),
+    assert [b.text for b in blocks] == [
+        "MASTER SUPPLY AGREEMENT OF THE PARTIES",
+        "Small print one Small print two",
     ]
 
 
@@ -213,6 +285,52 @@ def test_a_raised_footnote_mark_stays_in_its_line(corpus: Path) -> None:
     texts = [b.text for b in blocks]
     assert any(t.endswith("for their compliance with this Agreement.1") for t in texts)
     assert not [t for t in texts if t.isdigit()]  # no mark on a line of its own
+
+
+# ---- rotated text ----------------------------------------------------------------------------
+
+
+def test_a_watermark_and_a_note_up_the_margin_are_left_out(
+    corpus: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """supply-01 typeset again with a diagonal "DRAFT COPY" across every page and a reference
+    running up its left margin reads exactly as the corpus file without them.
+
+    Read with the rest, the letters of the watermark land inside the lines of the body text
+    ("shall pRay") and come out as headings of their own.
+    """
+    from tools.corpus import pdf_writer
+    from tools.make_corpus import CATALOGUE, build_spec
+
+    show_page = pdf_writer._Canvas.showPage
+
+    def show_page_with_marks(canvas: Any) -> None:
+        canvas.saveState()
+        canvas.setFont("Helvetica-Bold", 72)
+        canvas.translate(110, 220)
+        canvas.rotate(45)
+        canvas.drawString(0, 0, "DRAFT COPY")
+        canvas.restoreState()
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.translate(40, 300)
+        canvas.rotate(90)
+        canvas.drawString(0, 0, "REF NW-2026-0417 / DRAFT 3")
+        canvas.restoreState()
+        show_page(canvas)
+
+    monkeypatch.setattr(pdf_writer._Canvas, "showPage", show_page_with_marks)
+    planned = next(planned for planned in CATALOGUE if planned.name == "supply-01")
+    spec = build_spec(
+        planned.seed,
+        planned.kind,
+        planned.features,
+        parties=planned.parties,
+        project=planned.project,
+        bare_amount=planned.bare_amount,
+    )
+    pdf_writer.write_pdf(spec, tmp_path / "draft.pdf")
+    assert extract_blocks(tmp_path / "draft.pdf") == extract_blocks(corpus / "supply-01.pdf")
 
 
 # ---- tables ----------------------------------------------------------------------------------

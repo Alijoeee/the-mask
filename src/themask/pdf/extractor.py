@@ -1,8 +1,19 @@
 """Reading a text PDF as blocks: its headings, paragraphs and tables, in reading order.
 
-pdfplumber reads each page. A page whose ``extract_text()`` is empty but which holds a picture is
-an image-only page: it is left out and listed in the report. A PDF in which no page has any text
-(every page a picture, or blank) is refused with ``ScannedPdfError``.
+pdfplumber reads each page. A page that holds a picture but whose ``extract_text()`` is empty, once
+rotated text is left out (see below), is an image-only page: it is left out and listed in the
+report. A PDF in which no page has any text (every page a picture, or blank) is refused with
+``ScannedPdfError``. A PDF that cannot be opened is refused too: with ``ProtectedFileError`` when
+it asks for a password (or is encrypted in a way pdfminer cannot undo), with
+``UnsupportedFileError`` when it is not a PDF or is damaged or cut short. A PDF encrypted with an
+owner's password only opens without one, so it is read.
+
+Text set at an angle is left out before anything else is read: a character pdfplumber does not
+count as upright, or whose baseline runs more than 10 degrees off the horizontal (pdfplumber
+counts text at 45 degrees as upright), such as a diagonal "DRAFT" watermark or a reference running
+up the margin. Read with the rest, its letters would land inside the lines of the body text. So
+a page whose text is all rotated, including a page turned with /Rotate so that its text runs up
+or down, reads as having no text: such pages are not supported.
 
 On a page with text, each table pdfplumber finds becomes a table block where it stands, and the
 characters inside the table are left out of the paragraphs, so nothing is read twice. The other
@@ -11,8 +22,8 @@ that a raised footnote mark stays in its line). Consecutive lines of one size ma
 while the white space between them stays small: at most twice the median gap between the lines
 of the page, and under 0.6 times their font size (6 pt in 10 pt text, which is also the limit on
 a page with too few lines for a median). The median alone would not do: on a page of short
-paragraphs most gaps are gaps between paragraphs. A line set in 12 pt or more, or in bold in a
-size larger than the median size of the page's text, is a heading.
+paragraphs most gaps are gaps between paragraphs. A line larger than the median size of the
+page's text is a heading when it is set in 12 pt or more, or in bold.
 
 Running headers and footers: a line in the top or bottom 12 % of its page whose text, normalised
 and without its digits (so that "Page 3 of 24" and a bare "3" repeat as well), is found there on at
@@ -27,6 +38,7 @@ left out.
 
 from __future__ import annotations
 
+import math
 import re
 import statistics
 from collections import Counter
@@ -37,12 +49,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 import pdfplumber
+from pdfminer.pdfdocument import PDFEncryptionError
+from pdfminer.psexceptions import PSException
 from pdfplumber.page import Page
+from pdfplumber.utils.exceptions import MalformedPDFException, PdfminerException
 
-from themask.errors import ScannedPdfError
+from themask.errors import MaskError, ProtectedFileError, ScannedPdfError, UnsupportedFileError
 from themask.textnorm import normalize
 
 SCANNED_PDF_MESSAGE = "This PDF is a scan without selectable text. The MASK cannot read it yet."
+PROTECTED_PDF_MESSAGE = "This PDF is protected or encrypted. Please provide an unprotected copy."
+NOT_A_PDF_MESSAGE = (
+    "This is not a readable PDF. It may be damaged or incomplete. Please provide another copy."
+)
 
 BlockKind = Literal["heading", "paragraph", "table"]
 
@@ -62,7 +81,9 @@ _PARAGRAPH_GAP = 0.6  # × the font size: white space this high, or higher, part
 _LINE_GAPS = 2  # so does white space higher than this many median line gaps of the page
 _GAPS_FOR_A_MEDIAN = 3
 _SAME_SIZE = 0.5  # points: the most two lines of one paragraph differ in size
-_HEADING_SIZE = 12.0  # points: a line this large is a heading, whatever its weight
+_HEADING_SIZE = 12.0  # points: a line larger than the page's text and this large is a heading
+# The most a baseline may run off the horizontal for its text to be read.
+_SLANT = math.tan(math.radians(10))
 
 # What a Word file cannot hold: control characters but tab, line feed and carriage return; lone
 # surrogates; U+FFFE and U+FFFF.
@@ -129,10 +150,14 @@ def extract_blocks(pdf: Path) -> tuple[list[Block], PdfReport]:
     """The headings, paragraphs and tables of ``pdf`` in reading order, and what was left out.
 
     The running headers and footers come first, once each; then the blocks of each page with
-    text, in page order. Raises ScannedPdfError when no page has any text.
+    text, in page order. Raises ScannedPdfError when no page has any text, ProtectedFileError
+    when the PDF asks for a password and UnsupportedFileError when it cannot be read.
     """
-    with pdfplumber.open(pdf) as document:
-        pages = [_read(page) for page in document.pages]
+    try:
+        with pdfplumber.open(pdf) as document:
+            pages = [_read(page) for page in document.pages]
+    except (PdfminerException, MalformedPDFException, PSException) as error:
+        raise _refusal(error) from error
     with_text = [page for page in pages if page.items]
     if not with_text:
         raise ScannedPdfError(SCANNED_PDF_MESSAGE)
@@ -146,14 +171,26 @@ def extract_blocks(pdf: Path) -> tuple[list[Block], PdfReport]:
     return blocks, report
 
 
+def _refusal(error: Exception) -> MaskError:
+    """What to tell the owner about a PDF pdfplumber could not open or read.
+
+    pdfplumber wraps what pdfminer raises in a PdfminerException that holds it.
+    """
+    causes = (error, *error.args, error.__cause__, error.__context__)
+    if any(isinstance(cause, PDFEncryptionError) for cause in causes):
+        return ProtectedFileError(PROTECTED_PDF_MESSAGE)
+    return UnsupportedFileError(NOT_A_PDF_MESSAGE)
+
+
 # ---- one page --------------------------------------------------------------------------------
 
 
 def _read(page: Page) -> _Page:
     """The lines and tables of ``page`` in reading order: top to bottom, then left to right."""
-    tables = page.find_tables()
+    level = page.filter(_level)
+    tables = level.find_tables()
     boxes = [table.bbox for table in tables]
-    outside = page.filter(_outside(boxes)) if boxes else page
+    outside = level.filter(_outside(boxes)) if boxes else level
     sizes = [char["size"] for char in outside.chars if not char["text"].isspace()]
     text_size = statistics.median(sizes) if sizes else 0.0
     items: list[_Line | _Table] = []
@@ -166,8 +203,16 @@ def _read(page: Page) -> _Page:
         if any(any(row) for row in rows):
             items.append(_Table(table.bbox[1], table.bbox[0], rows))
     items.sort(key=lambda item: (item.top, item.x0))
-    image_only = not items and bool(page.images) and not (page.extract_text() or "").strip()
+    image_only = not items and bool(page.images) and not (level.extract_text() or "").strip()
     return _Page(page.page_number, float(page.height), text_size, items, image_only)
+
+
+def _level(obj: dict[str, Any]) -> bool:
+    """Whether to read ``obj``: every object but a character set at an angle or upside down."""
+    if obj.get("object_type") != "char":
+        return True
+    a, b = obj["matrix"][0], obj["matrix"][1]  # where the baseline runs: (a, b)
+    return bool(obj["upright"]) and a > 0 and abs(b) <= _SLANT * a
 
 
 def _outside(boxes: list[tuple[float, float, float, float]]) -> Callable[[dict[str, Any]], bool]:
@@ -200,7 +245,7 @@ def _cell(text: str | None) -> str:
 
 
 def _take_running_lines(pages: list[_Page]) -> list[Block]:
-    """Remove the running lines from ``pages``; returns each one once, as a block, as first found."""
+    """Remove the running lines from ``pages``; returns each once, as a block, as first found."""
     found: dict[str, set[int]] = {}
     for page in pages:
         for line in _band_lines(page):
@@ -275,7 +320,8 @@ def _same_block(above: _Line, line: _Line, page: _Page, line_gap: float | None) 
 
 
 def _is_heading(line: _Line, page: _Page) -> bool:
-    return line.size >= _HEADING_SIZE or (line.bold and line.size > page.text_size)
+    """Larger than the text of the page, and set in 12 pt or more or in bold."""
+    return line.size > page.text_size and (line.size >= _HEADING_SIZE or line.bold)
 
 
 def _text_block(lines: list[_Line], page: _Page) -> Block:

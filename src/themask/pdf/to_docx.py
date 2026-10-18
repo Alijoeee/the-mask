@@ -40,7 +40,8 @@ _TEXT_PROPERTIES = (
 def pdf_to_docx(pdf: Path, out: Path) -> PdfReport:
     """Write the text of ``pdf`` into a new Word file at ``out``; returns what was left out.
 
-    Raises ScannedPdfError when the PDF has no text to read.
+    Raises ScannedPdfError when the PDF has no text to read, ProtectedFileError when it asks for
+    a password and UnsupportedFileError when it cannot be read.
     """
     blocks, report = extract_blocks(pdf)
     document = docx.Document()
