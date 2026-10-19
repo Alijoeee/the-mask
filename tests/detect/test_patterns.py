@@ -253,13 +253,28 @@ def test_records_are_a_quantity(text, needle):
     [
         "the Article 30 records of processing activities",
         "under clause 12 records shall be kept",
-        "Section 5 pallets",
         "keep 1 record of each order",
         "the records of the Supplier",
+        # Ruling R95 (I1): a year before "records" is the records' year.
+        "The Supplier shall keep the 2025 records for audit.",
+        "the 2026 and 2027 records are retained",
     ],
 )
-def test_a_reference_or_a_single_record_is_no_quantity(text):
+def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
     assert found_by(QuantityRecognizer(), text) == {}
+
+
+# Ruling R95 (I2): only "records" after a reference word is a reference; spare parts are counted.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("The Supplier keeps spare parts 500 units in stock.", "500 units"),
+        ("and replacement parts 2,000 pieces", "2,000 pieces"),
+        ("up to 2,000 records", "2,000 records"),
+    ],
+)
+def test_a_quantity_after_a_word_like_parts_is_still_found(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
 
 
 @pytest.mark.parametrize(
@@ -474,6 +489,23 @@ def test_a_number_its_label_calls_an_id_is_no_phone_number(engine, text, needle)
     assert ID in types and PlaceholderType.PHONE not in types
 
 
+# Ruling R95 (M1): the registration label reaches "number" up to 40 characters after "company" or
+# "registered"; a telephone or fax label right before the digits says what they are.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Company telephone number: 020 7946 0958",
+        "Company fax number: 020 7946 0958",
+        "Registered office telephone number: 020 7946 0958",
+        "Company contact number: 020 7946 0958",
+        "company switchboard number 020 7946 0958",
+    ],
+)
+def test_a_number_its_label_calls_a_telephone_number_is_no_id(engine, text):
+    types = types_at(engine, text, "020 7946 0958")
+    assert PlaceholderType.PHONE in types and ID not in types
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -562,6 +594,7 @@ def test_bare_number_in_price_context_is_low_confidence_amount(engine):
         ("It shall discharge 48,000 in all.", 0.4),  # nor "charge" inside "discharge"
         ("the sum of 48,000 in all", 0.75),
         ("the charges of 48,000 in all", 0.75),
+        ("Subtotal: 48,000 in all", 0.75),  # the subtotal is a price word of its own
     ],
 )
 def test_a_context_word_counts_only_as_a_whole_word(engine, text, score):
@@ -625,6 +658,40 @@ def test_bare_numbers(engine, text, needle, score):
 )
 def test_bare_number_exclusions(text):
     assert found_by(BareNumberRecognizer(), text) == {}
+
+
+# Ruling R95 (C1): at the start of a line only a clause number's shape (one point, then three
+# digits) stays visible; an amount there, before the words saying what it pays for, is hidden.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Fees\n48,000\tAnnual licence fee", "48,000"),
+        ("Fees\n12,500\tSupport fee", "12,500"),
+        ("27,500 Implementation fee", "27,500"),
+        ("Price list\n1,250,000 Base price for the first year", "1,250,000"),
+        ("Preise\n1.250.000 Gesamtpreis", "1.250.000"),
+    ],
+)
+def test_an_amount_at_the_start_of_a_line_is_still_found(text, needle):
+    assert needle in found_by(BareNumberRecognizer(), text)
+
+
+def test_an_amount_before_what_it_pays_for_in_a_word_file_is_hidden(engine, lists, tmp_path):
+    # Through the app's own reading: a paragraph with a tab, and a table of one cell.
+    import docx
+
+    from themask.detect.pipeline import analyze
+    from themask.export import combined_text, load_sources
+
+    document = docx.Document()
+    document.add_paragraph("SCHEDULE 2 - CHARGES")
+    document.add_paragraph("48,000\tAnnual licence fee")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "27,500 Implementation fee"
+    path = tmp_path / "prices.docx"
+    document.save(str(path))
+    analysis = analyze(combined_text(load_sources([path], False)), engine, lists)
+    hidden = {f.text for g in analysis.groups for f in g.findings}
+    assert {"48,000", "27,500"} <= hidden
 
 
 def test_a_very_long_run_of_digits_is_read_without_error():
@@ -691,6 +758,22 @@ def test_web_addresses(engine, text, needle):
 )
 def test_a_web_address_after_its_label_needs_no_known_top_level_domain(engine, text, needle):
     assert texts_of(engine, text, PlaceholderType.URL) == {needle}
+
+
+# Ruling R95 (I4): the label needs its colon or tab, and the address a top-level domain of two
+# letters or more: "e.g." and "i.e." after "web" or "URL" are no web addresses.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The Supplier publishes its terms on the web e.g. on its portal.",
+        "Notices are sent through the internet i.e. by e-mail.",
+        "The URL i.e. the link is sent.",
+        "The Supplier shall maintain a web site.Customers can order online.",
+        "Website: e.g. the portal",
+    ],
+)
+def test_a_word_after_a_web_label_is_no_web_address(engine, text):
+    assert texts_of(engine, text, PlaceholderType.URL) == set()
 
 
 @pytest.mark.parametrize(

@@ -13,9 +13,10 @@ A secret of the truth counts as found when every place its text holds it, in its
 each of the other forms the truth lists, lies inside one replacement of the plan, of whatever type:
 a company hidden as a person is found, and lowers the type accuracy instead. The places are found
 the way the truth was made, exactly as written, a run of spaces matching any run of spaces. A
-secret the text does not hold is not counted: one only in tracked-deleted or hidden text (the
-prepared copy has neither), or only on a page of a PDF that is a picture. A PDF without any text
-(a scan) is not analysed at all.
+secret the text does not hold is left out only when the truth says it is in tracked-deleted or
+hidden text (the prepared copy has neither), or when its file is a PDF with pages that are
+pictures; any other secret the text does not hold is a miss, so that the pass marks never lose
+part of their count unseen (ruling R95). A PDF without any text (a scan) is not analysed at all.
 """
 
 from __future__ import annotations
@@ -129,8 +130,11 @@ class GroupResult:
 class DocumentResult:
     """The evaluation of one file of the corpus.
 
-    ``items`` are the secrets its text holds; ``not_in_text`` the secrets of its truth the text
-    does not hold (only deleted, hidden, or on a picture page); ``false_positives`` the groups
+    ``image_pages`` are the pages of a PDF that are pictures, as the manifest lists them.
+    ``items`` are the secrets the evaluation counts; ``not_in_text`` the secrets of its truth it
+    leaves out: those only in deleted or hidden text, and in a file with picture pages those its
+    text does not hold (any other secret the text does not hold is a miss); ``false_positives``
+    the groups
     that hide no secret, and ``stray`` the places that the groups of a secret hide outside every
     place of a secret (placeholder, text, the words around it); ``never_hide`` the never-hide
     terms its plan hides; ``seconds`` the time from reading the file to the end of the analysis.
@@ -140,6 +144,7 @@ class DocumentResult:
     file: str
     format: str
     features: tuple[str, ...]
+    image_pages: tuple[int, ...] = ()
     items: list[ItemResult] = field(default_factory=list)
     not_in_text: list[Secret] = field(default_factory=list)
     false_positives: list[GroupResult] = field(default_factory=list)
@@ -150,7 +155,8 @@ class DocumentResult:
 
 
 def _ratio(found: int, total: int) -> float:
-    return found / total if total else 1.0
+    """``found`` of ``total``; no secret counted is no pass (ruling R95)."""
+    return found / total if total else 0.0
 
 
 @dataclass
@@ -225,11 +231,14 @@ def _evaluated(
 ) -> DocumentResult:
     file, file_format = str(entry["file"]), str(entry["format"])
     features = entry.get("features", [])
-    if not isinstance(features, list):
-        raise TypeError(f"The features of {file} are not a list.")
+    image_pages = entry.get("image_pages", [])
+    if not isinstance(features, list) or not isinstance(image_pages, list):
+        raise TypeError(f"The features or image pages of {file} are not a list.")
     truth_file = corpus_dir / str(entry["truth"])
     truth = [Secret.from_json(item) for item in json.loads(truth_file.read_text("utf-8"))]
-    document = DocumentResult(file, file_format, tuple(str(f) for f in features))
+    document = DocumentResult(
+        file, file_format, tuple(str(f) for f in features), tuple(int(p) for p in image_pages)
+    )
     started = time.perf_counter()
     try:
         sources = load_sources([corpus_dir / file], False)
@@ -295,13 +304,14 @@ def score(
     secret_places: list[tuple[int, int]] = []
     for secret in truth:
         spans = _outermost({span for form in secret.forms for span in places(text, form)})
-        if secret.only_in_deletion or secret.hidden or not spans:
+        on_a_picture = not spans and bool(document.image_pages)
+        if secret.only_in_deletion or secret.hidden or on_a_picture:
             document.not_in_text.append(secret)
             continue
         secret_places += spans
         covers = [cover(start, end) for start, end in spans]
         hidden_by = tuple(sorted({c for c in covers if c is not None}))
-        found = all(c is not None for c in covers)
+        found = bool(covers) and all(c is not None for c in covers)  # no place: nothing hidden
         document.items.append(
             ItemResult(
                 document.file,
@@ -464,7 +474,7 @@ def _details(evaluation: Evaluation, out: Callable[[str], object]) -> None:
             if secret.only_in_deletion
             else "only hidden"
             if secret.hidden
-            else "not in the text"
+            else "not in the text of a file with picture pages"
         )
         out(f"  {file:<24} {secret.type.value:<9} {secret.value!r} ({why})")
 

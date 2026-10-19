@@ -152,15 +152,15 @@ _MODEL_RECOGNIZER = SpacyRecognizer.__name__
 # What the label before a number calls it beats what else its digits could be. Our recognizers of a
 # number after its label ("registered under number", "Account number:") beat a phone reading of the
 # same digits: Presidio's phone recognizer takes "number" for its own context word. What they find
-# is kept even in the shape of a date ("Company No. 12/2024"). A telephone label beats Presidio's
-# NHS reading, which takes the 3-3-4 shape of many national phone numbers ("telephone 013 625
-# 5086") for an NHS number.
+# is kept even in the shape of a date ("Company No. 12/2024"). A telephone label right before the
+# digits beats both, and Presidio's NHS reading, which takes the 3-3-4 shape of many national phone
+# numbers ("telephone 013 625 5086") for an NHS number.
 _LABELLED_NUMBER_RECOGNIZERS = frozenset(
     {RegistrationNumberRecognizer.__name__, AccountNumberRecognizer.__name__}
 )
 _NHS_RECOGNIZER = NhsRecognizer.__name__
 _TELEPHONE_LABEL = re.compile(
-    r"\b(?i:telephone|tel|phone|mobile|mob|fax|cell)\b\.?[ \t]*"
+    r"\b(?i:telephone|tel|phone|mobile|mob|fax|cell|switchboard|contact)\b\.?[ \t]*"
     r"(?:(?i:number|no)\b\.?[ \t]*)?[:#]?[ \t]*\Z"
 )
 # How far before a number its telephone label may begin.
@@ -197,6 +197,12 @@ _LABELS_ITS_LINE = re.compile(r"[ \t]*:")
 # Up to three words and a colon at the start of a model finding, before its value: "Country:
 # Netherlands", "SUPPLIER: Northwind Trading B.V.".
 _LEADING_LABEL = re.compile(r"(?:[^\W\d_][\w\-]*[ \t]+){0,2}[^\W\d_][\w\-]*[ \t]*:[ \t]*(?=\S)")
+# A time of day, maybe with its time zone or "am"/"pm": "17:00 CET", "9.30 am". The model can read
+# one as a person.
+_TIME_OF_DAY = re.compile(
+    r"\d{1,2}[:.]\d{2}(?:[ \t]*(?:(?i:[ap]\.?m\.?|hrs|hours|h)|CET|CEST|GMT|BST|UTC|EET|EEST"
+    r"|WET|WEST))?"
+)
 # A salutation before a name: "Dear Smith".
 _SALUTATION = re.compile(r"(?i:dear)[ \t]+(?=\S)")
 # A label and its value in one part: "BIC: DEUTDEBB".
@@ -312,7 +318,8 @@ def _checked_by_rules(
     are the document's defined terms.
 
     A model finding is cut into its lines, and a part that names nobody goes. Then a model finding
-    on the same span as a rule's goes (the rule's stands), and so does a job title found as a name.
+    on the same span as a rule's goes (the rule's stands), and so does a job title found as a name,
+    and a time of day ("17:00 CET", ruling R95).
     A place the model finds counts only as part of an address the rules found, or as the name it is
     a short form of (ruling R21), never as a defined term; any other place goes. A company with
     neither a legal form nor a rule's finding over it is marked for checking.
@@ -325,7 +332,11 @@ def _checked_by_rules(
         for part in _lines_of(text, finding)
         if not (
             part.source == "model"
-            and ((part.start, part.end) in rule_spans or _is_job_title_name(part))
+            and (
+                (part.start, part.end) in rule_spans
+                or _is_job_title_name(part)
+                or _TIME_OF_DAY.fullmatch(part.text)
+            )
         )
     ]
     defined = {normalize(term) for term in terms}
@@ -356,14 +367,12 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
     """
     if finding.source != "model":
         return [finding]
-    if _PART_BREAK.search(finding.text) is None and not _label_end(finding.text):
+    breaks = _part_breaks(finding.text)
+    if not breaks and not _label_end(finding.text):
         return [finding]
     parts = []
     piece_start = 0
-    for piece_end, next_start in [
-        *((b.start(), b.end()) for b in _PART_BREAK.finditer(finding.text)),
-        (len(finding.text), len(finding.text)),
-    ]:
+    for piece_end, next_start in [*breaks, (len(finding.text), len(finding.text))]:
         line = finding.text[piece_start:piece_end]
         stripped = line.strip()
         label = _label_end(stripped)
@@ -377,6 +386,24 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
         if visible >= _MIN_PART_CHARACTERS and not _names_nobody(text, start, end):
             parts.append(replace(finding, start=start, end=end, text=stripped))
     return parts
+
+
+def _part_breaks(text: str) -> list[tuple[int, int]]:
+    """Where a model finding's ``text`` is cut (``_PART_BREAK``), but for a spaced hyphen between
+    two capitalised words, which joins a double name ("Smith - Jones Logistics Ltd", "John Carter -
+    Managing"), unless the contract's own words follow it, as a running header's title does
+    ("Greystone - Brinkhof - Agreement", ruling R95).
+    """
+    breaks = []
+    for cut in _PART_BREAK.finditer(text):
+        if cut.group().strip() == "-":
+            before = text[: cut.start()].split()
+            after = text[cut.end() :].split()
+            names = bool(before and after) and before[-1][:1].isupper() and after[0][:1].isupper()
+            if names and not is_contract_wording(after[0]):
+                continue
+        breaks.append(cut.span())
+    return breaks
 
 
 def _label_end(text: str) -> int:
@@ -494,26 +521,31 @@ def _marked_if_unconfirmed(finding: Finding, rules: list[Finding]) -> Finding:
 
 def _read_as_labelled(text: str, found: list[tuple[Finding, str]]) -> list[Finding]:
     """The findings of ``found`` (each with the name of its recognizer) but the readings of a
-    number that the label before it contradicts: a phone number where one of our recognizers read
-    the same digits after their label as a registration or account number, and an NHS number
-    where a telephone label stands before digits that are a phone number too. The value stays
-    hidden either way; only the type it is hidden as changes.
+    number that the label before it contradicts. Where a telephone label stands right before
+    digits that are a phone number, the phone reading wins over a registration, account or NHS
+    reading of them ("Company telephone number: 020 7946 0958"); otherwise a registration or
+    account number our recognizers read after their label wins over a phone reading of the same
+    digits. The value stays hidden either way; only the type it is hidden as changes.
     """
     labelled = {(f.start, f.end) for f, name in found if name in _LABELLED_NUMBER_RECOGNIZERS}
     phones = {(f.start, f.end) for f, _ in found if f.type is PlaceholderType.PHONE}
+    called_phones = {span for span in phones if _after_a_telephone_label(text, span[0])}
     kept = []
     for finding, recognizer in found:
         span = (finding.start, finding.end)
-        if finding.type is PlaceholderType.PHONE and span in labelled:
+        if finding.type is PlaceholderType.PHONE and span in labelled - called_phones:
             continue
-        if (
-            recognizer == _NHS_RECOGNIZER
-            and span in phones
-            and _TELEPHONE_LABEL.search(text, max(0, finding.start - _LABEL_WINDOW), finding.start)
-        ):
+        if recognizer in _LABELLED_NUMBER_RECOGNIZERS and span in called_phones:
+            continue  # "Company telephone number: 020 7946 0958" (ruling R95)
+        if recognizer == _NHS_RECOGNIZER and span in called_phones:
             continue
         kept.append(finding)
     return kept
+
+
+def _after_a_telephone_label(text: str, start: int) -> bool:
+    """Whether a telephone label stands right before ``start``: "Telephone:", "fax number"."""
+    return _TELEPHONE_LABEL.search(text, max(0, start - _LABEL_WINDOW), start) is not None
 
 
 def _is_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:

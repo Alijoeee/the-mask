@@ -5,6 +5,7 @@ The tests that take the ``engine`` fixture go through ``Engine.analyze``; the ot
 directly, which need no language model.
 """
 
+import re
 import time
 
 import pytest
@@ -433,6 +434,20 @@ def test_legal_form_company_boundaries(text, names):
     assert texts(find_legal_form_companies(text), text) == names
 
 
+# Review of the Task 24 tuning (ruling R95): only a term in capitals goes on after a legal form
+# written as a word ("Corporation Tax"); a company's warranty or guarantee in lower case does not.
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("Acme Corporation warranty claims are excluded.", "Acme Corporation"),
+        ("The Acme Holdings Limited guarantee remains in force.", "Acme Holdings Limited"),
+        ("Northwind Corporation taxes are paid in Delaware.", "Northwind Corporation"),
+    ],
+)
+def test_a_legal_form_before_a_word_in_lower_case_ends_the_company(text, name):
+    assert texts(find_legal_form_companies(text), text) == {name}
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -456,6 +471,7 @@ def test_legal_form_company_boundaries(text, names):
         "The UK Corporation Tax rate applies.",
         "under the Corporation Tax Act 2010",
         "The Product Limited Warranty covers defects.",
+        "It advises on UK Corporation Tax.",  # the term ends the sentence
     ],
 )
 def test_no_legal_form_company(text):
@@ -690,6 +706,27 @@ def test_names_and_bare_references_are_not_contract_wording(text):
         (
             "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary",
             "10 Downing Street, London SW1A 2AA, United Kingdom",
+        ),
+        # Ruling R95 (I3): a postcode after the country is still part of the address.
+        (
+            "Address: 5 Merrion Square, Dublin 2, Ireland, D02 X285",
+            "5 Merrion Square, Dublin 2, Ireland, D02 X285",
+        ),
+        (
+            "Address: 1 Main Street, London, United Kingdom, SW1A 1AA",
+            "1 Main Street, London, United Kingdom, SW1A 1AA",
+        ),
+        (
+            "Address: 12 High Street, Cardiff, Wales, CF10 1AA, United Kingdom",
+            "12 High Street, Cardiff, Wales, CF10 1AA, United Kingdom",
+        ),
+        (
+            "Registered office: 1 Queen Street, Edinburgh, Scotland, EH2 1JX",
+            "1 Queen Street, Edinburgh, Scotland, EH2 1JX",
+        ),
+        (
+            "Address: Rue de la Loi 200, 1049 Brussels, Belgium, VAT BE0123456789",
+            "Rue de la Loi 200, 1049 Brussels, Belgium",
         ),
     ],
 )
@@ -1042,6 +1079,21 @@ def test_a_model_finding_loses_the_label_it_starts_with(engine):
     assert "John Carter" in texts(fs, t)
 
 
+# Ruling R95 (M2): a spaced hyphen between two capitalised words joins a double name; before the
+# contract's own words it still parts a running header from its title.
+def test_a_spaced_hyphen_between_names_is_no_separator(engine):
+    t = "This Agreement is made between Smith - Jones Logistics Ltd and Acme Supplies Ltd."
+    assert "Smith - Jones Logistics Ltd" in texts(of_type(engine.analyze(t), COMPANY), t)
+    t = "Signed by John Carter - Managing Director of Acme Supplies Ltd."
+    assert "Managing" not in texts(engine.analyze(t), t)
+
+
+def test_a_spaced_hyphen_before_a_title_still_parts_a_header(engine):
+    t = "Greystone Logistics Ltd provides the Services.\nGreystone - Brinkhof - Agreement"
+    header = t.index("Greystone -")
+    assert not [f for f in engine.analyze(t) if f.start >= header and "Agreement" in f.text]
+
+
 def test_the_title_in_a_running_header_stays_visible(engine):
     t = (
         "Kanaalzicht Logistics B.V. and Harbourline Retail Ltd sign.\n"
@@ -1052,6 +1104,23 @@ def test_the_title_in_a_running_header_stays_visible(engine):
         "Kanaalzicht",
         "Harbourline",
     }
+
+
+# Ruling R95: the model reads a time with its zone as a person ("17:00 CET").
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Orders received by 17:00 CET are shipped.",
+        "Orders received by 17:00 CET or by 1700 CET are shipped the same day.",
+        "The cut-off time is 17:00 CET; deliveries by 09:00 GMT.",
+        "Support runs from 9.30 am to 5.30 pm.",
+    ],
+)
+def test_a_time_of_day_is_never_a_name(engine, text):
+    times = re.compile(r"\d{1,2}[:.]\d{2}")
+    assert not [
+        f for f in engine.analyze(text) if f.type in (PERSON, COMPANY) and times.search(f.text)
+    ]
 
 
 def test_title_lines_and_job_titles_are_never_findings(engine):

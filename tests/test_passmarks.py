@@ -20,6 +20,20 @@ AMOUNT = PlaceholderType.AMOUNT
 EMAIL = PlaceholderType.EMAIL
 
 
+# The secrets of the corpus that no analysed text holds: six only in tracked-deleted or hidden
+# text, and the IBAN on the picture page of mixed-01.pdf. Any other secret left out would shrink
+# the pass marks' own count (ruling R95).
+LEFT_OUT = {
+    ("supply-03.docx", "AMOUNT", "EUR 224,000.00"),
+    ("services-02.docx", "AMOUNT", "\N{EURO SIGN}769,000.00"),
+    ("nda-02.docx", "PERSON", "Neil Cartwright"),
+    ("nda-05.docx", "PERSON", "Damian Sullivan"),
+    ("dpa-03.docx", "EMAIL", "privacy@havenlicht.example"),
+    ("dpa-03.docx", "PHONE", "+353 1 471 4299"),
+    ("mixed-01.pdf", "IBAN", "IE96 BOFI 9000 1735 4448 87"),
+}
+
+
 @pytest.mark.slow
 def test_pass_marks(corpus, engine, lists):
     from tools.evaluate import evaluate
@@ -32,6 +46,11 @@ def test_pass_marks(corpus, engine, lists):
         print(name, part.recall_pattern, part.recall_names, part.seconds_thirty_pages)
     assert ev.recall_pattern >= 0.99 and ev.recall_names >= 0.95
     assert ev.never_hide_false_positives == []
+    # Every file but the scanned one is analysed, and only the secrets no text holds are left out.
+    assert [d.file for d in ev.documents if d.skipped] == ["scanned-01.pdf"]
+    assert len([d for d in ev.documents if not d.skipped]) == 35
+    left_out = {(d.file, s.type.value, s.value) for d in ev.documents for s in d.not_in_text}
+    assert left_out == LEFT_OUT
 
 
 @pytest.mark.slow
@@ -51,14 +70,14 @@ def _group(kind, placeholder, text, *spans):
     return Group(placeholder, kind, text[spans[0][0] : spans[0][1]], set(), findings, placeholder)
 
 
-def _scored(text, groups, truth, user_lists=None, defined=()):
+def _scored(text, groups, truth, user_lists=None, defined=(), image_pages=()):
     plan = MaskPlan(
         [Replacement(f.start, f.end, g.placeholder) for g in groups for f in g.active_findings()]
     )
     case = CaseLists([], [], set(defined))
     names = [form for secret in truth for form in secret.forms]
     is_term = never_hide_check(user_lists or UserLists([], []), case, names=names)
-    document = DocumentResult("x.docx", "docx", ())
+    document = DocumentResult("x.docx", "docx", (), image_pages=tuple(image_pages))
     score(document, text, groups, plan, truth, is_term)
     return document
 
@@ -107,14 +126,34 @@ def test_a_secret_hidden_as_another_type_is_found_and_typed_wrong():
     assert (item.found, item.typed_right, item.placeholders) == (True, False, ("[PERSON_1]",))
 
 
-def test_a_secret_not_in_the_text_is_not_counted():
+def test_a_secret_only_in_deleted_or_hidden_text_is_not_counted():
     text = "Nothing here."
-    truth = [Secret(EMAIL, "a@b.example"), Secret(PERSON, "Jane Doe", only_in_deletion=True)]
+    truth = [
+        Secret(EMAIL, "a@b.example", hidden=True),
+        Secret(PERSON, "Jane Doe", only_in_deletion=True),
+    ]
     document = _scored(text, [], truth)
     assert document.items == [] and [s.value for s in document.not_in_text] == [
         "a@b.example",
         "Jane Doe",
     ]
+
+
+def test_a_secret_missing_from_the_text_is_a_miss_unless_a_page_is_a_picture():
+    # Ruling R95 (I5): a secret the text lost is no reason to count it out.
+    text = "Nothing here."
+    truth = [Secret(EMAIL, "a@b.example")]
+    (item,) = _scored(text, [], truth).items
+    assert (item.found, item.places) == (False, 0)
+    on_a_picture = _scored(text, [], truth, image_pages=[2])
+    assert on_a_picture.items == [] and [s.value for s in on_a_picture.not_in_text] == [
+        "a@b.example"
+    ]
+
+
+def test_no_secret_counted_is_no_pass():
+    ev = Evaluation.of([DocumentResult("x.docx", "docx", ())])
+    assert (ev.recall_pattern, ev.recall_names, ev.passed) == (0.0, 0.0, False)
 
 
 def test_a_group_that_hides_no_secret_is_listed():

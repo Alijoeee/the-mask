@@ -183,8 +183,8 @@ _JOB_TITLE_WORDS = _JOB_TITLE_NOUNS | _vocabulary(
 # GOODS AS DESCRIBED"). "LIMITED" between capitals is a word too ("PRODUCT LIMITED WARRANTY").
 _SHORT_FORMS = frozenset({"se", "ab", "as", "co"})
 _WORD_FORMS = frozenset({"limited", "incorporated", "corporation"})
-# A legal form written as a word is part of a term when one of these words follows it: "UK
-# Corporation Tax", "the Product Limited Warranty".
+# A legal form written as a word is part of a term when one of these words follows it in capitals:
+# "UK Corporation Tax", "the Product Limited Warranty".
 _TERM_AFTER_A_WORD_FORM = frozenset({"tax", "taxes", "warranty", "warranties", "guarantee"})
 # "KG" after one of these words is a weight in kilograms, as a packing table heads its columns
 # ("NET WEIGHT KG", "Max Load KG"), not the German legal form.
@@ -296,8 +296,8 @@ def _written_as_a_legal_form(doc: _Document, i: int, count: int) -> bool:
         return False
     following = i + count
     goes_on = doc.joined(following)  # a word follows on the same line
-    next_word = _core(doc.word(following)).casefold() if goes_on else ""
-    if key in _WORD_FORMS and next_word in _TERM_AFTER_A_WORD_FORM:
+    next_word = _core(doc.word(following)).rstrip(".,;:") if goes_on else ""
+    if key in _WORD_FORMS and _is_a_term_word(next_word):
         return False  # "Corporation Tax"
     after_capitals = doc.joined(i, comma=True) and _core(doc.word(i - 1)).isupper()
     if key in _SHORT_FORMS and not any(mark in form for mark in "./"):
@@ -306,6 +306,14 @@ def _written_as_a_legal_form(doc: _Document, i: int, count: int) -> bool:
         word = _core(doc.word(following))
         return not (word.isupper() and not has_legal_form(word))
     return True
+
+
+def _is_a_term_word(word: str) -> bool:
+    """Whether ``word``, after a legal form written as a word, makes a term with it: one of
+    _TERM_AFTER_A_WORD_FORM in capitals ("Corporation Tax"). In lower case it follows the company
+    ("Acme Corporation warranty claims").
+    """
+    return word[:1].isupper() and word.casefold() in _TERM_AFTER_A_WORD_FORM
 
 
 def _legal_form_length(doc: _Document, i: int) -> int:
@@ -953,6 +961,8 @@ _ADDRESS_ABBREVIATIONS = _vocabulary(
 _HOUSE_NUMBER_LABEL = frozenset({"no", "nr"})
 # An address has at most this many parts (the words between two commas) and words.
 _MAX_ADDRESS_PARTS = 8
+# A word of a postcode has at most this many letters and digits ("SW1A", "X285", "10115").
+_POSTCODE_WORD_LENGTH = 8
 _MAX_ADDRESS_WORDS = 30
 
 
@@ -1026,12 +1036,29 @@ def _is_a_country(doc: _Document, part: list[int]) -> bool:
     return all(word in _COUNTRY_WORDS for word in words) and any(w in _COUNTRIES for w in words)
 
 
+def _is_a_postcode_part(doc: _Document, k: int) -> bool:
+    """Whether the part of an address that starts at word ``k`` is a postcode: one or two short
+    words of letters and digits, a digit among them, and no label ("D02 X285", "SW1A 1AA"; not
+    "VAT BE0123456789" nor "Attention Finance").
+    """
+    last = k
+    while last - k < 2 and last + 1 < len(doc) and _address_joined(doc, last + 1):
+        last += 1
+    words = [_core(doc.word(i)) for i in range(k, last + 1)]
+    return (
+        len(words) <= 2
+        and any(character.isdigit() for word in words for character in word)
+        and all(word.isalnum() and len(word) <= _POSTCODE_WORD_LENGTH for word in words)
+        and not any(word.casefold() in _LABEL_WORDS for word in words)
+    )
+
+
 def _address_end(doc: _Document, k: int) -> int | None:
     """Where the address that starts at word ``k`` ends: after its last part, a part being the
     words up to the next comma. It ends at a bracket, a semicolon, a quote, a tab, a line break, or
     a word that cannot be part of an address ("and", "a company", "VAT number"), after its country
-    ("..., the Netherlands, Attention Finance"), and after _MAX_ADDRESS_PARTS parts or
-    _MAX_ADDRESS_WORDS words at most.
+    unless its postcode follows ("..., the Netherlands, Attention Finance"; "..., Ireland, D02
+    X285" goes on), and after _MAX_ADDRESS_PARTS parts or _MAX_ADDRESS_WORDS words at most.
     """
     end = None
     limit = min(len(doc), k + _MAX_ADDRESS_WORDS)
@@ -1056,8 +1083,10 @@ def _address_end(doc: _Document, k: int) -> int | None:
         if not complete and not (part_number == 0 or has_digit):
             break  # "..., VAT number NL1": not part of the address
         end = _address_word_end(doc, part[-1])
-        if not complete or not _starts_next_part(doc, j) or _is_a_country(doc, part):
+        if not complete or not _starts_next_part(doc, j):
             break
+        if _is_a_country(doc, part) and not _is_a_postcode_part(doc, j):
+            break  # what follows the country is no part of the address, but its postcode
         k = j
     return end
 

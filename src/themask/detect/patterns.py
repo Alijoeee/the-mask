@@ -302,6 +302,9 @@ class PercentRecognizer(CheckedPatternRecognizer):
         )
 
 
+# "records" as a quantity's unit, and a plain year before it.
+_RECORDS = re.compile(r"(?i:records)\Z")
+_PLAIN_YEAR = re.compile(r"(?:19|20)\d{2}(?!\d)" + _SPACE + r"?(?i:records)\Z")
 # A currency just before a figure: the figure is an amount (€2.5m), not a length in metres.
 _CURRENCY_BEFORE = re.compile(_CURRENCY_MARK + _SPACE + r"?\Z")
 _SCALE_WORD = re.compile(r"(?i:hundred|thousand|million|billion)")
@@ -312,8 +315,8 @@ class QuantityRecognizer(CheckedPatternRecognizer):
 
     10,000 units · 48 pallets · 2.5 tonnes · 500kg · 1 250 m² · 2.5 million units · "ten (10)
     pallets" · 350,000 records. A number in words counts only with a scale word or figures after
-    it, so that "in two cases" and "one item" stay prose. A figure that is a reference ("the Article
-    30 records", "clause 12 records") is none.
+    it, so that "in two cases" and "one item" stay prose. Records named by a reference or a year
+    ("the Article 30 records", "the 2025 records") are no quantity.
     """
 
     def __init__(self) -> None:
@@ -336,9 +339,18 @@ class QuantityRecognizer(CheckedPatternRecognizer):
             return pattern.score if spelled_out else 0.0
         if _CURRENCY_BEFORE.search(text, max(0, match.start() - 8), match.start()):
             return 0.0
-        if _REFERENCE_BEFORE.search(text, max(0, match.start() - 24), match.start()):
+        if _RECORDS.search(match.group()) and _are_records_named(text, match):
             return 0.0
         return pattern.score
+
+
+def _are_records_named(text: str, match: re.Match[str]) -> bool:
+    """Whether the figure before "records" names them rather than counts them: a reference ("the
+    Article 30 records") or a year ("the 2025 records", ruling R95).
+    """
+    if _PLAIN_YEAR.match(match.group()):
+        return True
+    return _REFERENCE_BEFORE.search(text, max(0, match.start() - 24), match.start()) is not None
 
 
 # --- VAT, registration and identity numbers ------------------------------------------------------
@@ -637,12 +649,26 @@ _MONTH_BEFORE = re.compile(
 )
 # A time of day in four figures, before its time zone: "by 1700 CET".
 _TIME_ZONE_AFTER = re.compile(_SPACE + r"*(?:CET|CEST|GMT|BST|UTC|EET|EEST|WET|WEST)\b")
-# A clause number starts its line, and its heading or its first sentence follows it: "1.100 The
-# Supplier shall ...".
+# A clause number with three digits after its point starts its line, and its heading or its first
+# sentence follows it: "1.100 The Supplier shall ...". Only that shape: an amount at the start of a
+# line, before the words that say what it pays for, stays one ("48,000<tab>Annual licence fee",
+# "1.250.000 Gesamtpreis", ruling R95).
+_CLAUSE_SHAPE = re.compile(r"\d{1,3}\.\d{3}")
 _LINE_START_BEFORE = re.compile(r"(?:\A|\n)[ \t]*\Z")
 _HEADING_AFTER = re.compile(r"[ \t]+[A-Z]")
 # Words that make a bare number a likely amount when they come shortly before it.
-_PRICE_WORDS = ("price", "fee", "amount", "total", "value", "charge", "consideration", "sum")
+# Presidio matches them as whole words, so "subtotal" is one of its own.
+_PRICE_WORDS = (
+    "price",
+    "fee",
+    "amount",
+    "total",
+    "subtotal",
+    "value",
+    "charge",
+    "consideration",
+    "sum",
+)
 
 
 class BareNumberRecognizer(CheckedPatternRecognizer):
@@ -694,9 +720,22 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
             return 0.0
         if _STANDARD_BEFORE.search(text, before, start):
             return 0.0
-        if _LINE_START_BEFORE.search(text, before, start) and _HEADING_AFTER.match(text, end):
-            return 0.0  # a clause number
+        if _is_a_clause_number(text, match):
+            return 0.0
         return pattern.score
+
+
+def _is_a_clause_number(text: str, match: re.Match[str]) -> bool:
+    """Whether the bare figure ``match`` is a clause number: in its shape (``_CLAUSE_SHAPE``, no
+    decimals), at the start of its line and before a capital.
+    """
+    start, end = match.span()
+    return (
+        match["decimals"] is None
+        and _CLAUSE_SHAPE.fullmatch(match["integer"]) is not None
+        and _LINE_START_BEFORE.search(text, max(0, start - 24), start) is not None
+        and _HEADING_AFTER.match(text, end) is not None
+    )
 
 
 def _is_a_time_of_day(value: int) -> bool:
@@ -773,9 +812,13 @@ class WebAddressRecognizer(UrlRecognizer):
         )
 
 
-# A web address after its label ("Website:", "Web:", "URL:"), with any top-level domain: the label
-# says what it is ("Website: acme.me").
-_WEB_LABEL = r"(?i:\b(?:website|web|url|internet|homepage)\b)" + _LABEL_TO_VALUE
+# A web address after its label ("Website:", "Web:", "URL:"), with any top-level domain of two
+# letters or more: the label says what it is ("Website: acme.me"). The label ends in a colon or a
+# tab, so that "on the web e.g. on its portal" and "a web site.Customers" stay prose (ruling R95).
+_WEB_LABEL = (
+    r"(?i:\b(?:website|web|url|internet|homepage)\b)" + _LABEL_GAP + r"*[:\t]" + _LABEL_GAP + "*"
+)
+_TOP_LEVEL_DOMAIN_LETTERS = re.compile(r"[^\W\d_]{2,}")
 _LABELLED_DOMAIN = (
     r"(?P<value>(?i:" + _DOMAIN_LABEL + r"(?:\." + _DOMAIN_LABEL + r")+)" + _ADDRESS_REST + r")"
     r"(?<![.,;:!?)])"
@@ -797,7 +840,8 @@ class LabelledWebAddressRecognizer(CheckedPatternRecognizer):
 
     def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
         top_level_domain = match["value"].split("/")[0].rsplit(".", 1)[-1]
-        return pattern.score if any(c.isalpha() for c in top_level_domain) else 0.0
+        letters = _TOP_LEVEL_DOMAIN_LETTERS.fullmatch(top_level_domain) is not None
+        return pattern.score if letters else 0.0
 
 
 def contract_recognizers() -> list[EntityRecognizer]:
