@@ -384,6 +384,8 @@ def test_recitals_after_the_last_party_are_no_parties():
         "Acme, Inc.",
         "Smith & Co.",
         "Müller & Söhne GmbH & Co. KG",
+        "Schmidt Logistik KG",
+        "Acme Corporation Limited",
         "Marmara Tekstil Ltd. Şti.",
         "Marmara Tekstil Ltd. Sti.",
         "Anadolu Gıda A.Ş.",
@@ -446,6 +448,14 @@ def test_legal_form_company_boundaries(text, names):
         "Limited Warranty",
         "LIMITATION OF LIABILITY",
         "Nabisco Biscuits are sold.",
+        # A weight in kilograms, as a packing table heads its columns.
+        "NET WEIGHT KG",
+        "GROSS WEIGHT KG\tNET WEIGHT KG",
+        "Max Load KG",
+        # A legal form written as a word, in a term that goes on.
+        "The UK Corporation Tax rate applies.",
+        "under the Corporation Tax Act 2010",
+        "The Product Limited Warranty covers defects.",
     ],
 )
 def test_no_legal_form_company(text):
@@ -669,6 +679,15 @@ def test_names_and_bare_references_are_not_contract_wording(text):
             "Keizersgracht 123, 1015 CJ Amsterdam",
         ),
         ("Address:\nKeizersgracht 123, 1015 CJ Amsterdam", "Keizersgracht 123, 1015 CJ Amsterdam"),
+        # An address ends with its country: what follows on the line is no part of it.
+        (
+            "Address: Keizersgracht 123, 1015 CJ Amsterdam, the Netherlands, Attention Finance",
+            "Keizersgracht 123, 1015 CJ Amsterdam, the Netherlands",
+        ),
+        (
+            "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary",
+            "10 Downing Street, London SW1A 2AA, United Kingdom",
+        ),
     ],
 )
 def test_addresses(text, address):
@@ -761,6 +780,9 @@ def test_a_defined_term_after_an_address_label_is_no_address():
             f"1.1 {OPEN}Confidential Information{CLOSE} means all information.",
             {"Confidential Information"},
         ),
+        # A definition in the middle of a line.
+        ('In this Agreement, "Field of Use" means the hotel sector.', {"Field of Use"}),
+        (f"Here {OPEN}Territory{CLOSE} has the meaning given in Schedule 2.", {"Territory"}),
     ],
 )
 def test_defined_terms(text, terms):
@@ -771,6 +793,7 @@ def test_defined_terms(text, terms):
     "text",
     [
         'He said "hello" to the Buyer.',
+        'The word"Goods"means nothing here.',  # no space: not a definition's quote
         '(see "Annex 1")',
         "(company number 01234567)",
         'Acme Supplies Ltd (the "")',

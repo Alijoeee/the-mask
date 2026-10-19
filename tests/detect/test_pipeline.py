@@ -96,6 +96,24 @@ def test_references_standards_dates_and_times_stay_visible(engine, lists, t):
     assert analyze(one(t), engine, lists).groups == []
 
 
+@pytest.mark.parametrize(
+    "t",
+    [
+        "NET WEIGHT KG\tGROSS WEIGHT KG",
+        "The UK Corporation Tax rate applies to the Price.",
+        'In this Agreement, "Field of Use" means the hotel sector. The Field of Use is limited.',
+    ],
+)
+def test_units_taxes_and_terms_defined_mid_line_stay_visible(engine, lists, t):
+    assert analyze(one(t), engine, lists).groups == []
+
+
+def test_an_address_ends_with_its_country(engine, lists):
+    t = "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary"
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "Registered office: [ADDRESS_1], Company Secretary"
+
+
 def test_always_hide_list(engine, lists):
     lists.add_always("Project Falcon")
     t = "Project Falcon starts in May; PROJECT FALCON ends in June."

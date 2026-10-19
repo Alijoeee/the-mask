@@ -104,6 +104,9 @@ _COUNTRIES = _vocabulary(
     uae qatar europe eu eea
     """
 )
+# The words of a country's name in an address: "the Netherlands", "United Kingdom", "United States
+# of America", "Czech Republic".
+_COUNTRY_WORDS = _COUNTRIES | _vocabulary("the of united states republic federal")
 _CURRENCIES = _vocabulary(
     """
     euro euros eur pound pounds gbp sterling dollar dollars usd franc francs chf lira liras yen jpy
@@ -180,6 +183,15 @@ _JOB_TITLE_WORDS = _JOB_TITLE_NOUNS | _vocabulary(
 # GOODS AS DESCRIBED"). "LIMITED" between capitals is a word too ("PRODUCT LIMITED WARRANTY").
 _SHORT_FORMS = frozenset({"se", "ab", "as", "co"})
 _WORD_FORMS = frozenset({"limited", "incorporated", "corporation"})
+# A legal form written as a word is part of a term when one of these words follows it: "UK
+# Corporation Tax", "the Product Limited Warranty".
+_TERM_AFTER_A_WORD_FORM = frozenset({"tax", "taxes", "warranty", "warranties", "guarantee"})
+# "KG" after one of these words is a weight in kilograms, as a packing table heads its columns
+# ("NET WEIGHT KG", "Max Load KG"), not the German legal form.
+_BEFORE_KILOGRAMS = frozenset(
+    {"weight", "net", "gross", "tare", "mass", "load", "payload", "capacity", "max", "min"}
+    | {"maximum", "minimum", "total", "per", "in"}
+)
 
 # --- Words ---------------------------------------------------------------------------------------
 
@@ -273,20 +285,26 @@ def _is_honorific(word: str) -> bool:
 def _written_as_a_legal_form(doc: _Document, i: int, count: int) -> bool:
     """Whether words ``i`` to ``i + count - 1``, a legal form by spelling, are one in running text.
 
-    In lower case only "plc" is ("ltd", "kg" and "limited" are words); see also _SHORT_FORMS.
+    In lower case only "plc" is ("ltd", "kg" and "limited" are words); see also _SHORT_FORMS,
+    _TERM_AFTER_A_WORD_FORM and _BEFORE_KILOGRAMS.
     """
     form = _core(doc.text[doc.words[i].start : doc.words[i + count - 1].end])
     key = normalize(form)
     if form.islower():
         return key == "plc"
+    if key == "kg" and doc.joined(i) and _core(doc.word(i - 1)).casefold() in _BEFORE_KILOGRAMS:
+        return False
+    following = i + count
+    goes_on = doc.joined(following)  # a word follows on the same line
+    next_word = _core(doc.word(following)).casefold() if goes_on else ""
+    if key in _WORD_FORMS and next_word in _TERM_AFTER_A_WORD_FORM:
+        return False  # "Corporation Tax"
     after_capitals = doc.joined(i, comma=True) and _core(doc.word(i - 1)).isupper()
     if key in _SHORT_FORMS and not any(mark in form for mark in "./"):
         return not after_capitals and (form.isupper() or form == "Co")
-    if key in _WORD_FORMS and after_capitals:
-        following = i + count
-        if doc.joined(following):
-            word = _core(doc.word(following))
-            return not (word.isupper() and not has_legal_form(word))
+    if key in _WORD_FORMS and after_capitals and goes_on:
+        word = _core(doc.word(following))
+        return not (word.isupper() and not has_legal_form(word))
     return True
 
 
@@ -992,11 +1010,20 @@ def _starts_next_part(doc: _Document, k: int) -> bool:
     return gap.startswith(",") and all(character in _SPACES for character in gap[1:])
 
 
+def _is_a_country(doc: _Document, part: list[int]) -> bool:
+    """Whether the words ``part`` of an address are its country: "the Netherlands", "Germany",
+    "United Kingdom".
+    """
+    words = [_core(doc.word(k)).rstrip(".").casefold() for k in part]
+    return all(word in _COUNTRY_WORDS for word in words) and any(w in _COUNTRIES for w in words)
+
+
 def _address_end(doc: _Document, k: int) -> int | None:
     """Where the address that starts at word ``k`` ends: after its last part, a part being the
     words up to the next comma. It ends at a bracket, a semicolon, a quote, a tab, a line break, or
-    a word that cannot be part of an address ("and", "a company", "VAT number"), and after
-    _MAX_ADDRESS_PARTS parts or _MAX_ADDRESS_WORDS words at most.
+    a word that cannot be part of an address ("and", "a company", "VAT number"), after its country
+    ("..., the Netherlands, Attention Finance"), and after _MAX_ADDRESS_PARTS parts or
+    _MAX_ADDRESS_WORDS words at most.
     """
     end = None
     limit = min(len(doc), k + _MAX_ADDRESS_WORDS)
@@ -1021,7 +1048,7 @@ def _address_end(doc: _Document, k: int) -> int | None:
         if not complete and not (part_number == 0 or has_digit):
             break  # "..., VAT number NL1": not part of the address
         end = _address_word_end(doc, part[-1])
-        if not complete or not _starts_next_part(doc, j):
+        if not complete or not _starts_next_part(doc, j) or _is_a_country(doc, part):
             break
         k = j
     return end
@@ -1197,11 +1224,13 @@ _HEREINAFTER = re.compile(
     r"\b(?i:hereinafter|hereafter)(?i:[ \t]+(?:referred[ \t]+to[ \t]+as|called|known[ \t]+as))?"
     r"[ \t]*:?[ \t]*(?i:the[ \t]+)?" + _QUOTED
 )
-# A definitions clause: "Business Day" means ..., 1.1 “Confidential Information” means ...
+# A definitions clause: "Business Day" means ..., 1.1 “Confidential Information” means ..., and a
+# definition in the middle of a line: In this Agreement, "Field of Use" means ...
 _MEANS = re.compile(
-    r"^[ \t]*(?:\(?[0-9a-z]{1,3}(?:\.\d{1,3})*[.)]?[ \t]+)?" + _QUOTED + r"[ \t]+(?i:means|shall"
-    r"[ \t]+mean|has[ \t]+the[ \t]+meaning|have[ \t]+the[ \t]+meanings?|includes|shall[ \t]+include"
-    r"|refers[ \t]+to)\b",
+    r"(?:^[ \t]*(?:\(?[0-9a-z]{1,3}(?:\.\d{1,3})*[.)]?[ \t]+)?|(?<=[ \t,;:(]))"
+    + _QUOTED
+    + r"[ \t]+(?i:means|shall[ \t]+mean|has[ \t]+the[ \t]+meaning|have[ \t]+the[ \t]+meanings?"
+    r"|includes|shall[ \t]+include|refers[ \t]+to)\b",
     re.MULTILINE,
 )
 _LEADING_THE = re.compile(r"(?i:the)[ \t]+")
