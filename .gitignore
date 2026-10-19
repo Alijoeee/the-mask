@@ -1,6 +1,7 @@
 .venv/
 build/
 dist/
+.briefcase/
 tests/corpus/generated/
 *.log
 .superpowers/
