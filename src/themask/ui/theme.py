@@ -378,6 +378,7 @@ QLabel#sidebarNote { color: $secondary; font-size: 11px; }
 QLabel#legendTitle { color: $text; font-size: 11px; font-weight: 600; }
 
 QScrollArea#homeScroll, QWidget#homeContent { background: transparent; border: none; }
+QFrame#dropZone QLabel#dropHint:disabled { color: $tertiary; }
 QLabel#sectionTitle { color: $secondary; }
 QFrame#recentPanel { background: $panel; border: 1px solid $border; border-radius: 12px; }
 QFrame#recentRow { background: transparent; border: none; }

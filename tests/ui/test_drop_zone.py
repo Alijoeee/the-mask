@@ -295,6 +295,15 @@ def test_a_zone_can_have_an_illustration_its_own_button_words_and_a_hint_at_a_sh
     assert check.illustration is not None and check.illustration.size() == QSize(64, 64)
 
 
+def test_the_title_is_set_a_little_tight_like_the_mockups(qtbot: QtBot, zone: DropZone) -> None:
+    assert zone.title_label.font().letterSpacing() == pytest.approx(-0.2, abs=0.02)
+    zone.setStyleSheet(theme.stylesheet("light"))  # the stylesheet sets its size and weight
+    zone.show()
+    qtbot.wait(20)
+    assert zone.title_label.font().pixelSize() == 22
+    assert zone.title_label.font().letterSpacing() == pytest.approx(-0.2, abs=0.02)
+
+
 def test_the_zone_is_named_for_a_screen_reader(zone: DropZone) -> None:
     assert zone.accessibleName() == "Drop a contract here"
     assert zone.accessibleDescription() == zone.hint_label.text()

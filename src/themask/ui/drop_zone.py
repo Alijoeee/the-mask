@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QFont
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -104,6 +104,11 @@ class DropZone(QFrame):
         self.title_label = QLabel(title)
         self.title_label.setObjectName("dropTitle")
         self.title_label.setWordWrap(True)
+        title_font = self.title_label.font()
+        title_font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing, -0.2
+        )  # as the mockup's title
+        self.title_label.setFont(title_font)
         self.hint_label = QLabel(hint)
         self.hint_label.setObjectName("dropHint")
         self.hint_label.setWordWrap(True)
