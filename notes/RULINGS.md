@@ -1,10 +1,20 @@
 # The MASK — every controller ruling of the Mac phase, in plain language
 
-DRAFT (session 3, in progress): the rulings list below is complete up to the last number it shows;
-the sections after it are filled in when the final review has run. Each line: what was decided, and
-what it costs if the decision turns out wrong. The design document stays the binding authority; a
-ruling only settles a point the plan left open or got wrong. The full reasoning behind each ruling is
-in `notes/sdd/progress.md` (the ledger), by number.
+Final (session 3, 19 October 2026, mac-v1 at 4bbde49). Each line: what was decided, and what it costs
+if the decision turns out wrong. The design document stays the binding authority; a ruling only settles
+a point the plan left open or got wrong. The full reasoning behind each ruling, with the evidence, is in
+`notes/sdd/progress.md` (the ledger), by number; the final review and its re-review are in
+`notes/sdd/final-review.md`.
+
+## Where things stand
+- Branch `mac-v1` at **4bbde49**, pushed: all 25 build tasks merged; the final whole-branch review done
+  and its 20-item fix wave merged after one scoped re-review (approved, nothing above Minor left).
+- The suite: 3,343 tests green (slow ones included), ruff and mypy clean. Pass marks (design §9): 100 %
+  of pattern-type values (913/913) and of names (320/320) found before review, 0 never-hide terms hidden,
+  the slowest thirty-page file well under 60 s, the corpus round trip 28/28 files restored exactly.
+- Not done, by your instruction: merging `mac-v1` into `main`. Yours: the Mac build, the Wi-Fi-off smoke
+  test and Task 26 (sections below). The checkpoint branches `task-22`, `task-24`, `task-25` on GitHub
+  are merged and can be deleted.
 
 ## The rulings
 
@@ -124,6 +134,7 @@ in `notes/sdd/progress.md` (the ledger), by number.
 - **R114** — The leak gate's twin copy replaces the places of every group, keyed or not, so places you split off and switched off cannot block the export. — *Cost if wrong:* none for leaks.
 - **R115** — Every wall-clock test limit was tripled so the suite does not flake on a loaded machine; a quadratic blow-up still fails. — *Cost if wrong:* a 2× slowdown goes unnoticed by the suite.
 - **R116** — Five small residuals of the fix wave stay as known limits: a damaged style or settings part now makes the file refused ("not a .docx"; re-save it in Word); lower-case "schedule 3 pallets" is hidden as a count; "INCLUDE" sits harmlessly in the field list; table-of-contents links lose their link but keep their text; the leak scan costs under a second more on long files. — *Cost if wrong:* one odd refusal or one over-hidden word you see in the review; never a leak.
+- **R117** — One test (the leak check over the masked corpus file dpa-01) failed once in four full runs and passed alone, under six hash seeds and in the re-run; it is recorded as unexplained rather than hidden. If it ever fails on your Mac, keep the printed hit list. — *Cost if wrong:* a rare false block you resolve by exporting again; never a leak.
 
 ## What Task 26 (your round trip with Copilot, Claude and ChatGPT) needs from you
 
@@ -222,7 +233,7 @@ MaskPlan validation (done in Task 2's model since), the zip archive comment (nev
 ## The remaining local step (your Mac; the cloud cannot build or sign a Mac app)
 
 1. In Terminal: `cd ~/Developer/the-mask && git fetch origin && git checkout mac-v1 && git pull`
-   (mac-v1 must be at the head this file names at its end), then `uv sync --locked`.
+   (mac-v1 must be at 4bbde49, the head named above), then `uv sync --locked`.
 2. The About panel shows your name, "Alican Yazdic" (set in `src/themask/about.py` during the final
    fix wave, on your instruction); nothing to do here unless you want it spelt differently.
 3. Optional but worth it: `uv run pytest -q` — on the Mac the macOS-only tests (vtool, iconutil,
