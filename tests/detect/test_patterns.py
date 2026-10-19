@@ -618,6 +618,9 @@ def test_bare_numbers(engine, text, needle, score):
         "for ten thousand (10,000) days",
         "by 1700 CET each day",
         "after 1730 hours",
+        # A clause number at the start of a line, before its heading or its first sentence.
+        "1.100 The Supplier shall deliver.",
+        "Terms\n  12.250 Delivery",
     ],
 )
 def test_bare_number_exclusions(text):
@@ -675,6 +678,18 @@ def test_email_addresses(text, needle):
     ],
 )
 def test_web_addresses(engine, text, needle):
+    assert texts_of(engine, text, PlaceholderType.URL) == {needle}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Website: acme.me", "acme.me"),
+        ("Web: www-shop.acme.tv/contact", "www-shop.acme.tv/contact"),
+        ("Website:\tnorthwind.xyz", "northwind.xyz"),
+    ],
+)
+def test_a_web_address_after_its_label_needs_no_known_top_level_domain(engine, text, needle):
     assert texts_of(engine, text, PlaceholderType.URL) == {needle}
 
 

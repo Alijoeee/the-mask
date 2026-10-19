@@ -642,6 +642,10 @@ _MONTH_BEFORE = re.compile(
 )
 # A time of day in four figures, before its time zone: "by 1700 CET".
 _TIME_ZONE_AFTER = re.compile(_SPACE + r"*(?:CET|CEST|GMT|BST|UTC|EET|EEST|WET|WEST)\b")
+# A clause number starts its line, and its heading or its first sentence follows it: "1.100 The
+# Supplier shall ...".
+_LINE_START_BEFORE = re.compile(r"(?:\A|\n)[ \t]*\Z")
+_HEADING_AFTER = re.compile(r"[ \t]+[A-Z]")
 # Words that make a bare number a likely amount when they come shortly before it.
 _PRICE_WORDS = ("price", "fee", "amount", "total", "value", "charge", "consideration", "sum")
 
@@ -655,7 +659,8 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
     "21 July 2026.3"), durations ("1,000 days"), times of day ("1700 CET") and references
     ("section 1159", "ISO 9001", "Regulation (EU) No 1169/2011") stay visible. A clause number such
     as 10.2, at the start of a line or after "clause", is never one of these numbers: it is below
-    1,000, and its digits are not in groups of three.
+    1,000, and its digits are not in groups of three; one with three digits after its point ("1.100
+    The Supplier shall") starts its line before a capital.
     """
 
     def __init__(self) -> None:
@@ -694,6 +699,8 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
             return 0.0
         if _STANDARD_BEFORE.search(text, before, start):
             return 0.0
+        if _LINE_START_BEFORE.search(text, before, start) and _HEADING_AFTER.match(text, end):
+            return 0.0  # a clause number
         return pattern.score
 
 
@@ -771,6 +778,33 @@ class WebAddressRecognizer(UrlRecognizer):
         )
 
 
+# A web address after its label ("Website:", "Web:", "URL:"), with any top-level domain: the label
+# says what it is ("Website: acme.me").
+_WEB_LABEL = r"(?i:\b(?:website|web|url|internet|homepage)\b)" + _LABEL_TO_VALUE
+_LABELLED_DOMAIN = (
+    r"(?P<value>(?i:" + _DOMAIN_LABEL + r"(?:\." + _DOMAIN_LABEL + r")+)" + _ADDRESS_REST + r")"
+    r"(?<![.,;:!?)])"
+)
+
+
+class LabelledWebAddressRecognizer(CheckedPatternRecognizer):
+    """A web address written after its label, whatever its top-level domain: "Website: acme.me".
+
+    Without a label, a domain needs a known top-level domain (``WebAddressRecognizer``), so that a
+    full stop with no space after it ("the Supplier.to") is no web address.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            PlaceholderType.URL,
+            [Pattern("Web address after its label", _WEB_LABEL + _LABELLED_DOMAIN, 0.85)],
+        )
+
+    def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
+        top_level_domain = match["value"].split("/")[0].rsplit(".", 1)[-1]
+        return pattern.score if any(c.isalpha() for c in top_level_domain) else 0.0
+
+
 def contract_recognizers() -> list[EntityRecognizer]:
     """One of each of the recognizers above, to add to a Presidio registry."""
     return [
@@ -785,4 +819,5 @@ def contract_recognizers() -> list[EntityRecognizer]:
         BareNumberRecognizer(),
         EmailAddressRecognizer(),
         WebAddressRecognizer(),
+        LabelledWebAddressRecognizer(),
     ]

@@ -121,6 +121,22 @@ def test_a_word_that_makes_a_role_with_the_next_stays_visible(engine, lists):
     )
 
 
+def test_the_first_and_second_party_stay_visible(engine, lists):
+    t = (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The First Party, Acme Supplies Ltd; and\n"
+        "(2) The Second Party, Northwind Trading B.V."
+    )
+    assert masked(analyze(one(t), engine, lists)) == (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The First Party, [COMPANY_1]; and\n"
+        "(2) The Second Party, [COMPANY_2]"
+    )
+
+
+def test_a_salutation_is_no_part_of_a_name(engine, lists):
+    t = "Dear Smith, thank you. John Smith signs."
+    assert masked(analyze(one(t), engine, lists)) == "Dear [PERSON_1], thank you. [PERSON_1] signs."
+
+
 def test_a_label_the_model_takes_with_its_value_stays_visible(engine, lists):
     t = "City: Amsterdam\nAPPENDIX 1A\nCountry: Netherlands"
     assert analyze(one(t), engine, lists).groups == []

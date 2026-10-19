@@ -50,7 +50,8 @@ _ROLES = _terms(
     Sub-contractor, Consultant, Service Provider, Provider, Licensor, Licensee, Lessor, Lessee,
     Landlord, Tenant, Employer, Employee, Worker, Lender, Borrower, Guarantor, Distributor,
     Reseller, Agent, Principal, Manufacturer, Producer, Carrier, Shipper, Consignee, Consignor,
-    Party, Parties, Other Party, Disclosing Party, Receiving Party, Discloser, Recipient, Data
+    Party, Parties, Other Party, First Party, Second Party, Disclosing Party, Receiving Party,
+    Discloser, Recipient, Data
     Controller, Data Processor, Controller, Processor, Sub-processor, Joint Controller, Data
     Subject, Data Exporter, Data Importer, Supervisory Authority, Beneficiary, Affiliate, Group
     Company, Subsidiary, Holding Company, Parent Company, Company, Group, Supplier Group, Buyer

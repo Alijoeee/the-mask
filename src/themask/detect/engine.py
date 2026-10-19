@@ -196,6 +196,8 @@ _LABELS_ITS_LINE = re.compile(r"[ \t]*:")
 # Up to three words and a colon at the start of a model finding, before its value: "Country:
 # Netherlands", "SUPPLIER: Northwind Trading B.V.".
 _LEADING_LABEL = re.compile(r"(?:[^\W\d_][\w\-]*[ \t]+){0,2}[^\W\d_][\w\-]*[ \t]*:[ \t]*(?=\S)")
+# A salutation before a name: "Dear Smith".
+_SALUTATION = re.compile(r"(?i:dear)[ \t]+(?=\S)")
 # A label and its value in one part: "BIC: DEUTDEBB".
 _LABEL_AND_VALUE = re.compile(r"[^\W\d_][\w\-]*[ \t]*:[ \t]*(?P<value>\S.*)")
 # What comes before the place of a law or a court: "the laws of", "the courts of", "court in".
@@ -348,8 +350,8 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
     heading on the next line ("Northwind Trading B.V.\\nCUSTOMER"), the label of the next line
     ("...\\nAttention:"), the start of a job title ("JANE SMITH\\nManaging"), across a tab the
     next field of a form ("Smith\\tTitle:", ruling R58), a running header whole: both parties
-    and the title ("Northwind / Thamesgate - Supply Agreement", with an em dash), and a label with
-    its value ("Country: Netherlands").
+    and the title ("Northwind / Thamesgate - Supply Agreement", with an em dash), a label with its
+    value ("Country: Netherlands") and a salutation with the name ("Dear Smith").
     """
     if finding.source != "model":
         return [finding]
@@ -377,10 +379,14 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
 
 
 def _label_end(text: str) -> int:
-    """Where the label that ``text`` starts with ends, after its colon and the spaces after it,
-    or 0 when it starts with none. A label is made of the contract's own words or is a never-hide
-    term ("Country:", "Name:", "SUPPLIER:"); "John Smith: Director" starts with a name.
+    """Where the label or salutation that ``text`` starts with ends, with the spaces after it, or
+    0 when it starts with none. A label ends in a colon and is made of the contract's own words or
+    is a never-hide term ("Country:", "Name:", "SUPPLIER:"); "John Smith: Director" starts with a
+    name. A salutation is "Dear" ("Dear Smith").
     """
+    salutation = _SALUTATION.match(text)
+    if salutation is not None:
+        return salutation.end()
     label = _LEADING_LABEL.match(text)
     if label is None:
         return 0
