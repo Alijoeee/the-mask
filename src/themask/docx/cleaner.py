@@ -282,7 +282,7 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
 
 def _remove_comments(pkg: DocxPackage, main: str, texts: list[str], report: CleanReport) -> None:
     """Takes out the parts of the comments and their markers; counts the comments."""
-    parts = _comment_parts(pkg, main)
+    parts = comment_parts(pkg, main)
     ids: set[str] = set()
     for name in parts:
         try:
@@ -304,8 +304,12 @@ def _remove_comments(pkg: DocxPackage, main: str, texts: list[str], report: Clea
     report.comments = len(ids)
 
 
-def _comment_parts(pkg: DocxPackage, main: str) -> list[str]:
-    """The comments, their extensions and the people, by name, content type or relationship."""
+def comment_parts(pkg: DocxPackage, main: str) -> list[str]:
+    """The comments, their extensions and the people, by name, content type or relationship.
+
+    ``main`` is the main document, whose relationships lead to them. The restore walks the same
+    parts as the cleaner removes.
+    """
     types = _content_types(pkg)
     related = {
         rel.part
