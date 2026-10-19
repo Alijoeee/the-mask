@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from themask.errors import MaskError
+from themask.errors import KeyStoreError, MaskError
 from themask.ui import theme
 from themask.ui.drop_zone import DropZone
 from themask.ui.widgets import ElidedLabel, LinkButton
@@ -186,8 +186,11 @@ class HomeScreen(QWidget):
     """The first screen: the drop card, what the app is doing, and the recent cases.
 
     ``refresh_recent`` reads the cases of ``ctx.case_store`` again; the window does that when the
-    screen is shown. ``restoreRequested(code)`` and ``casesRequested`` are the links of the cases,
-    and ``engineStateChanged(state)`` ("loading", "ready" or "problem") tells the sidebar how the
+    screen is shown. The cases are locked with a key in the Keychain, which the owner may refuse
+    to give: that is asked once (``keychain_refused``), and the recent cases are not offered again
+    until the app is started again; the Cases screen asks for itself, when the owner opens it.
+    ``restoreRequested(code)`` and ``casesRequested`` are the links of the cases, and
+    ``engineStateChanged(state)`` ("loading", "ready" or "problem") tells the sidebar how the
     engine is.
     """
 
@@ -218,6 +221,7 @@ class HomeScreen(QWidget):
         self.recent = RecentCases()
         self.recent.restoreRequested.connect(self.restoreRequested)
         self.recent.casesRequested.connect(self.casesRequested)
+        self.keychain_refused = False
         self._notices: list[str] = []
 
         for label in (self.status_label, self.step_label):
@@ -316,12 +320,16 @@ class HomeScreen(QWidget):
     def refresh_recent(self) -> None:
         """Read the recent cases again. A store that cannot be read (the Keychain refuses, the
         folder is closed to the app) leaves no section: the Cases screen says what is wrong, and
-        the window already told at the start.
+        the window already told at the start. A refusing Keychain is not asked again.
         """
-        try:
-            summaries = self.ctx.case_store.list()
-        except (MaskError, OSError):
-            summaries = []
+        summaries: list[CaseSummary] = []
+        if not self.keychain_refused:
+            try:
+                summaries = self.ctx.case_store.list()
+            except KeyStoreError:
+                self.keychain_refused = True
+            except (MaskError, OSError):
+                pass
         self.recent.set_cases(summaries[:RECENT_LIMIT], current_time())
 
     # ---- the parts --------------------------------------------------------------------------

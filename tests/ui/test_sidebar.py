@@ -163,8 +163,7 @@ def test_the_chosen_item_is_on_the_accent_with_white_text_and_icon(
     t = theme.tokens(appearance)
     image = item_image(sidebar, "mask")  # chosen at first
     assert image.pixelColor(150, 4) == QColor(t.accent)
-    assert image.pixelColor(100, 17) == QColor(t.accent) or near_white_pixels(image) > 20
-    assert near_white_pixels(image) > 30  # the icon and the word
+    assert near_white_pixels(image) > 30  # the icon and the word are white on it
 
 
 @pytest.mark.parametrize("appearance", ["light", "dark"])

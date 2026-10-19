@@ -327,3 +327,72 @@ def test_the_links_stay_on_while_the_engine_loads(home: HomeScreen, app_ctx: App
     home.refresh_recent()
     home.show_loading()
     assert home.recent.isEnabled()  # the sidebar is on then too
+
+
+class Counting(CaseStore):
+    """A case store that counts how often it is listed, and fails with ``error`` (or does not)."""
+
+    def __init__(
+        self, error: Exception | None = None, purge_error: Exception | None = None
+    ) -> None:
+        super().__init__(Path("/nonexistent"), None)  # type: ignore[arg-type]
+        self.error, self.purge_error, self.listed = error, purge_error, 0
+
+    def list(self) -> list[CaseSummary]:
+        self.listed += 1
+        if self.error is not None:
+            raise self.error
+        return []
+
+    def purge_expired(self, now: datetime | None = None) -> list[str]:
+        if self.purge_error is not None:
+            raise self.purge_error
+        return []
+
+
+def test_a_keychain_that_refused_is_not_asked_again_for_the_recent_cases(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    # Every ask is a prompt of the Keychain: one refusal is enough for the session.
+    store = Counting(KeyStoreError("The MASK could not reach the macOS Keychain."))
+    screen = HomeScreen(replace(app_ctx, case_store=store))
+    qtbot.addWidget(screen)
+    screen.refresh_recent()
+    screen.refresh_recent()
+    screen.refresh_recent()
+    assert store.listed == 1 and screen.keychain_refused and screen.recent.isHidden()
+
+
+def test_a_folder_that_cannot_be_read_is_tried_again_next_time(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    store = Counting(PermissionError(13, "Permission denied"))
+    screen = HomeScreen(replace(app_ctx, case_store=store))
+    qtbot.addWidget(screen)
+    screen.refresh_recent()
+    screen.refresh_recent()
+    assert store.listed == 2 and not screen.keychain_refused
+
+
+def test_a_keychain_that_refused_the_clean_up_is_not_asked_for_the_recent_cases(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    store = Counting(purge_error=KeyStoreError("The MASK could not reach the macOS Keychain."))
+    w = MainWindow(replace(app_ctx, case_store=store))
+    qtbot.addWidget(w)
+    after_start = store.listed  # the Cases screen lists when it is made, and asks for itself
+    w.show_home()
+    w.show_home()
+    assert w.home.keychain_refused and store.listed == after_start  # the home did not ask
+    assert "Keychain" in w.home.notice_label.text()  # and the notice of the clean-up is there
+
+
+def test_a_clean_up_that_failed_for_the_disk_does_not_stop_the_recent_cases(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    store = Counting(purge_error=PermissionError(13, "Permission denied"))
+    w = MainWindow(replace(app_ctx, case_store=store))
+    qtbot.addWidget(w)
+    after_start = store.listed
+    w.show_home()
+    assert not w.home.keychain_refused and store.listed == after_start + 1  # the home asked

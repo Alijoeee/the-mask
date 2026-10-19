@@ -213,6 +213,25 @@ def test_a_review_of_several_files_names_them_all(
     assert window.title_block.title_label.text() == "supply-01.docx, supply-02.docx"
 
 
+def test_a_long_title_is_cut_short_in_a_narrow_window_and_the_primary_action_stays(
+    qtbot: QtBot, window: MainWindow
+) -> None:
+    window.show()
+    window.resize(620, 500)
+    qtbot.waitExposed(window)
+    long_title = ", ".join(f"contract-{n:02d}-with-a-long-name.docx" for n in range(1, 9))
+    window.set_title(long_title, "Review · 14 values found · 2 to check")
+    qtbot.waitUntil(
+        lambda: window.title_block.title_label.displayed_text() != long_title, timeout=2000
+    )
+    shown = window.title_block.title_label.displayed_text()
+    assert shown.endswith("…") and long_title.startswith(shown[:-1])
+    assert window.title_block.title_label.text() == long_title  # a screen reader reads it all
+    button = tool_button(window, window.primary_action)
+    assert button.isVisible() and button.geometry().right() <= window.toolbar.width()
+    assert window.sidebar_toggle.geometry().left() >= 0
+
+
 # ---- the primary action -------------------------------------------------------------------------
 
 
@@ -248,6 +267,7 @@ def test_the_primary_action_of_the_review_is_the_export(
     monkeypatch.setattr(ExportDialog, "run", lambda self, *args: started.append(self))
     analysed(qtbot, window, corpus)
     assert window.primary_action.text() == "Export…" and window.primary_action.isEnabled()
+    assert tool_button(window, window.primary_action).text() == "Export…"  # the dots are shown
     tool_button(window, window.primary_action).click()
     assert window.export_dialog is not None and started == [window.export_dialog]
     assert window.current_screen_name() == "review"  # a dialog over the review

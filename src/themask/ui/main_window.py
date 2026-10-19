@@ -70,7 +70,7 @@ from themask.about import APP_NAME
 from themask.detect.lists import CaseLists
 from themask.docx.package import DocxPackage
 from themask.docx.reader import has_revisions
-from themask.errors import MaskError
+from themask.errors import KeyStoreError, MaskError
 from themask.export import UNSUPPORTED_MESSAGE, ExportOptions, SourceDoc, combined_text
 from themask.model import Analysis, Case
 from themask.review import ReviewState
@@ -410,6 +410,8 @@ class MainWindow(QMainWindow):
         entry = self._primary.get(self.current_screen_name())
         if entry is not None:
             self.primary_action.setText(entry.text)
+            # A tool button shows the icon text, which Qt makes of the text without its "…".
+            self.primary_action.setIconText(entry.text)
             self.primary_action.setEnabled(not self.is_analysing() and entry.enabled())
         self.choose_action.setEnabled(not self.is_analysing() and self.home.drop_zone.isEnabled())
 
@@ -820,6 +822,9 @@ class MainWindow(QMainWindow):
         """
         try:
             self.ctx.case_store.purge_expired()
+        except KeyStoreError as error:
+            self.home.keychain_refused = True  # asked once: the recent cases do not ask again
+            self.home.add_notice(f"{PURGE_FAILED} {error.user_message}")
         except MaskError as error:
             self.home.add_notice(f"{PURGE_FAILED} {error.user_message}")
         except OSError as error:
