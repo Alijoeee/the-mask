@@ -428,6 +428,38 @@ def test_registration(engine):
     )
 
 
+# What the label before a number calls it beats what else its digits could be: Presidio's phone
+# recognizer takes "number" for its own context word, and its NHS recognizer reads the 3-3-4 shape
+# of many national phone numbers.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("registered in England and Wales under number 08846969, whose office", "08846969"),
+        ("Account number: 08846969", "08846969"),
+    ],
+)
+def test_a_number_its_label_calls_an_id_is_no_phone_number(engine, text, needle):
+    types = types_at(engine, text, needle)
+    assert ID in types and PlaceholderType.PHONE not in types
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the account manager is Ms Smith (telephone 013 625 5086), who shall",
+        "Tel: 013 625 5086",
+        "Phone: 013 625 5086",
+    ],
+)
+def test_a_number_its_label_calls_a_telephone_number_is_no_nhs_number(engine, text):
+    types = types_at(engine, text, "013 625 5086")
+    assert PlaceholderType.PHONE in types and ID not in types
+
+
+def test_an_nhs_number_without_a_telephone_label_is_still_an_id(engine):
+    assert ID in types_at(engine, "NHS number 943 476 5919", "943 476 5919")
+
+
 @pytest.mark.parametrize(
     "text,needle",
     [

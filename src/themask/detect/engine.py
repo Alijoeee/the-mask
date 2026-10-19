@@ -33,13 +33,18 @@ import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngine, NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import (
+    NhsRecognizer,
     PhoneRecognizer,
     SpacyRecognizer,
     UkNinoRecognizer,
 )
 
 from themask.detect.contract_rules import apply_rules, is_contract_wording, is_job_title
-from themask.detect.patterns import contract_recognizers
+from themask.detect.patterns import (
+    AccountNumberRecognizer,
+    RegistrationNumberRecognizer,
+    contract_recognizers,
+)
 from themask.model import Finding, FindingSource, PlaceholderType
 from themask.textnorm import COMMON_WORDS, has_legal_form, normalize, variants_of
 
@@ -133,6 +138,22 @@ _DROPPED_RECOGNIZERS = (
 # recognizer works with patterns.
 _MODEL_RECOGNIZER = SpacyRecognizer.__name__
 
+# What the label before a number calls it beats what else its digits could be. Our recognizers of a
+# number after its label ("registered under number", "Account number:") beat a phone reading of the
+# same digits: Presidio's phone recognizer takes "number" for its own context word. A telephone
+# label beats Presidio's NHS reading, which takes the 3-3-4 shape of many national phone numbers
+# ("telephone 013 625 5086") for an NHS number.
+_LABELLED_NUMBER_RECOGNIZERS = frozenset(
+    {RegistrationNumberRecognizer.__name__, AccountNumberRecognizer.__name__}
+)
+_NHS_RECOGNIZER = NhsRecognizer.__name__
+_TELEPHONE_LABEL = re.compile(
+    r"\b(?i:telephone|tel|phone|mobile|mob|fax|cell)\b\.?[ \t]*"
+    r"(?:(?i:number|no)\b\.?[ \t]*)?[:#]?[ \t]*\Z"
+)
+# How far before a number its telephone label may begin.
+_LABEL_WINDOW = 30
+
 # What may end a pattern's match without being part of the value: the end of a sentence, a quote,
 # or a bracket that closes one opened before the value ("(see https://acme.example/terms)").
 _TRAILING_PUNCTUATION = frozenset(
@@ -212,18 +233,21 @@ class Engine:
         return kept
 
     def _presidio_findings(self, text: str) -> list[Finding]:
-        """What Presidio's analyzer finds, as findings; a value found twice is kept once."""
+        """What Presidio's analyzer finds, as findings; a value found twice is kept once, and a
+        reading of a number that its label contradicts goes (``_read_as_labelled``).
+        """
         results = self._analyzer.analyze(text=text, language="en")
         dates = [(r.start, r.end) for r in results if r.entity_type == _DATE]
-        best: dict[tuple[PlaceholderType, int, int], Finding] = {}
+        best: dict[tuple[PlaceholderType, int, int], tuple[Finding, str]] = {}
         for result in results:
             finding = self._finding(text, result)
             if finding is None or _within_a_date(finding, dates):
                 continue
+            recognizer = str(result.recognition_metadata.get(RecognizerResult.RECOGNIZER_NAME_KEY))
             key = (finding.type, finding.start, finding.end)
-            if key not in best or finding.score > best[key].score:
-                best[key] = finding
-        return list(best.values())
+            if key not in best or finding.score > best[key][0].score:
+                best[key] = (finding, recognizer)
+        return _read_as_labelled(text, list(best.values()))
 
     def _finding(self, text: str, result: RecognizerResult) -> Finding | None:
         """``result`` as a finding, or None when its entity stays visible."""
@@ -415,6 +439,30 @@ def _marked_if_unconfirmed(finding: Finding, rules: list[Finding]) -> Finding:
     if any(rule.start < finding.end and finding.start < rule.end for rule in rules):
         return finding
     return replace(finding, score=min(finding.score, UNCONFIRMED_COMPANY_SCORE))
+
+
+def _read_as_labelled(text: str, found: list[tuple[Finding, str]]) -> list[Finding]:
+    """The findings of ``found`` (each with the name of its recognizer) but the readings of a
+    number that the label before it contradicts: a phone number where one of our recognizers read
+    the same digits after their label as a registration or account number, and an NHS number
+    where a telephone label stands before digits that are a phone number too. The value stays
+    hidden either way; only the type it is hidden as changes.
+    """
+    labelled = {(f.start, f.end) for f, name in found if name in _LABELLED_NUMBER_RECOGNIZERS}
+    phones = {(f.start, f.end) for f, _ in found if f.type is PlaceholderType.PHONE}
+    kept = []
+    for finding, recognizer in found:
+        span = (finding.start, finding.end)
+        if finding.type is PlaceholderType.PHONE and span in labelled:
+            continue
+        if (
+            recognizer == _NHS_RECOGNIZER
+            and span in phones
+            and _TELEPHONE_LABEL.search(text, max(0, finding.start - _LABEL_WINDOW), finding.start)
+        ):
+            continue
+        kept.append(finding)
+    return kept
 
 
 def _within_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
