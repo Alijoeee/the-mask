@@ -9,8 +9,10 @@ Commits (Conventional Commits, trailer `Co-Authored-By: Claude Sonnet 5.5`):
 |---|---|
 | `6ec9a3e` | feat(ui): the review as a document with an inspector |
 | `0f67066` | test(ui): the review in both appearances, and the pictures for the owner |
+| `678d3d7` | test(ui): wait for the list to lay its rows out before looking at them |
+| `d1e97b8` | test(ui): ⌘F is the review's only while the review shows in the window |
 
-Nothing is pushed. Only the files R123 allows were touched (`git diff --stat 4146e37..HEAD` lists exactly these):
+Nothing is pushed. Only the files R123 allows were touched (`git diff --stat 4146e37..HEAD` lists exactly these six files):
 `src/themask/ui/review_screen.py` (rewritten around the old logic), `src/themask/ui/review_inspector.py` (new),
 `tests/ui/test_review_screen.py` (adapted and extended), `tests/ui/test_review_inspector.py`, `tests/ui/test_review_look.py`,
 `tests/ui/review_samples.py` (all new). No change to `review.py`, detection, export, leak check, restore, keystore or the network guard; no new Qt
@@ -91,7 +93,7 @@ Adapted in `tests/ui/test_review_screen.py`, each with a comment saying so:
 ## 3. New tests and RED -> GREEN
 
 New: `tests/ui/test_review_inspector.py` (47: families and sections, `asks_about`, captions, footer counts, switch, row, pill, selection colour, heading rows, pane, tab order, the
-no-literal-colours guard), `tests/ui/test_review_look.py` (11: colours of each part in both appearances, switch of appearance while open, the pictures), and 61 more in
+no-literal-colours guard), `tests/ui/test_review_look.py` (11: colours of each part in both appearances, switch of appearance while open, the pictures), and 62 more in
 `tests/ui/test_review_screen.py` (sections and counts, captions, CHECK pill, title and `titleChanged`, footer, "Not sure" present / hidden / Hide / Show / Space / tab order /
 Show always / Hide always, the switch changing the plan, Space, arrows, places, double click, click selects and scrolls, find field and ⌘F, context menu and Merge with…, Show always on text, page
 margins and fonts, widths 300–360, the wheel over a row (a real window-system wheel event), scroll kept on rebuild). Reviews made by hand (`tests/ui/review_samples.py`) are used where
@@ -109,7 +111,7 @@ $ uv run pytest tests/ui/test_review_look.py tests/ui/test_review_screen.py -q
 ```
 (the 45 that passed are the old tests whose behaviour is kept, and the new ones for kept behaviour: keys, selection, double click, expanded groups.)
 
-GREEN (same files, the final code): `uv run pytest tests/ui/test_review_inspector.py tests/ui/test_review_look.py tests/ui/test_review_screen.py -q` -> `171 passed in 22.35s`.
+GREEN (same files, the final code): `uv run pytest tests/ui/test_review_inspector.py tests/ui/test_review_look.py tests/ui/test_review_screen.py -q` -> `172 passed in 21.90s`.
 
 Sensitivity: ten one-line breaks of the code (sections reversed, asked about when switched on, footer counting a check as hidden, Space ignored, `titleChanged` never sent, no regroup after a
 switch, three spellings in the caption, selected row uncoloured, find not wrapping, switch not reaching the plan) were each caught by the tests; the code was restored (hashes checked).
@@ -126,8 +128,8 @@ Fonts here are the fallbacks (no Iowan Old Style, Palatino, Georgia or SF on thi
 ## 5. Gate (in the worktree, last lines)
 
 ```
-$ uv run pytest tests/ui -q                      554 passed in 74.27s (0:01:14)
-$ uv run pytest -q                               3544 passed, 8 skipped in 390.39s (0:06:30)
+$ uv run pytest tests/ui -q                      555 passed in 70.41s (0:01:10)
+$ uv run pytest -q                               3545 passed, 8 skipped in 374.03s (0:06:14)
 $ uv run ruff check src tests tools packaging    All checks passed!
 $ uv run ruff format --check src tests tools packaging   151 files already formatted
 $ uv run mypy src                                Success: no issues found in 56 source files

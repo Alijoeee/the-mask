@@ -16,7 +16,10 @@ below is on GitHub (github.com/Alijoeee/the-mask). Read in this order: this file
 - `design-d1` at 6bbc73a — D1 (shell, theme, illustrations, icons, Settings window, home screen, R124
   contrast) COMPLETE, NOT YET REVIEWED. 12 commits on 4bbde49. Report: notes/design/d1-report.md;
   screenshots: notes/design/d1-shots/. Gate at its head: tests/ui 640 passed; full suite 3,614 at b106274.
-- `design-d2` — D2 (review screen): see "State of D2/D3" below.
+- `design-d2` at **d1e97b8** — D2 (the review as a document pane with an inspector: type sections,
+  switches, CHECK pills, the "Not sure — hide?" section, find field, keyboard) COMPLETE, NOT YET REVIEWED.
+  4 commits on D1's 4146e37. Report: notes/design/d2-report.md (section 6 = the wiring). Gate at its head:
+  tests/ui 555, full suite 3,545 green.
 - `design-d3` at **a7934c6** — D3 (export sheet in four states, restore screen as cards, cases table and
   detail card, shared `cards.py`/`restore_parts.py`) COMPLETE, NOT YET REVIEWED. 4 commits on D1's 4146e37.
   Report: notes/design/d3-report.md (saved by the controller; section 10 = the exact wiring for the
@@ -27,7 +30,7 @@ below is on GitHub (github.com/Alijoeee/the-mask). Read in this order: this file
 - The approved mockups as a page (private to the owner): https://claude.ai/artifact/PHVFzBRjUm7WQBEYnpbNof
 
 ## State of D2/D3 at the end of the cloud session
-(Filled in at the end of the session — see the last lines of the ledger for the exact SHAs and status.)
+Both complete as implemented and pushed (SHAs above); neither reviewed; nothing merged into design-v1.
 D2 and D3 were branched from design-d1's commit 4146e37 (theme + art + icons) under ruling R123, so each
 branch contains D1's first three commits and NOT D1's shell; D2 touched only review_screen.py and its
 tests; D3 only export_dialog.py, restore_screen.py, cases_screen.py and their tests. Both are to be reviewed
