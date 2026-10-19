@@ -2,11 +2,14 @@
 
 The screens are in a stack, each under a name: "home", "review", "restore", "cases" and "settings".
 The export is a dialog over the review, not a screen of its own (``show_export``).
-``open_files`` is the one way in. It asks whether to make a before-and-after pair when
-a file has tracked changes, loads the case a file is added to, and hands the analysis to a thread
-(``AnalysisWorker``), so that the window stays alive; its result becomes the review screen. The
-detection engine takes seconds to load and is loaded in a thread too: until it is there the home
-screen says "Loading…", and a request made meanwhile waits for it.
+``open_files`` is the one way in, and shows the home screen, where the progress is. It asks
+whether to make a before-and-after pair when a file has tracked changes, loads the case a file is
+added to, and hands the analysis to a thread (``AnalysisWorker``), so that the window stays alive;
+its result becomes the review screen. The detection engine takes seconds to load and is loaded in
+a thread too: until it is there the home screen says "Loading…", and a request made meanwhile
+waits for it. One request at a time: a second one, while a file is analysed or waits for the
+engine, is refused. While a file is analysed the tool bar is off, so that nothing the analysis
+reads (the owner's lists, the case) changes under it.
 
 What the next steps need from the analysis stays on the window: ``sources`` (the files as loaded),
 ``redline_split`` (whether some file was loaded as a before-and-after pair) and ``pending_case``
@@ -15,6 +18,7 @@ What the next steps need from the analysis stays on the window: ``sources`` (the
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,23 +42,28 @@ from themask.detect.lists import CaseLists
 from themask.docx.package import DocxPackage
 from themask.docx.reader import has_revisions
 from themask.errors import MaskError
-from themask.export import ExportOptions, SourceDoc, combined_text
+from themask.export import UNSUPPORTED_MESSAGE, ExportOptions, SourceDoc, combined_text
 from themask.model import Analysis, Case
 from themask.review import ReviewState
+from themask.ui.cases_screen import NOT_READ, CasesScreen
 from themask.ui.drop_zone import DropZone
 from themask.ui.export_dialog import ExportDialog
+from themask.ui.restore_screen import RestoreScreen
 from themask.ui.review_screen import ReviewScreen
+from themask.ui.settings_screen import SettingsScreen
 from themask.ui.workers import AnalysisWorker, EngineWorker
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
     from themask.ui.app import AppContext
 
+_LOG = logging.getLogger(__name__)
+
 REDLINE_QUESTION = "This file contains tracked changes. Make a before-and-after pair?"
 BUSY_MESSAGE = "The MASK is still analysing a file. Wait until it is done, then try again."
 CASE_GONE = "That case no longer exists. It may have been deleted, or it has expired."
 PURGE_FAILED = "Old cases could not be cleaned up."
-CASES_UNREADABLE = "The saved cases could not be read:"
+REVIEW_FAILED = "Something went wrong while preparing the review."
 
 # What the home screen says for each step of an analysis (the names are the worker's).
 STEP_TEXT = {
@@ -99,6 +108,10 @@ class HomeScreen(QWidget):
         self.notice_label = QLabel()
         self.notice_label.setObjectName("notice")
         self.notice_label.setWordWrap(True)
+        self.refused_label = QLabel()
+        self.refused_label.setObjectName("notice")
+        self.refused_label.setWordWrap(True)
+        self.refused_label.hide()
         self._notices: list[str] = []
 
         for label in (title, tagline, self.status_label, self.step_label):
@@ -113,6 +126,7 @@ class HomeScreen(QWidget):
         column.addWidget(self.progress_bar)
         column.addWidget(self.step_label)
         column.addWidget(self.notice_label)
+        column.addWidget(self.refused_label)
         holder = QWidget()
         holder.setLayout(column)
         holder.setMaximumWidth(680)
@@ -153,6 +167,16 @@ class HomeScreen(QWidget):
         """Add a line to the notices under the drop zone (a problem that does not stop the app)."""
         self._notices.append(text)
         self._show_notices()
+
+    def show_refused(self, text: str) -> None:
+        """Say which files were not opened, and why, until the next files are dropped. This is on
+        the screen only: a file's name tells who the parties are, so it is never logged.
+        """
+        self.refused_label.setText(text)
+        self.refused_label.setVisible(bool(text))
+
+    def clear_refused(self) -> None:
+        self.show_refused("")
 
     def _rest(self, status: str, dropping: bool) -> None:
         self.status_label.setText(status)
@@ -210,19 +234,24 @@ class MainWindow(QMainWindow):
         self._analysis: AnalysisWorker | None = None
         self._engine_loader: EngineWorker | None = None
         self._engine_problem: str | None = None
+        self._review_ready = False
+        self._navigation: list[QAction] = []
         self._closing = False
 
         self.setWindowTitle(APP_NAME)
         self.resize(1180, 780)
         self.home = HomeScreen()
         self.review_screen = ReviewScreen()
+        self.restore_screen = RestoreScreen(ctx)
+        self.cases_screen = CasesScreen(ctx)
+        self.settings_screen = SettingsScreen(ctx)
         self._stack = QStackedWidget()
         self._screens: dict[str, QWidget] = {
             "home": self.home,
             "review": self.review_screen,
-            "restore": _placeholder("Restoring is the next step of the build."),
-            "cases": _placeholder("The list of cases is the next step of the build."),
-            "settings": _placeholder("The settings are the next step of the build."),
+            "restore": self.restore_screen,
+            "cases": self.cases_screen,
+            "settings": self.settings_screen,
         }
         for screen in self._screens.values():
             self._stack.addWidget(screen)
@@ -230,6 +259,9 @@ class MainWindow(QMainWindow):
         self._review_action = self._build_navigation()
 
         self.home.drop_zone.filesDropped.connect(self._files_dropped)
+        self.home.drop_zone.filesRefused.connect(self._files_refused)
+        self.cases_screen.addFilesRequested.connect(self._add_files_to_case)
+        self.cases_screen.restoreRequested.connect(self.show_restore)
         self.review_screen.exportRequested.connect(self.show_export)
         self.analysisProgress.connect(self.home.show_progress)
         self._purge_expired_cases()
@@ -261,11 +293,13 @@ class MainWindow(QMainWindow):
         case_lists = run.case_lists if run is not None else CaseLists([], [], set())
         reserved = [entry.placeholder for entry in case.entries] if case is not None else []
         review = ReviewState.from_analysis(analysis, self.ctx.user_lists, case_lists, reserved)
+        # The screen first: when it cannot show the review, nothing of the window has changed.
+        self.review_screen.load(review, combined_text(sources))
         self.sources = sources
         self.redline_split = any(source.pkg_before is not None for source in sources)
         self.pending_case = case
-        self.review_screen.load(review, combined_text(sources))
-        self._review_action.setEnabled(True)
+        self._review_ready = True
+        self._review_action.setEnabled(not self.is_analysing())
         self._show("review")
 
     def show_export(self) -> None:
@@ -284,7 +318,7 @@ class MainWindow(QMainWindow):
             show_error(self, error.user_message)
             return
         except OSError as error:
-            show_error(self, f"{CASES_UNREADABLE} {error.strerror or error}")
+            show_error(self, f"{NOT_READ} {error.strerror or error}")
             return
         settings = self.ctx.settings
         options = ExportOptions(
@@ -313,13 +347,21 @@ class MainWindow(QMainWindow):
         if dialog is not None:
             dialog.deleteLater()
 
-    def show_restore(self) -> None:
+    def show_restore(self, case_id: str | None = None) -> None:
+        """Show the restore screen with the cases the store holds now; ``case_id`` is the case the
+        owner asked for in the Cases screen, selected when it is there.
+        """
+        self.restore_screen.refresh_cases(case_id)
         self._show("restore")
 
     def show_cases(self) -> None:
+        """Show the saved cases as the store holds them now."""
+        self.cases_screen.refresh()
         self._show("cases")
 
     def show_settings(self) -> None:
+        """Show the settings as they are kept now: the review may have changed the lists."""
+        self.settings_screen.reload()
         self._show("settings")
 
     def _show(self, name: str) -> None:
@@ -332,14 +374,25 @@ class MainWindow(QMainWindow):
         bar = QToolBar("Screens")
         bar.setMovable(False)
         self.addToolBar(bar)
-        bar.addAction("Home").triggered.connect(self.show_home)
+        home = bar.addAction("Home")
+        home.triggered.connect(self.show_home)
         review_action = bar.addAction("Review")
         review_action.setEnabled(False)
         review_action.triggered.connect(lambda: self._show("review"))
-        bar.addAction("Restore").triggered.connect(self.show_restore)
-        bar.addAction("Cases").triggered.connect(self.show_cases)
-        bar.addAction("Settings").triggered.connect(self.show_settings)
+        restore = bar.addAction("Restore")
+        restore.triggered.connect(lambda: self.show_restore())
+        cases = bar.addAction("Cases")
+        cases.triggered.connect(self.show_cases)
+        settings = bar.addAction("Settings")
+        settings.triggered.connect(self.show_settings)
+        self._navigation = [home, restore, cases, settings]
         return review_action
+
+    def _set_navigation(self, enabled: bool) -> None:
+        """Switch the tool bar on or off (the review only once there is one to go back to)."""
+        for action in self._navigation:
+            action.setEnabled(enabled)
+        self._review_action.setEnabled(enabled and self._review_ready)
 
     # ---- opening files ---------------------------------------------------------------------
 
@@ -351,14 +404,16 @@ class MainWindow(QMainWindow):
         ``redline_split`` says whether a file with tracked changes is made into a before-and-after
         pair; None asks the owner, once, when any of the Word files has tracked changes. With
         ``case_id`` the files are added to that case: the analysis is seeded with its key and
-        the review keeps its placeholders. Nothing is done while another analysis is running.
-        Whatever goes wrong is shown to the owner, and ``analysisFailed`` is sent.
+        the review keeps its placeholders. A request made while another analysis is running, or
+        waits for the engine, is refused: one at a time. Whatever goes wrong is shown to the
+        owner, and ``analysisFailed`` is sent.
         """
         if not paths:
             return
-        if self._analysis is not None:
+        if self._analysis is not None or self._queued is not None:
             show_error(self, BUSY_MESSAGE)
             return
+        self.show_home()  # the progress of the analysis, or "Loading…" while the engine is
         if redline_split is None:
             redline_split = self._asks_for_redline(paths)
         request = _Request(list(paths), redline_split, case_id)
@@ -370,7 +425,14 @@ class MainWindow(QMainWindow):
             self._queued = request  # runs when the engine has loaded
 
     def _files_dropped(self, paths: list[Path]) -> None:
+        self.home.clear_refused()  # what an earlier drop left out is no news now
         self.open_files(paths, None)
+
+    def _files_refused(self, paths: list[Path]) -> None:
+        self.home.show_refused(_refused_notice(paths))
+
+    def _add_files_to_case(self, paths: list[Path], case_id: str) -> None:
+        self.open_files(paths, None, case_id)
 
     def _asks_for_redline(self, paths: list[Path]) -> bool:
         """Ask whether to make a before-and-after pair, if any of the files has tracked changes."""
@@ -409,6 +471,8 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._analysis_failed)
         self._run = _Run(case, case_lists)
         self._analysis = worker
+        self._set_navigation(False)
+        self.show_home()  # the progress is there, wherever the owner went while the engine loaded
         self.home.show_busy()
         worker.start()
 
@@ -421,12 +485,19 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         sources, analysis = cast("tuple[list[SourceDoc], Analysis]", result)
+        failed = False
         try:
             self.show_review(sources, analysis)
-        finally:
-            self._run = None
-            self.home.show_ready()
-        self.analysisFinished.emit()
+        except Exception as error:  # noqa: BLE001 - the owner is told, the app goes on
+            # Only the kind of error is logged: its text may quote the document.
+            _LOG.error("review failed error=%s", type(error).__name__)
+            failed = True
+        self._run = None
+        self.home.show_ready()
+        if failed:
+            self._fail(REVIEW_FAILED)
+        else:
+            self.analysisFinished.emit()
 
     def _analysis_failed(self, message: str) -> None:
         self._release_analysis()
@@ -445,6 +516,7 @@ class MainWindow(QMainWindow):
         if worker is not None:
             worker.wait()  # it has sent its last signal; this is the end of its run()
             worker.deleteLater()
+            self._set_navigation(True)
 
     # ---- the engine ------------------------------------------------------------------------
 
@@ -520,6 +592,17 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def _refused_notice(paths: list[Path]) -> str:
+    """What the home screen says of files that were not opened: their names, what The MASK reads,
+    and what to do about an old .doc.
+    """
+    names = ", ".join(path.name for path in paths)
+    notice = f"Not opened: {names}. {UNSUPPORTED_MESSAGE}"
+    if any(path.suffix.casefold() == ".doc" for path in paths):
+        notice += " An old .doc can be opened in Word and saved as .docx."
+    return notice
+
+
 def _has_tracked_changes(path: Path) -> bool:
     """Whether the Word file at ``path`` has tracked changes.
 
@@ -532,13 +615,3 @@ def _has_tracked_changes(path: Path) -> bool:
         return has_revisions(DocxPackage.open(path))
     except Exception:  # noqa: BLE001 - whatever is wrong, the analysis reports it
         return False
-
-
-def _placeholder(text: str) -> QWidget:
-    """A screen that only says what it is waiting for, until the step that builds it."""
-    page = QWidget()
-    label = QLabel(text)
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    layout = QVBoxLayout(page)
-    layout.addWidget(label)
-    return page

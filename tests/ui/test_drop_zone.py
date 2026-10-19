@@ -1,4 +1,8 @@
-"""The drop zone: Word and PDF files dropped on it, or chosen with its button."""
+"""The drop zone: Word and PDF files dropped on it, or chosen with its button.
+
+What it does not read is not ignored: a drag of any file is taken, and the files that are not Word
+or PDF go on as ``filesRefused``, so that the window can say why nothing happened to them.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,7 @@ from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from themask.ui.drop_zone import FILE_FILTER, DropZone
+from themask.ui.drop_zone import FILE_FILTER, DropZone, ask_for_files, contract_paths
 
 if TYPE_CHECKING:
     from pytestqt.qtbot import QtBot
@@ -72,8 +76,10 @@ def test_the_extension_counts_in_any_case(zone: DropZone) -> None:
 @pytest.mark.parametrize(
     "name", ["notes.txt", "old.doc", "sheet.xlsx", "slides.pptx", "archive.zip", "no-extension"]
 )
-def test_a_drag_of_other_files_is_ignored(zone: DropZone, name: str) -> None:
-    assert not drag_over(zone, urls(name))
+def test_a_drag_of_other_files_is_taken_so_that_the_drop_can_say_why_not(
+    zone: DropZone, name: str
+) -> None:
+    assert drag_over(zone, urls(name))
 
 
 def test_a_drag_of_something_that_is_not_a_file_is_ignored(zone: DropZone) -> None:
@@ -98,16 +104,42 @@ def test_a_mixed_drop_gives_only_the_contracts(qtbot: QtBot, zone: DropZone) -> 
     assert dropped.args == [[Path("/somewhere/a.docx"), Path("/somewhere/b.pdf")]]
 
 
-def test_a_drop_of_other_files_gives_nothing(qtbot: QtBot, zone: DropZone) -> None:
-    with qtbot.assertNotEmitted(zone.filesDropped):
+def test_a_drop_of_other_files_gives_nothing_to_analyse_but_names_them(
+    qtbot: QtBot, zone: DropZone
+) -> None:
+    with (
+        qtbot.assertNotEmitted(zone.filesDropped),
+        qtbot.waitSignal(zone.filesRefused, timeout=1000) as refused,
+    ):
         drop_on(zone, urls("notes.txt"))
+    assert refused.args == [[Path("/somewhere/notes.txt")]]
+
+
+def test_a_mixed_drop_names_what_it_left_out_after_the_contracts(
+    qtbot: QtBot, zone: DropZone
+) -> None:
+    order: list[str] = []
+    zone.filesDropped.connect(lambda paths: order.append("dropped"))
+    zone.filesRefused.connect(lambda paths: order.append("refused"))
+    with qtbot.waitSignal(zone.filesRefused, timeout=1000) as refused:
+        drop_on(zone, urls("a.docx", "notes.txt", "old.doc", "b.pdf"))
+    assert refused.args == [[Path("/somewhere/notes.txt"), Path("/somewhere/old.doc")]]
+    assert order == ["dropped", "refused"]  # the analysis starts before the notice is made
+
+
+def test_a_drop_of_contracts_alone_refuses_nothing(qtbot: QtBot, zone: DropZone) -> None:
+    with (
+        qtbot.assertNotEmitted(zone.filesRefused),
+        qtbot.waitSignal(zone.filesDropped, timeout=1000),
+    ):
+        drop_on(zone, urls("a.docx", "SCAN.PDF"))
 
 
 def test_a_disabled_zone_takes_nothing(qtbot: QtBot, zone: DropZone) -> None:
     zone.setEnabled(False)
-    assert not drag_over(zone, urls("a.docx"))
-    with qtbot.assertNotEmitted(zone.filesDropped):
-        drop_on(zone, urls("a.docx"))
+    assert not drag_over(zone, urls("a.docx")) and not drag_over(zone, urls("notes.txt"))
+    with qtbot.assertNotEmitted(zone.filesDropped), qtbot.assertNotEmitted(zone.filesRefused):
+        drop_on(zone, urls("a.docx", "notes.txt"))
 
 
 def test_the_button_opens_the_file_dialog_and_gives_the_chosen_files(
@@ -121,10 +153,13 @@ def test_the_button_opens_the_file_dialog_and_gives_the_chosen_files(
 
     monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(choose))
     assert zone.choose_button.text() == "Choose files…"
+    refused: list[list[Path]] = []
+    zone.filesRefused.connect(refused.append)
     with qtbot.waitSignal(zone.filesDropped, timeout=1000) as chosen:
         qtbot.mouseClick(zone.choose_button, Qt.MouseButton.LeftButton)
     assert FILE_FILTER == "Contracts (*.docx *.pdf)" and FILE_FILTER in asked[0]
     assert chosen.args == [[Path("/somewhere/a.docx"), Path("/somewhere/b.pdf")]]
+    assert refused == [[Path("/somewhere/notes.txt")]]  # a file the dialog let through is named
 
 
 def test_a_cancelled_dialog_gives_nothing(
@@ -142,3 +177,89 @@ def test_it_tells_what_it_takes(zone: DropZone) -> None:
 def test_the_button_goes_with_the_zone(zone: DropZone) -> None:
     zone.setEnabled(False)
     assert not zone.choose_button.isEnabled()
+
+
+def test_ask_for_files_gives_every_file_chosen_whatever_its_kind(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: (["/x/a.docx", "/x/old.doc"], FILE_FILTER)),
+    )
+    assert ask_for_files(None) == [Path("/x/a.docx"), Path("/x/old.doc")]
+
+
+# ---- a zone for other files than the contracts ----------------------------------------------------
+
+
+@pytest.fixture
+def word_zone(qtbot: QtBot) -> DropZone:
+    """A zone for the AI's Word file alone, as the restore screen has it."""
+    z = DropZone(
+        suffixes=frozenset({".docx"}),
+        title="Drop the AI's Word file here",
+        hint="The .docx the AI gave back.",
+        dialog_title="Choose the AI's Word file",
+        file_filter="Word files (*.docx)",
+    )
+    qtbot.addWidget(z)
+    z.show()
+    return z
+
+
+def test_a_zone_for_one_kind_of_file_refuses_the_others_even_a_pdf(
+    qtbot: QtBot, word_zone: DropZone
+) -> None:
+    with (
+        qtbot.waitSignal(word_zone.filesDropped, timeout=1000) as dropped,
+        qtbot.waitSignal(word_zone.filesRefused, timeout=1000) as refused,
+    ):
+        drop_on(word_zone, urls("a.docx", "b.pdf", "C.DOCX"))
+    assert dropped.args == [[Path("/somewhere/a.docx"), Path("/somewhere/C.DOCX")]]
+    assert refused.args == [[Path("/somewhere/b.pdf")]]
+
+
+def test_a_zone_says_what_it_is_told_to(word_zone: DropZone) -> None:
+    assert word_zone.title_label.text() == "Drop the AI's Word file here"
+    assert word_zone.hint_label.text() == "The .docx the AI gave back."
+
+
+def test_a_zone_s_file_dialog_has_the_title_and_filter_it_is_told(
+    qtbot: QtBot, word_zone: DropZone, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[object, ...]] = []
+
+    def choose(*args: object, **kwargs: object) -> tuple[list[str], str]:
+        asked.append(args)
+        return ["/somewhere/a.docx", "/somewhere/b.pdf"], ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(choose))
+    with (
+        qtbot.waitSignal(word_zone.filesDropped, timeout=1000) as chosen,
+        qtbot.waitSignal(word_zone.filesRefused, timeout=1000) as refused,
+    ):
+        qtbot.mouseClick(word_zone.choose_button, Qt.MouseButton.LeftButton)
+    assert "Choose the AI's Word file" in asked[0] and "Word files (*.docx)" in asked[0]
+    assert chosen.args == [[Path("/somewhere/a.docx")]]
+    assert refused.args == [[Path("/somewhere/b.pdf")]]
+
+
+def test_the_zone_for_contracts_keeps_its_own_words_and_dialog(
+    qtbot: QtBot, zone: DropZone, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asked: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileNames",
+        staticmethod(lambda *a, **k: (asked.append(a), ([], ""))[1]),
+    )
+    qtbot.mouseClick(zone.choose_button, Qt.MouseButton.LeftButton)
+    assert "Choose contracts" in asked[0] and FILE_FILTER in asked[0]
+    assert zone.title_label.text() == "Drop your contracts here"
+
+
+def test_contract_paths_goes_by_the_suffixes_it_is_given() -> None:
+    paths = [Path("/x/a.docx"), Path("/x/b.PDF"), Path("/x/c.txt")]
+    assert contract_paths(paths) == [Path("/x/a.docx"), Path("/x/b.PDF")]
+    assert contract_paths(paths, frozenset({".txt"})) == [Path("/x/c.txt")]

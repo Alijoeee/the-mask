@@ -137,6 +137,20 @@ class CaseStore:
         leftovers = self.dir.glob(f"{TEMP_PREFIX}*{TEMP_SUFFIX}")
         for path in [*self._files(), *leftovers]:
             path.unlink(missing_ok=True)
+        self.unreadable = []  # they are gone with the rest
+
+    def delete_unreadable(self, name: str) -> None:
+        """Delete the case file called ``name`` that ``list`` could not open (see ``unreadable``).
+
+        Raises ValueError for a name that is not one of those files: a case that opens is never
+        deleted here, and a name cannot reach a file outside the folder. A file that is gone
+        already is no error. Needs no master key.
+        """
+        path = self.dir / name
+        if path not in self.unreadable:
+            raise ValueError(f"{name!r} is not a case file that cannot be opened.")
+        path.unlink(missing_ok=True)
+        self.unreadable = [other for other in self.unreadable if other != path]
 
     def purge_expired(self, now: datetime | None = None) -> list[str]:
         """Delete the cases that are due, and return their ids in order of id.
@@ -153,6 +167,17 @@ class CaseStore:
             self._path(case_id).unlink(missing_ok=True)
         return expired
 
+    def load_all(self) -> list[Case]:
+        """Every case that opens, with its key, newest first (cases from the same moment in order
+        of id): what ``list`` summarises. The master key is fetched once for all of them.
+
+        Like ``list`` it leaves out the files that cannot be opened and makes ``unreadable``
+        again.
+        """
+        cases, self.unreadable = self._scan()
+        cases.sort(key=lambda case: case.created_at, reverse=True)  # stable: ties keep file order
+        return cases
+
     # Keep ``list`` the last method: below it, ``list[...]`` in a signature would mean this method.
     def list(self) -> list[CaseSummary]:
         """A summary of every case, newest first (cases from the same moment in order of id).
@@ -160,8 +185,6 @@ class CaseStore:
         Each file has to be opened to build its summary. The ones that cannot be opened are left
         out and put in ``unreadable``, which every call makes again.
         """
-        cases, self.unreadable = self._scan()
-        cases.sort(key=lambda case: case.created_at, reverse=True)  # stable: ties keep file order
         return [
             CaseSummary(
                 id=case.id,
@@ -170,5 +193,5 @@ class CaseStore:
                 source_files=case.source_files,
                 n_entries=len(case.entries),
             )
-            for case in cases
+            for case in self.load_all()
         ]

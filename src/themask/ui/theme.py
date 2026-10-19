@@ -1,4 +1,5 @@
-"""The look of the app: one colour for each type of placeholder, and a small stylesheet.
+"""The look of the app: one colour for each type of placeholder, a small stylesheet, and the
+status line the screens say what happened in.
 
 The colours are the backgrounds that mark a find in the document text, so each is a light tint
 that reads with black text. The text pane sets black text on them itself, which keeps them legible
@@ -8,7 +9,7 @@ it follows light and dark mode as well.
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from themask.model import PlaceholderType
 
@@ -46,7 +47,7 @@ QFrame#dropZone[dragOver="true"] {
 }
 QFrame#dropZone:disabled { border-color: palette(midlight); }
 
-QLabel#notice, QLabel#warnings {
+QLabel#notice, QLabel#warnings, QLabel#status[problem="true"] {
     background: #FFF4CE;
     color: #5B4300;
     border: 1px solid #ECD48B;
@@ -61,3 +62,15 @@ QPushButton#primary { font-weight: 600; padding: 6px 18px; }
 def apply_theme(app: QApplication) -> None:
     """Give the application its stylesheet."""
     app.setStyleSheet(STYLESHEET)
+
+
+def set_status(label: QLabel, text: str, problem: bool = False) -> None:
+    """Say ``text`` in the status line ``label`` (its object name is "status"); an empty text hides
+    the line, and a problem is drawn in the colours of a notice.
+    """
+    label.setText(text)
+    if label.property("problem") != problem:
+        label.setProperty("problem", problem)  # the stylesheet reads it
+        label.style().unpolish(label)
+        label.style().polish(label)
+    label.setVisible(bool(text))

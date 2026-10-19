@@ -26,7 +26,11 @@ uv run python -m themask
 
 The window opens at once and says "Loading…" for a few seconds while it loads the language model.
 Drop a Word or PDF contract on it (or use "Choose files…") to analyse it and review what it found.
-The export and the restore screens are added in later steps of the build plan.
+"Continue to export" saves the masked copy in `~/Documents/The MASK` and keeps its key in a case on
+this Mac, locked with a key in your Keychain. When the AI tool gives you its Word file or its text
+back, the Restore screen puts the real values back. The Cases screen lists the saved cases, and
+Settings holds your always-hide and never-hide lists, how long a case is kept and the folder of the
+masked files.
 
 ## Develop
 

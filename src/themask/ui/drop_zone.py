@@ -1,4 +1,9 @@
-"""The drop zone: where the owner drops Word and PDF files, or chooses them with a button."""
+"""The drop zone: where the owner drops Word and PDF files, or chooses them with a button.
+
+The files The MASK reads go on as ``filesDropped``. The others are not ignored: they go on as
+``filesRefused``, so that the owner is told why nothing happened to them (an old .doc can be saved
+as .docx in Word) and not left with a drop that did nothing.
+"""
 
 from __future__ import annotations
 
@@ -12,43 +17,69 @@ from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QPushButton, QVBoxLay
 FILE_FILTER = "Contracts (*.docx *.pdf)"
 # A file is read as one of these by its extension, in any case (themask.export.load_sources).
 SUFFIXES = frozenset({".docx", ".pdf"})
+CHOOSE_TITLE = "Choose contracts"
+TITLE = "Drop your contracts here"
+HINT = "Word (.docx) or PDF files with selectable text. Files dropped together share one key."
 
 
-def contract_paths(paths: Iterable[Path]) -> list[Path]:
-    """The files among ``paths`` that The MASK reads (Word and PDF), in their order."""
-    return [path for path in paths if path.suffix.casefold() in SUFFIXES]
+def contract_paths(paths: Iterable[Path], suffixes: frozenset[str] = SUFFIXES) -> list[Path]:
+    """The files among ``paths`` that The MASK reads (Word and PDF, or the ``suffixes`` asked for,
+    each written in lower case with its dot), in their order.
+    """
+    return [path for path in paths if path.suffix.casefold() in suffixes]
 
 
-def _dropped_contracts(mime: QMimeData) -> list[Path]:
-    """The Word and PDF files a drag carries; none for anything that is not a list of files."""
+def ask_for_files(
+    parent: QWidget | None, title: str = CHOOSE_TITLE, file_filter: str = FILE_FILTER
+) -> list[Path]:
+    """Ask for files with the system's dialog: every file chosen, whatever its kind."""
+    chosen, _ = QFileDialog.getOpenFileNames(parent, title, str(Path.home()), file_filter)
+    return [Path(name) for name in chosen]
+
+
+def _dropped_files(mime: QMimeData) -> list[Path]:
+    """The local files a drag carries; none for anything that is not a list of files."""
     if not mime.hasUrls():
         return []
-    return contract_paths(Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile())
+    return [Path(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
 
 
 class DropZone(QFrame):
-    """A frame that takes Word and PDF files dropped on it and says so with ``filesDropped``.
+    """A frame that takes files dropped on it: the Word and PDF files go on with
+    ``filesDropped``, the other files of the same drop with ``filesRefused`` (after it).
 
-    Anything else dropped on it is ignored; of a mixed drop only the contracts are passed on. The
-    "Choose files…" button does the same through the system's file dialog. A disabled zone takes
-    nothing.
+    The "Choose files…" button does the same through the system's file dialog. Something that is
+    not a list of files is not taken, and a disabled zone takes nothing. A zone for other files
+    than the contracts is told which (``suffixes``), what it says (``title`` and ``hint``) and what
+    its file dialog is called and shows (``dialog_title`` and ``file_filter``).
     """
 
     filesDropped = Signal(list)  # list[Path]
+    filesRefused = Signal(list)  # list[Path]: what the zone does not take
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        suffixes: frozenset[str] = SUFFIXES,
+        title: str = TITLE,
+        hint: str = HINT,
+        dialog_title: str = CHOOSE_TITLE,
+        file_filter: str = FILE_FILTER,
+    ) -> None:
         super().__init__(parent)
+        self._suffixes = suffixes
+        self._dialog_title = dialog_title
+        self._file_filter = file_filter
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
         self.setProperty("dragOver", False)
         # Room for the title, the hint on two lines and the button: a label that wraps cannot say
         # how tall it needs to be for the width it gets, so the layout would squeeze them.
         self.setMinimumHeight(220)
-        self.title_label = QLabel("Drop your contracts here")
+        self.title_label = QLabel(title)
         self.title_label.setObjectName("dropTitle")
-        self.hint_label = QLabel(
-            "Word (.docx) or PDF files with selectable text. Files dropped together share one key."
-        )
+        self.hint_label = QLabel(hint)
         self.hint_label.setWordWrap(True)
         self.choose_button = QPushButton("Choose files…")
         self.choose_button.clicked.connect(self.choose_files)
@@ -61,11 +92,8 @@ class DropZone(QFrame):
         layout.addWidget(self.choose_button, alignment=Qt.AlignmentFlag.AlignCenter)
 
     def choose_files(self) -> None:
-        """Ask for files with the system's dialog, and pass the Word and PDF files on."""
-        chosen, _ = QFileDialog.getOpenFileNames(
-            self, "Choose contracts", str(Path.home()), FILE_FILTER
-        )
-        self._pass_on(contract_paths(Path(name) for name in chosen))
+        """Ask for files with the system's dialog, and pass them on."""
+        self._pass_on(ask_for_files(self, self._dialog_title, self._file_filter))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         self._take_or_refuse(event)
@@ -79,7 +107,7 @@ class DropZone(QFrame):
 
     def dropEvent(self, event: QDropEvent) -> None:
         self._mark_drag_over(False)
-        paths = _dropped_contracts(event.mimeData()) if self.isEnabled() else []
+        paths = _dropped_files(event.mimeData()) if self.isEnabled() else []
         if not paths:
             event.ignore()
             return
@@ -87,7 +115,7 @@ class DropZone(QFrame):
         self._pass_on(paths)
 
     def _take_or_refuse(self, event: QDragEnterEvent | QDragMoveEvent) -> None:
-        if self.isEnabled() and _dropped_contracts(event.mimeData()):
+        if self.isEnabled() and _dropped_files(event.mimeData()):
             event.acceptProposedAction()
             self._mark_drag_over(True)
         else:
@@ -102,5 +130,9 @@ class DropZone(QFrame):
             self.style().polish(self)
 
     def _pass_on(self, paths: list[Path]) -> None:
-        if paths:
-            self.filesDropped.emit(paths)
+        contracts = contract_paths(paths, self._suffixes)
+        refused = [path for path in paths if path not in contracts]
+        if contracts:
+            self.filesDropped.emit(contracts)
+        if refused:
+            self.filesRefused.emit(refused)
