@@ -361,6 +361,15 @@ def _folds(text: str) -> tuple[str, str, str]:
     return words, tight, _NOT_A_LETTER_OR_DIGIT.sub("", numbers)
 
 
+def number_fold(text: str) -> str:
+    """``text`` folded as a number is compared (rulings R14, R71, R72): its letters and digits
+    alone, each decimal point the mark and the zeros that end a decimal part dropped, so that
+    "1,250.00", "1.250,00" and "1 250" are all "1250" and "1,250.50" is "1250x5". The identity of
+    an amount, a percentage or a quantity is built on it (``detect.identity``, ruling R100): one
+    set of rules says what is one number, here and in the grouping."""
+    return _folds(text)[_COMPACT]
+
+
 def _marked(text: str) -> str:
     """``text`` as its numbers are folded from: each decimal point the mark, or a space where only
     zeros follow it, and the zeros that end a decimal part spaces (rulings R71, R72)."""

@@ -211,6 +211,30 @@ def test_seed_entries_reuse_placeholders(engine, lists):
     assert by["Baltic Fasteners GmbH"].placeholder == "[COMPANY_3]"
 
 
+def test_a_case_entry_never_takes_a_value_that_differs_only_in_a_point(lists):
+    # Ruling R100: the key's "EUR 1.25" is not the annex's "EUR 125".
+    seed = [KeyEntry("[AMOUNT_1]", PlaceholderType.AMOUNT, "EUR 1.25", [])]
+    fake = FakeEngine((PlaceholderType.AMOUNT, "EUR 125", 0.85, "pattern"))
+    a = analyze(one("The fee is EUR 125 per item."), fake, lists, seed_entries=seed)
+    assert [(g.placeholder, g.canonical) for g in a.groups] == [("[AMOUNT_2]", "EUR 125")]
+
+
+def test_values_that_differ_in_a_point_a_symbol_or_a_dot_get_their_own_placeholders(engine, lists):
+    # Ruling R100, the reviewer's reproduction: six values, six placeholders.
+    t = (
+        "The unit fee is EUR 1.25 per item and the annual cap is EUR 125 per customer. "
+        "The deposit is $100 and the refund is \N{EURO SIGN}100. "
+        "Questions to a.b@example.com or to ab@example.com."
+    )
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        "The unit fee is [AMOUNT_1] per item and the annual cap is [AMOUNT_2] per customer. "
+        "The deposit is [AMOUNT_3] and the refund is [AMOUNT_4]. "
+        "Questions to [EMAIL_1] or to [EMAIL_2]."
+    )
+    assert all(len(g.variants) == 1 for g in a.groups)
+
+
 # --- Several files in one case -------------------------------------------------------------------
 
 

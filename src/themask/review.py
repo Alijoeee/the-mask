@@ -27,6 +27,7 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 
 from themask.detect.grouping import PersonName
+from themask.detect.identity import value_key
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -382,12 +383,13 @@ class ReviewState:
         return group if group.findings else None
 
     def _holding(self, value: str, kind: PlaceholderType) -> Group | None:
-        """The group that has ``value`` among its forms however it is spelt: of ``kind`` first."""
-        key = normalize(value)
+        """The group that has ``value`` among its forms however it is spelt, as a value of
+        ``kind`` is spelt (``value_key``, ruling R100): of ``kind`` first."""
+        key = value_key(kind, value)
         holding = [
             g
             for g in self.groups
-            if key in {normalize(form) for form in (g.canonical, *g.variants)}
+            if key in {value_key(kind, form) for form in (g.canonical, *g.variants)}
         ]
         return next((g for g in holding if g.type is kind), holding[0] if holding else None)
 

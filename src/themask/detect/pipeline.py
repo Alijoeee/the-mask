@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
 from themask.detect.grouping import PersonName, SurnamePolicy, group_findings
+from themask.detect.identity import value_key
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -457,10 +458,10 @@ def _keep_shared_variants_out(seeds: list[Group]) -> None:
     """Take a variant two seeds share away from both: it cannot tell which of them is meant."""
     holders: dict[str, int] = {}
     for seed in seeds:
-        for key in {normalize(v) for v in seed.variants}:
+        for key in {value_key(seed.type, v) for v in seed.variants}:
             holders[key] = holders.get(key, 0) + 1
     for seed in seeds:
-        seed.variants = {v for v in seed.variants if holders[normalize(v)] == 1}
+        seed.variants = {v for v in seed.variants if holders[value_key(seed.type, v)] == 1}
 
 
 def _seed_matches(

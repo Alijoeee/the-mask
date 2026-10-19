@@ -15,7 +15,7 @@ from themask.paths import lists_path
 from themask.review import ReviewCounts, ReviewState
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
-CUSTOM = PlaceholderType.CUSTOM
+AMOUNT, CUSTOM = PlaceholderType.AMOUNT, PlaceholderType.CUSTOM
 
 
 def spot(kind, text, needle, nth=0, source="model"):
@@ -171,6 +171,19 @@ def test_hide_text_of_another_type_retypes_the_group(review):
     assert "[COMPANY_3]" not in placeholders(review)
     assert {(f.type, f.source, f.score) for f in g.findings} == {(CUSTOM, "user", 1.0)}
     assert [r.placeholder for r in review.mask_plan().replacements].count("[CUSTOM_1]") == 2
+
+
+def test_hide_text_of_a_value_that_differs_only_in_a_point_makes_a_new_group(lists):
+    # Ruling R100: "EUR 125" is not "EUR 1.25", however alike their digits; another spelling of
+    # the group's own value joins it.
+    text = "The fee is EUR 1.25 per item; the cap is EUR 125, or 1,25 EUR with the discount."
+    fee = group(AMOUNT, "[AMOUNT_1]", "EUR 1.25", [spot(AMOUNT, text, "EUR 1.25")])
+    review = hand_made(text, [fee], lists)
+    cap = review.hide_text("EUR 125", AMOUNT)
+    assert cap.placeholder == "[AMOUNT_2]" and [f.text for f in cap.findings] == ["EUR 125"]
+    assert review.hide_text("1,25 EUR", AMOUNT).placeholder == "[AMOUNT_1]"
+    assert placeholders(review) == ["[AMOUNT_1]", "[AMOUNT_2]"]
+    assert [f.text for f in review.groups[0].findings] == ["EUR 1.25", "1,25 EUR"]
 
 
 def test_hide_text_makes_a_new_group_numbered_next_for_its_type(review):

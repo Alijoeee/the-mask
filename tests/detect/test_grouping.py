@@ -383,6 +383,88 @@ def test_a_value_seen_on_its_own_is_not_a_variant_of_another_group():
     assert "1,250,000" not in gs["EUR 1,250,000"].variants | gs["USD 1,250,000"].variants
 
 
+# Ruling R100: a value's identity is its type's. Values that differ only in a decimal point, a
+# currency symbol or a dot are different values, however alike their letters and digits, and a
+# value spelt in two ways is one.
+
+A4_TEXT = (
+    "The unit fee is EUR 1.25 per item and the annual cap is EUR 125 per customer. "
+    "The deposit is $100 and the refund is \N{EURO SIGN}100. "
+    "Questions to a.b@example.com or to ab@example.com."
+)
+
+
+def test_values_that_differ_in_a_point_a_symbol_or_a_dot_are_different_values():
+    amount, email = PlaceholderType.AMOUNT, PlaceholderType.EMAIL
+    values = [
+        "EUR 1.25",
+        "EUR 125",
+        "$100",
+        "\N{EURO SIGN}100",
+        "a.b@example.com",
+        "ab@example.com",
+    ]
+    fs = [F(amount if "@" not in v else email, v, A4_TEXT) for v in values]
+    gs = by_canonical(group_findings(fs, A4_TEXT))
+    assert set(gs) == set(values)
+    for value, g in gs.items():
+        assert [f.text for f in g.findings] == [value] and g.variants == {value}
+
+
+@pytest.mark.parametrize(
+    ("kind", "spellings"),
+    [
+        (PlaceholderType.AMOUNT, ("EUR 1,250.00", "EUR 1.250,00", "1,250.00 EUR", "EUR 1 250")),
+        (PlaceholderType.AMOUNT, ("\N{EURO SIGN}100", "EUR 100", "100 euros")),
+        (PlaceholderType.PERCENT, ("10%", "10.0%", "10 per cent")),
+        (PlaceholderType.QUANTITY, ("10,000 units", "10 000 units", "10.000 units")),
+        (PlaceholderType.IBAN, ("NL91 ABNA 0417 1643 00", "NL91ABNA0417164300")),
+        (PlaceholderType.EMAIL, ("Legal@Example.com", "legal@example.com")),
+    ],
+)
+def test_the_spellings_of_one_value_are_one_group(kind, spellings):
+    txt = " and ".join(spellings) + "."
+    fs = [F(kind, spelling, txt) for spelling in spellings]
+    (g,) = group_findings(fs, txt)
+    assert set(spellings) <= g.variants and len(g.findings) == len(spellings)
+
+
+@pytest.mark.parametrize(
+    ("kind", "one", "another"),
+    [
+        (PlaceholderType.AMOUNT, "EUR 1,250.50", "EUR 1,250"),  # a decimal part is kept apart
+        (PlaceholderType.AMOUNT, "EUR 10-20", "EUR 1020"),  # a range is no number
+        (PlaceholderType.AMOUNT, "US$100", "USD 100.00"),  # ... but a sign is its code
+        (PlaceholderType.QUANTITY, "500 pallets", "500 units"),
+        (PlaceholderType.URL, "https://northwind.example", "https://north-wind.example"),
+        (PlaceholderType.EMAIL, "a.b@example.com", "a b@example.com"),
+    ],
+)
+def test_what_tells_two_values_apart(kind, one, another):
+    txt = f"{one} or {another}."
+    gs = group_findings([F(kind, one, txt), F(kind, another, txt)], txt)
+    assert len(gs) == (1 if (one, another) == ("US$100", "USD 100.00") else 2)
+
+
+def test_a_seed_never_takes_a_value_that_differs_only_in_a_point():
+    amount = PlaceholderType.AMOUNT
+    txt = "The fee is EUR 125 per item."
+    seed = Group(uuid.uuid4().hex, amount, "EUR 1.25", {"EUR 1.25"}, [], "[AMOUNT_1]")
+    gs = by_canonical(group_findings([F(amount, "EUR 125", txt)], txt, seeds=[seed]))
+    assert gs["EUR 1.25"] is seed and seed.findings == []
+    assert gs["EUR 125"].placeholder == "" and [f.text for f in gs["EUR 125"].findings] == [
+        "EUR 125"
+    ]
+
+
+def test_a_seed_takes_another_spelling_of_its_value():
+    amount = PlaceholderType.AMOUNT
+    txt = "The fee is 1.250,00 EUR per item."
+    seed = Group(uuid.uuid4().hex, amount, "EUR 1,250.00", {"EUR 1,250.00"}, [], "[AMOUNT_1]")
+    (g,) = group_findings([F(amount, "1.250,00 EUR", txt)], txt, seeds=[seed])
+    assert g is seed and [f.text for f in seed.findings] == ["1.250,00 EUR"]
+
+
 def test_best_score_decides_the_check():
     txt = "Riverside Partners and Riverside Partners"
     fs = [F(C, "Riverside Partners", txt, score=0.6), F(C, "Riverside Partners", txt, True)]
