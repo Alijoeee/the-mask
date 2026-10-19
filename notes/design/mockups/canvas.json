@@ -1,0 +1,29 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-10-19T19:05:00Z"},
+  "title": "The MASK — Mac design mockups",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1180, "h": 760, "title": "1 · Mask (home) — light", "expand": "fill", "radius": 12},
+    "Review.dc.html": {"x": 1260, "y": 0, "w": 1180, "h": 760, "title": "2 · Review — light", "expand": "fill", "radius": 12},
+    "Export.dc.html": {"x": 2520, "y": 0, "w": 1180, "h": 760, "title": "3 · Export sheet — light", "expand": "fill", "radius": 12},
+    "Restore.dc.html": {"x": 3780, "y": 0, "w": 1180, "h": 760, "title": "4 · Restore — light", "expand": "fill", "radius": 12},
+    "Cases.dc.html": {"x": 5040, "y": 0, "w": 1180, "h": 760, "title": "5 · Cases — light", "expand": "fill", "radius": 12},
+    "MainDark.dc.html": {"x": 0, "y": 1140, "w": 1180, "h": 760, "title": "1 · Mask (home) — dark", "expand": "fill", "radius": 12},
+    "ReviewDark.dc.html": {"x": 1260, "y": 1140, "w": 1180, "h": 760, "title": "2 · Review — dark", "expand": "fill", "radius": 12},
+    "ExportDark.dc.html": {"x": 2520, "y": 1140, "w": 1180, "h": 760, "title": "3 · Export sheet — dark", "expand": "fill", "radius": 12},
+    "RestoreDark.dc.html": {"x": 3780, "y": 1140, "w": 1180, "h": 760, "title": "4 · Restore — dark", "expand": "fill", "radius": 12},
+    "CasesDark.dc.html": {"x": 5040, "y": 1140, "w": 1180, "h": 760, "title": "5 · Cases — dark", "expand": "fill", "radius": 12}
+  },
+  "order": [
+    "Main.dc.html", "Review.dc.html", "Export.dc.html", "Restore.dc.html", "Cases.dc.html",
+    "MainDark.dc.html", "ReviewDark.dc.html", "ExportDark.dc.html", "RestoreDark.dc.html", "CasesDark.dc.html"
+  ],
+  "notes": {
+    "light": {"x": 0, "y": -260, "text": "The MASK · light mode · one window, sidebar, warm accent", "kind": "title1", "maxW": 6220},
+    "dark": {"x": 0, "y": 880, "text": "The MASK · dark mode · the same screens", "kind": "title1", "maxW": 6220},
+    "how": {"x": 6300, "y": 0, "w": 360, "text": "How to read these: every value you see is from the made-up test corpus. Sidebar = Mask / Restore / Cases; Settings lives under The MASK → Settings… (⌘,). The accent is a warm sienna (#B5642A); the twelve placeholder tints stay only inside the document text. Click an artboard to see it full size; leave comments on anything you would change.", "fill": "orange"}
+  },
+  "designSystems": []
+}
