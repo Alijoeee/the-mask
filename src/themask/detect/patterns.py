@@ -302,9 +302,35 @@ class PercentRecognizer(CheckedPatternRecognizer):
         )
 
 
-# "records" as a quantity's unit, and a plain year before it.
-_RECORDS = re.compile(r"(?i:records)\Z")
-_PLAIN_YEAR = re.compile(r"(?:19|20)\d{2}(?!\d)" + _SPACE + r"?(?i:records)\Z")
+# The words that make the figure after them a reference into the contract, whatever unit follows
+# it: "Annex 2 Units of Measure", "Schedule 3 Pallets", "under Clause 4 cartons", "the Article 30
+# records", "§ 5 pallets" (ruling R97). Not "parts", nor "art", "para" or "sec" as words, which a
+# count may follow ("spare parts 500 units", "the art 12 pieces"); written as abbreviations, with
+# their full stop, they are references ("the Art. 30 records"). "Part" is one only with its
+# capital ("Part 2 Units", but "the spare part 5 units").
+_QUANTITY_REFERENCE = (
+    r"(?:\b(?:(?i:clauses?|sections?|articles?|schedules?|annex(?:es)?|appendix|appendices"
+    r"|exhibits?|paragraphs?|(?:art|sec|para)\.)|P(?:art|ART))|\N{SECTION SIGN})"
+)
+_REFERENCE_BEFORE_A_QUANTITY = re.compile(_QUANTITY_REFERENCE + _SPACE + r"*\Z")
+# Two digits with a space between them: after a reference word, a figure that goes on with a group
+# of digits after a space may be the reference and a count whose comma was left out ("Schedule 3
+# 500 pallets" for "Schedule 3, 500 pallets").
+_SPACED_DIGITS = re.compile(r"\d" + _SPACE + r"\d")
+# A figure in a year's range before "records" is their year after "the" or a possessive, maybe
+# with other years between ("the 2025 records", "Acme's 2025 records", "its 2025 records", "the
+# 2026 and 2027 records"); after anything else it counts them ("up to 2000 records", "about 2025
+# records", "a total of 2000 records", ruling R97).
+_YEAR = r"(?:19|20)\d{2}(?!\d)"
+_YEAR_RECORDS = re.compile(_YEAR + _SPACE + r"?(?i:records)\Z")
+_OWNER = _any_of(
+    r"\b(?i:the|its|their|our|your|his|her|my)",
+    r"\w[" + _APOSTROPHES + "](?i:s)",
+    "(?i:s)[" + _APOSTROPHES + "]",
+)
+# What stands between two years of a list: "2024, 2025", "2024/2025", "2025 and 2026".
+_BETWEEN_YEARS = _any_of(_SPACE + "*[,/]" + _SPACE + "*", _SPACE + "+(?i:and|or|&)" + _SPACE + "+")
+_OWNER_BEFORE = re.compile(_OWNER + _SPACE + "+(?:" + _YEAR + _BETWEEN_YEARS + r")*\Z")
 # A currency just before a figure: the figure is an amount (€2.5m), not a length in metres.
 _CURRENCY_BEFORE = re.compile(_CURRENCY_MARK + _SPACE + r"?\Z")
 _SCALE_WORD = re.compile(r"(?i:hundred|thousand|million|billion)")
@@ -315,8 +341,8 @@ class QuantityRecognizer(CheckedPatternRecognizer):
 
     10,000 units · 48 pallets · 2.5 tonnes · 500kg · 1 250 m² · 2.5 million units · "ten (10)
     pallets" · 350,000 records. A number in words counts only with a scale word or figures after
-    it, so that "in two cases" and "one item" stay prose. Records named by a reference or a year
-    ("the Article 30 records", "the 2025 records") are no quantity.
+    it, so that "in two cases" and "one item" stay prose. A figure that is a reference ("Annex 2
+    Units of Measure") or the year of the records after it ("the 2025 records") is none.
     """
 
     def __init__(self) -> None:
@@ -339,18 +365,31 @@ class QuantityRecognizer(CheckedPatternRecognizer):
             return pattern.score if spelled_out else 0.0
         if _CURRENCY_BEFORE.search(text, max(0, match.start() - 8), match.start()):
             return 0.0
-        if _RECORDS.search(match.group()) and _are_records_named(text, match):
+        if _is_a_reference(text, match) or _is_the_records_year(text, match):
             return 0.0
         return pattern.score
 
 
-def _are_records_named(text: str, match: re.Match[str]) -> bool:
-    """Whether the figure before "records" names them rather than counts them: a reference ("the
-    Article 30 records") or a year ("the 2025 records", ruling R95).
+def _is_a_reference(text: str, match: re.Match[str]) -> bool:
+    """Whether the figure of the quantity ``match`` is a reference into the contract: it follows a
+    reference word ("Annex 2 Units of Measure", ruling R97) and has no group of digits after a
+    space, which may be a count after the reference ("Schedule 3 500 pallets": when unsure, hide).
     """
-    if _PLAIN_YEAR.match(match.group()):
-        return True
-    return _REFERENCE_BEFORE.search(text, max(0, match.start() - 24), match.start()) is not None
+    start = match.start()
+    if _REFERENCE_BEFORE_A_QUANTITY.search(text, max(0, start - 24), start) is None:
+        return False
+    return _SPACED_DIGITS.search(match.group()) is None
+
+
+def _is_the_records_year(text: str, match: re.Match[str]) -> bool:
+    """Whether the figure of the quantity ``match`` is the year of the records after it, not their
+    number: a year after "the" or a possessive ("the 2025 records", "Acme's 2025 records"), but
+    not after any other word ("up to 2000 records", ruling R97).
+    """
+    if _YEAR_RECORDS.match(match.group()) is None:
+        return False
+    start = match.start()
+    return _OWNER_BEFORE.search(text, max(0, start - 40), start) is not None
 
 
 # --- VAT, registration and identity numbers ------------------------------------------------------

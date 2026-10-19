@@ -734,6 +734,34 @@ def test_addresses(text, address):
     assert texts(find_addresses(text), text) == {address}
 
 
+# Ruling R97 (d): a Dutch postcode with its town after a spaced hyphen, or the en dash Word makes
+# of one, goes on the address before it, as after a comma; what else follows a hyphen does not.
+@pytest.mark.parametrize(
+    "text,address",
+    [
+        ("Ship to: Keizersgracht 123 - 1015 CJ Amsterdam", "Keizersgracht 123 - 1015 CJ Amsterdam"),
+        (
+            "Ship to: Keizersgracht 123 \N{EN DASH} 1015 CJ Amsterdam, the Netherlands",
+            "Keizersgracht 123 \N{EN DASH} 1015 CJ Amsterdam, the Netherlands",
+        ),
+        ("Delivery address: Damrak 1 - 1012 LG Amsterdam", "Damrak 1 - 1012 LG Amsterdam"),
+        ("Ship to: Keizersgracht 123 - Supply Agreement", "Keizersgracht 123"),
+        (
+            "Keizersgracht 123 - 1015 CJ Amsterdam - Supply Agreement",
+            "Keizersgracht 123 - 1015 CJ Amsterdam",
+        ),
+    ],
+)
+def test_a_dutch_postcode_after_a_spaced_hyphen_goes_on_the_address(text, address):
+    assert texts(find_addresses(text), text) == {address}
+
+
+def test_a_spaced_hyphen_starts_no_address_on_its_own():
+    # Only an address the rules are reading goes on over the hyphen: a figure and its unit after a
+    # page reference are not one ("1500 KG" has the shape of a Dutch postcode).
+    assert find_addresses("Page 2 - 1500 KG Steel") == []
+
+
 def test_address_lines_each_give_an_address():
     t = "Northwind Trading B.V.\nKeizersgracht 123\n1015 CJ Amsterdam\nthe Netherlands"
     assert texts(find_addresses(t), t) == {"Keizersgracht 123", "1015 CJ Amsterdam"}
@@ -1092,6 +1120,35 @@ def test_a_spaced_hyphen_before_a_title_still_parts_a_header(engine):
     t = "Greystone Logistics Ltd provides the Services.\nGreystone - Brinkhof - Agreement"
     header = t.index("Greystone -")
     assert not [f for f in engine.analyze(t) if f.start >= header and "Agreement" in f.text]
+
+
+# Ruling R97 (b): the hyphen still parts a running header when the word on either side of it is
+# the contract's own or a never-hide term ("Confidential", "Page", a country): those are no part
+# of the name between them.
+@pytest.mark.parametrize(
+    "intro,header,name",
+    [
+        (
+            "Acme Supplies Ltd sells.",
+            "Confidential - Acme Supplies Ltd - Page 3",
+            "Acme Supplies Ltd",
+        ),
+        (
+            "Acme Supplies Ltd sells.",
+            "CONFIDENTIAL - Acme Supplies Ltd - Page 3",
+            "Acme Supplies Ltd",
+        ),
+        ("Acme Supplies Ltd sells.", "Draft - Acme Supplies Ltd - Version 2", "Acme Supplies Ltd"),
+        ("Acme Supplies Ltd sells.", "Acme Supplies Ltd - Netherlands", "Acme Supplies Ltd"),
+        ("Greystone Logistics Ltd sells.", "Confidential - Greystone - Page 2", "Greystone"),
+    ],
+)
+def test_a_spaced_hyphen_by_a_never_hide_word_still_parts_a_header(engine, intro, header, name):
+    t = f"{intro}\n{header}"
+    start = t.index(header)
+    found = [f for f in engine.analyze(t) if f.start >= start]
+    assert {f.text for f in found if name in f.text} == {name}
+    assert not [f for f in found if " - " in f.text]
 
 
 def test_the_title_in_a_running_header_stays_visible(engine):

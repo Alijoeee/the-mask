@@ -260,19 +260,35 @@ def test_records_are_a_quantity(text, needle):
         "the 2026 and 2027 records are retained",
         # Ruling R97 (c): after "the" or a possessive.
         "Acme's 2025 records are kept.",
+        "the Supplier\N{RIGHT SINGLE QUOTATION MARK}s 2025 records",
+        "the Suppliers' 2025 records",
+        "The Processor keeps its 2025 records.",
+        "the 2024, 2025 and 2026 records",
+        "THE 2025 RECORDS ARE KEPT",
         # Ruling R97 (a): any unit after a reference word of the contract.
         "Section 5 pallets",
         "Annex 2 Units of Measure",
         "Schedule 3 Pallets",
         "under Clause 4 cartons are listed",
         "Part 2 Units",
+        "PART 2 UNITS OF MEASURE",
+        "Exhibit 4 boxes are attached",
+        "Appendix 3 Items and Prices",
+        "as paragraph 2 units are counted",
+        "\N{SECTION SIGN} 5 pallets",
+        # "art", "para" and "sec" written as abbreviations, with their full stop.
+        "the Art. 30 records of processing activities",
+        "ART. 30 RECORDS",
+        "under Sec. 5 pallets are listed",
+        "as Para. 2 units are counted",
     ],
 )
 def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
     assert found_by(QuantityRecognizer(), text) == {}
 
 
-# Ruling R95 (I2): only "records" after a reference word is a reference; spare parts are counted.
+# Ruling R97 (a): "parts", "art", "para" and "sec" are no reference words, nor is "part" in lower
+# case: spare parts are counted.
 @pytest.mark.parametrize(
     "text,needle",
     [
@@ -287,9 +303,27 @@ def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
         ("approximately 1999 records", "1999 records"),
         ("no more than 2050 records", "2050 records"),
         ("a total of 2000 records", "2000 records"),
+        # ... and wherever neither "the" nor a possessive stands right before it.
+        ("the first 2000 records", "2000 records"),
+        ("The Processor holds 2000 records.", "2000 records"),
     ],
 )
 def test_a_quantity_after_a_word_like_parts_is_still_found(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
+
+
+# A figure after a reference word that goes on with a group of digits after a space may be the
+# reference and a count with its comma left out ("Schedule 3 500 pallets" for "Schedule 3, 500
+# pallets"): when unsure, hide, the reference with the count.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("as set out in Schedule 3 500 pallets shall be delivered", "3 500 pallets"),
+        (f"under Clause 4{NBSP}250 units", f"4{NBSP}250 units"),
+        ("the Article 30 500 records", "30 500 records"),
+    ],
+)
+def test_a_count_after_a_reference_without_its_comma_is_still_found(text, needle):
     assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
 
 

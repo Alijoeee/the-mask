@@ -148,6 +148,24 @@ def test_an_address_ends_with_its_country(engine, lists):
     assert masked(a) == "Registered office: [ADDRESS_1], Company Secretary"
 
 
+# Ruling R97 (b): a running header with spaced hyphens hides its company, not the words round it.
+def test_a_hyphenated_running_header_hides_only_its_company(engine, lists):
+    t = "Acme Supplies Ltd sells the Goods.\nConfidential - Acme Supplies Ltd - Page 3"
+    assert masked(analyze(one(t), engine, lists)) == (
+        "[COMPANY_1] sells the Goods.\nConfidential - [COMPANY_1] - Page 3"
+    )
+
+
+# Ruling R97 (d): the Dutch postcode and town after a spaced hyphen are hidden with their street.
+def test_a_dutch_postcode_after_a_spaced_hyphen_is_hidden_with_its_street(engine, lists):
+    t = "Ship to: Keizersgracht 123 - 1015 CJ Amsterdam"
+    a = analyze(one(t), engine, lists)
+    assert [(g.type, g.canonical) for g in a.groups] == [
+        (PlaceholderType.ADDRESS, "Keizersgracht 123 - 1015 CJ Amsterdam")
+    ]
+    assert masked(a) == "Ship to: [ADDRESS_1]"
+
+
 def test_always_hide_list(engine, lists):
     lists.add_always("Project Falcon")
     t = "Project Falcon starts in May; PROJECT FALCON ends in June."

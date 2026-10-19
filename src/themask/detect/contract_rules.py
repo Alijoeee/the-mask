@@ -909,7 +909,10 @@ _UNIT = re.compile(_UNIT_WORDS + _SP + r"+\w{1,5}," + _SP + r"*\Z")
 # Postcodes. The UK's: "SW1A 2AA". The Netherlands': "1015 CJ" before a town (the letters F, I, O,
 # Q, U and Y are not used, nor SA, SD and SS). Germany's, France's and Turkey's: five digits before
 # a town. A Dutch or five-digit postcode starts a part of the address (after a comma or a line
-# break), so that "2026 EU Member States" and "pay 50000 Euros" are no addresses.
+# break), so that "2026 EU Member States" and "pay 50000 Euros" are no addresses. After a spaced
+# hyphen, or the en dash Word makes of one, a Dutch postcode with its town goes on the address
+# before it, as a line of a form may read ("Keizersgracht 123 - 1015 CJ Amsterdam", ruling R97);
+# it starts none on its own there ("Page 2 - 1500 KG Steel").
 _UK_POSTCODE = re.compile(
     r"(?<![\w-])[A-Z]{1,2}\d[A-Z\d]?" + _SP + r"\d[ABD-HJLNP-UW-Z]{2}(?![\w-])"
 )
@@ -919,6 +922,7 @@ _NL_POSTCODE = re.compile(
 _NL_POSTCODE_LETTERS = re.compile(r"[1-9]\d{3} [A-Z]{2}")
 _FIVE_DIGIT_POSTCODE = re.compile(r"(?<![\w.,/-])\d{5}(?=" + _SP + ")")
 _STARTS_A_PART = re.compile(r"(?:^|[,;:(\t|])[ \N{NO-BREAK SPACE}]*\Z", re.MULTILINE)
+_SPACED_DASH = re.compile(_SP + r"+[\-\N{EN DASH}]" + _SP + "+")
 # Words after a postcode-like number that are no town.
 _NOT_A_TOWN = (
     _FUNCTION_WORDS
@@ -1021,11 +1025,19 @@ def _address_word_end(doc: _Document, k: int) -> int:
 
 
 def _starts_next_part(doc: _Document, k: int) -> bool:
-    """Whether word ``k`` follows a comma and starts the next part of the address."""
+    """Whether word ``k`` follows a comma and starts the next part of the address, or follows a
+    spaced hyphen and starts a Dutch postcode with its town ("Keizersgracht 123 - 1015 CJ
+    Amsterdam", ruling R97).
+    """
     if not 0 < k < len(doc):
         return False
     gap = doc.gap(k)
-    return gap.startswith(",") and all(character in _SPACES for character in gap[1:])
+    if gap.startswith(",") and all(character in _SPACES for character in gap[1:]):
+        return True
+    if _SPACED_DASH.fullmatch(gap) is None:
+        return False
+    postcode = _NL_POSTCODE.match(doc.text, doc.words[k].start)
+    return postcode is not None and _town_follows(doc, postcode)
 
 
 def _is_a_country(doc: _Document, part: list[int]) -> bool:
@@ -1180,6 +1192,19 @@ def _street_anchors(doc: _Document) -> Iterable[int]:
             yield k
 
 
+def _town_follows(doc: _Document, postcode: re.Match[str]) -> bool:
+    """Whether a town follows ``postcode`` on its line: a capitalised word that is no small word,
+    unit, currency or month, nor a code of three capitals at most ("3000 MT", "1500 KG", "2024 UK").
+    """
+    town = doc.first_word_from(postcode.end())
+    if town >= len(doc) or doc.words[town - 1].end != postcode.end() or not doc.joined(town):
+        return False
+    word = doc.word(town)
+    if not word[0].isupper() or _core(word).rstrip(".").casefold() in _NOT_A_TOWN:
+        return False
+    return not (word.isupper() and len(_letters(word)) <= 3)
+
+
 def _postcode_anchors(doc: _Document) -> Iterable[int]:
     text = doc.text
     for match in _UK_POSTCODE.finditer(text):
@@ -1188,15 +1213,8 @@ def _postcode_anchors(doc: _Document) -> Iterable[int]:
         for match in pattern.finditer(text):
             if not _STARTS_A_PART.search(text, max(0, match.start() - 40), match.start()):
                 continue
-            town = doc.first_word_from(match.end())
-            if town >= len(doc) or doc.words[town - 1].end != match.end() or not doc.joined(town):
-                continue
-            word = doc.word(town)
-            if not word[0].isupper() or _core(word).rstrip(".").casefold() in _NOT_A_TOWN:
-                continue
-            if word.isupper() and len(_letters(word)) <= 3:
-                continue  # "3000 MT", "1500 KG", "2024 UK"
-            yield _with_street_before(doc, doc.first_word_from(match.start()))
+            if _town_follows(doc, match):
+                yield _with_street_before(doc, doc.first_word_from(match.start()))
 
 
 def _addresses(doc: _Document, terms: frozenset[str]) -> list[Finding]:

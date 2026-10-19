@@ -391,8 +391,9 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
 def _part_breaks(text: str) -> list[tuple[int, int]]:
     """Where a model finding's ``text`` is cut (``_PART_BREAK``), but for a spaced hyphen between
     two capitalised words, which joins a double name ("Smith - Jones Logistics Ltd", "John Carter -
-    Managing"), unless the contract's own words follow it, as a running header's title does
-    ("Greystone - Brinkhof - Agreement", ruling R95).
+    Managing"), unless a running header's own word stands on either side of it
+    (``_is_header_word``): its title, or a mark such as "Confidential" or "Page" ("Greystone -
+    Brinkhof - Agreement", "Confidential - Acme Supplies Ltd - Page 3", rulings R95 and R97).
     """
     breaks = []
     for cut in _PART_BREAK.finditer(text):
@@ -400,10 +401,18 @@ def _part_breaks(text: str) -> list[tuple[int, int]]:
             before = text[: cut.start()].split()
             after = text[cut.end() :].split()
             names = bool(before and after) and before[-1][:1].isupper() and after[0][:1].isupper()
-            if names and not is_contract_wording(after[0]):
+            if names and not (_is_header_word(before[-1]) or _is_header_word(after[0])):
                 continue
         breaks.append(cut.span())
     return breaks
+
+
+def _is_header_word(word: str) -> bool:
+    """Whether ``word``, beside a spaced hyphen, is a running header's own and no part of a double
+    name: one of the contract's own words or a default never-hide term ("Agreement", "Confidential",
+    "Page", "Netherlands").
+    """
+    return is_contract_wording(word) or is_default_term(word)
 
 
 def _label_end(text: str) -> int:
