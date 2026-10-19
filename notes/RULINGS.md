@@ -109,13 +109,74 @@ in `notes/sdd/progress.md` (the ledger), by number.
 - **R99** — (session 3) The packaging test's check that every cleanup glob matches something in the installed PySide6 runs on macOS only, because the globs name the macOS wheel's contents. — *Cost if wrong:* a misspelt cleanup glob is caught only on the Mac, which is the only place the build happens.
 
 ## What Task 26 (your round trip with Copilot, Claude and ChatGPT) needs from you
-TODO (filled in at the end of session 3)
 
-## The Wi-Fi-off smoke test
-TODO (filled in at the end of session 3)
+Do this after the app is built and installed on your Mac (see "The remaining local step"). Use the
+made-up contract `tests/corpus/generated/supply-01.docx` — never a real contract for this test.
+
+1. In The MASK.app, open `supply-01.docx`, go through the review (nothing needs changing), and export
+   it to your output folder (`~/Documents/The MASK` unless you changed it in Settings). Note the case
+   code in the masked file's name, `MASKED-<CODE>.docx`. Press **Copy instruction**.
+2. For each of **Copilot**, **Claude** and **ChatGPT**: upload the masked file, paste the copied
+   instruction, and add the prompt "Review this agreement for risks to the Buyer and return a revised
+   version as a Word file." Download the Word file the tool returns. If a tool returns text, markdown
+   or a PDF instead of a Word file, copy its text and use the **Restore text** box in step 3.
+3. In The MASK.app, open **Restore** and drop each returned file (or paste the text). Check that the
+   preselected case is the right one — the combo shows the code, date and original file name; if the
+   screen says "Several cases fit this file — choose one", choose by the code. If a list of changed
+   placeholders appears ("These placeholders were changed by the AI — restore them?"), tick the ones
+   that are really placeholders and press **Restore**. Expected: the report line reads
+   "{n} placeholders restored, {m} need your check.", the banner is gone, no value was invented, and
+   every placeholder is either restored or listed under "need your check". The restored file is
+   written next to the AI's file as "<name> – restored.docx"; nothing is overwritten.
+4. Record, per tool, in `docs/acceptance/2026-10-xx-round-trip.md`: did the placeholders survive
+   (yes/no, and which ones the tool changed), the restore report line, anything odd. The pass mark
+   (design §9) is that all three tools' files restore.
+5. Commit the record: `git add -A && git commit -m "docs: Mac acceptance round trip with three AI tools"`.
+
+What to expect: Claude and ChatGPT usually keep `[PERSON_1]`-style placeholders exactly; Copilot
+sometimes reformats them (bold, or `PERSON_1` without brackets). Reformatted ones show up under
+"need your check" with a checkbox; nothing is written for them unless you tick them.
+
+## The Wi-Fi-off smoke test (Task 25, step 6 — only you can do it)
+
+The app's own network guard covers Python-level connections only; what macOS sees is the real proof.
+
+1. Turn Wi-Fi off (and unplug any Ethernet cable). Open The MASK.app from Applications. Expected:
+   the window opens at once, says "Loading…" and reports the engine loaded within about ten seconds;
+   no security dialog on the Mac that built it. The first time, macOS may ask whether the app may use
+   its Keychain item (service "The MASK", account "master-key"): choose **Always Allow**. A rebuilt
+   app is a new program to macOS, so it can ask again after every rebuild.
+2. Drop `tests/corpus/generated/supply-05.docx` (it has a picture) and `supply-02.docx` (it has
+   comments). Review, export to `~/Documents/The MASK`. If macOS asks whether the app may use your
+   Documents folder, choose **Allow**.
+3. Open each masked file in Word: the banner is the first line, values are `[TYPE_N]` placeholders,
+   "[image removed]" stands where the picture was, there are no comments and no tracked changes, and
+   File → Properties shows no author, title or company.
+4. In Terminal, with the app open: `lsof -i -a -p $(pgrep -f "The MASK.app")` — it must print nothing.
+5. Restore: drop one masked file (unchanged) on the Restore screen; every placeholder comes back.
+6. Open the log, `~/Library/Application Support/The MASK/logs/themask.log`: counts, types and
+   durations only, no words from the documents, no file names.
+7. Turn Wi-Fi back on. Record the result in `docs/acceptance/2026-10-xx-mac-smoke.md`.
 
 ## Deferred minors — triage
 TODO (filled in after the final whole-branch review)
 
-## The remaining local step
-TODO (filled in at the end of session 3)
+## The remaining local step (your Mac; the cloud cannot build or sign a Mac app)
+
+1. In Terminal: `cd ~/Developer/the-mask && git fetch origin && git checkout mac-v1 && git pull`
+   (mac-v1 must be at the head this file names at its end), then `uv sync --locked`.
+2. Set your name once in `src/themask/about.py` (`OWNER_NAME` is still the placeholder
+   "<owner name — set in about.py>"; the About box shows it) and commit it — or tell the controller the
+   name and it is done for you.
+3. Optional but worth it: `uv run pytest -q` — on the Mac the macOS-only tests (vtool, iconutil,
+   codesign, the cleanup-glob check) run as well.
+4. `bash packaging/build_mac.sh` — it starts from scratch, downloads Briefcase's Python support
+   package and the wheels once, checks the bundle against `uv.lock` (expect "74/74"), and ends with
+   `build/themask/macos/app/The MASK.app` (about 510–550 MB) and `dist/The MASK-0.1.0.app.zip`
+   (about 183 MB). Check: `du -sh "build/themask/macos/app/The MASK.app"` under 600M, and
+   `codesign -dv --verbose=2 "build/themask/macos/app/The MASK.app" 2>&1 | grep Signature` shows
+   `Signature=adhoc`.
+5. Install: quit and trash any older "The MASK.app" in Applications first (README, "Install it on this
+   Mac"), then `ditto "build/themask/macos/app/The MASK.app" "/Applications/The MASK.app"` and open it.
+6. Then the Wi-Fi-off smoke test above, then Task 26.
+7. Merging `mac-v1` into `main` is your decision; the controller has not done it and will not.
