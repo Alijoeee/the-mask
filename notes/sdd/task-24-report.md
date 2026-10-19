@@ -157,3 +157,185 @@ The numbers did not drop. Misses 0; groups hiding no secret 2 (Project Falcon, K
 - "Address: …, the Netherlands, Attention Finance": the address now ends at the country, and the model's own "Attention Finance" is a company to check (0.6). Base hid it inside the over-long address.
 - "Ship to: Keizersgracht 123 - 1015 CJ Amsterdam" leaves "CJ Amsterdam" visible, as base did. A spaced hyphen before a Dutch postcode is not read as the start of an address part. This is pre-existing and not in this round's list.
 - `test_full_round_trip_every_docx` still waits for Task 18's merge. mac-v1 is still not merged into task-24.
+
+---
+
+## Fix round 2 (R97 + round trip)
+
+Worktree `/home/user/the-mask-worktrees/task-24` (cloud, Linux), branch `task-24`, on top of 9438038 (the controller's WIP checkpoint; mac-v1 0baa904 is merged in at b715080). Commits: 993a12e (fix), ec8ec1c (docs).
+
+### Status: DONE_WITH_CONCERNS (concerns at the end; none blocks)
+
+### What I inherited and what I did with it
+- **WIP commit 9438038**: the finished `test_full_round_trip_every_docx` and RED cases for R97 (a) and (c). Kept as they are. The round trip passes on all 28 Word files with no change to the test, so there is no `test:` commit.
+- **The interrupted implementer's uncommitted diff**: `contract_rules.py`, `engine.py` and `patterns.py`, with tests in `test_contract_rules.py`, `test_patterns.py` and `test_pipeline.py`. The last file was not on the dispatch's list but was in `git status`. It implemented all four items, and `tests/detect` was green (1044 passed). I saved it as a patch (`git diff > …/inherited-src.patch`) and reverted only its source half (`git apply -R`) to see every new test fail (RED below). Then I re-applied it and reviewed it line by line. I probed it with made-up strings through the whole pipeline, against a copy of HEAD's source (`git archive HEAD src`).
+  - **Kept**: all four implementations and every inherited test.
+  - **Redone**: formatting (`ruff format --check` flagged `patterns.py` and `test_contract_rules.py`). I restructured the quantity guard into two named helpers, `_is_a_reference` and `_is_the_records_year`, in the style of HEAD's `_are_records_named`. The regexes are now built compactly (`_QUANTITY_REFERENCE`, `_YEAR`, `_OWNER` via `_any_of`, `_BETWEEN_YEARS`), and a 101-character docstring line in `engine.py` is wrapped.
+  - **Added**: fixes for two regressions that the inherited (a) brought against HEAD (see (a) below), each with RED tests.
+
+### What changed, per R97 item
+- **(a) References** (`src/themask/detect/patterns.py`: `_QUANTITY_REFERENCE`, `_REFERENCE_BEFORE_A_QUANTITY`, `_SPACED_DIGITS`, `_is_a_reference`, called from `QuantityRecognizer.score_match`).
+  - A figure is a reference, whatever unit follows it, after clause(s), section(s), article(s), schedule(s), annex(es), appendix/appendices, exhibit(s), paragraph(s), "§" and "Part"/"PART" with its capital.
+  - "parts", "part" in lower case and the words "art", "para" and "sec" are not references. Examples: "spare parts 500 units", "the art 12 pieces", "replacement parts 2,000 pieces", "the spare part 5 units".
+  - My two additions:
+    1. "Art.", "Sec." and "Para.", written with their full stop, stay references. The inherited diff hid "the Art. 30 records of processing activities" as QUANTITY "30 records", which HEAD kept visible. See Concern 1.
+    2. After a reference word, a figure that goes on with a group of digits after a space ("as set out in Schedule 3 500 pallets") stays a quantity (when unsure, hide). The inherited diff left "500 pallets" visible, where HEAD hid "3 500 pallets".
+  - The bare-number guard (`_REFERENCE_BEFORE`) is untouched.
+- **(b) Hyphenated headers** (`src/themask/detect/engine.py`: `_part_breaks`, new `_is_header_word` = `is_contract_wording(word) or is_default_term(word)`). A spaced hyphen between two capitalised words is still cut when the word on either side is a header word. "Confidential - Acme Supplies Ltd - Page 3" now gives the one company "Acme Supplies Ltd". HEAD gave one company "Confidential - Acme Supplies Ltd - Page". "Smith - Jones Logistics Ltd" stays one company, and "Greystone - Brinkhof - Agreement" keeps "Agreement" visible (the round-1 tests pass unchanged).
+- **(c) Years and counts before "records"** (`patterns.py`: `_YEAR`, `_YEAR_RECORDS`, `_OWNER`, `_BETWEEN_YEARS`, `_OWNER_BEFORE`, `_is_the_records_year`).
+  - A figure from 1900 to 2099 before "records" is their year only after "the", "its", "their", "our", "your", "his", "her" or "my", or a possessive ("Acme's", "Supplier’s", "Suppliers'"). Other years of a list may stand between ("the 2024, 2025 and 2026 records").
+  - Anywhere else it is a count: "up to 2000 records", "about 2025 records", "approximately 1999 records", "no more than 2050 records", "a total of 2000 records", "the first 2000 records".
+- **(d) Dutch postcodes after a spaced hyphen** (`src/themask/detect/contract_rules.py`: `_SPACED_DASH`, `_starts_next_part`, and `_town_follows`, factored out of `_postcode_anchors` with its logic unchanged).
+  - A spaced hyphen, or the en dash Word makes of one, before a Dutch postcode with its town starts the next part of the address being read. "Ship to: Keizersgracht 123 - 1015 CJ Amsterdam" is one ADDRESS. HEAD gave ADDRESS "Keizersgracht 123", AMOUNT "1015" to check, and left "CJ Amsterdam" visible.
+  - A hyphen starts no address on its own: `_postcode_anchors` still needs `_STARTS_A_PART`. The address stops before "- Supply Agreement", and the engine still cuts "Greystone - Brinkhof - Agreement".
+
+### Tests (counter-tests next to their targets; no existing assertion changed or removed)
+- `tests/detect/test_patterns.py`:
+  - `test_a_reference_a_year_or_a_single_record_is_no_quantity`:
+    - from the WIP: R97 (a) "Section 5 pallets", "Annex 2 Units of Measure", "Schedule 3 Pallets", "under Clause 4 cartons are listed", "Part 2 Units", and R97 (c) "Acme's 2025 records are kept.";
+    - inherited: (c) "the Supplier’s 2025 records", "the Suppliers' 2025 records", "its 2025 records", "the 2024, 2025 and 2026 records", "THE 2025 RECORDS ARE KEPT"; (a) "PART 2 UNITS OF MEASURE", "Exhibit 4 boxes are attached", "Appendix 3 Items and Prices", "as paragraph 2 units are counted", "§ 5 pallets";
+    - mine: "the Art. 30 records of processing activities", "ART. 30 RECORDS", "under Sec. 5 pallets are listed", "as Para. 2 units are counted".
+  - `test_a_quantity_after_a_word_like_parts_is_still_found`:
+    - from the WIP: "the spare part 5 units", "the art 12 pieces", and the five counts from the ruling;
+    - inherited: "the first 2000 records", "The Processor holds 2000 records.".
+    - The comment above this test was the only changed line: R95's "only records after a reference word is a reference" became R97's rule.
+  - New (mine): `test_a_count_after_a_reference_without_its_comma_is_still_found`: "Schedule 3 500 pallets", "Clause 4 250 units" with a no-break space, "the Article 30 500 records".
+- `tests/detect/test_contract_rules.py` (inherited):
+  - `test_a_dutch_postcode_after_a_spaced_hyphen_goes_on_the_address` (5 cases: hyphen, en dash with country, "Delivery address:", a hyphen before a title that no address continues over, address then title);
+  - `test_a_spaced_hyphen_starts_no_address_on_its_own` ("Page 2 - 1500 KG Steel");
+  - `test_a_spaced_hyphen_by_a_never_hide_word_still_parts_a_header` (engine; "Confidential/CONFIDENTIAL - … - Page 3", "Draft - … - Version 2", "… - Netherlands", "Confidential - Greystone - Page 2").
+- `tests/detect/test_pipeline.py` (inherited): `test_a_hyphenated_running_header_hides_only_its_company` (masked text "Confidential - [COMPANY_1] - Page 3"), `test_a_dutch_postcode_after_a_spaced_hyphen_is_hidden_with_its_street` (one ADDRESS group, "Ship to: [ADDRESS_1]").
+
+### RED → GREEN (commands from the worktree)
+- **Inherited tests against HEAD's source** (the inherited source half reverted with `git apply -R`, every test kept): `uv run pytest tests/detect/test_patterns.py tests/detect/test_contract_rules.py tests/detect/test_pipeline.py -q -k "reference_a_year or word_like_parts or spaced_hyphen or dutch_postcode or hyphenated_running_header or starts_no_address"` gave **28 failed, 21 passed**. The 21 that passed are guards that hold both before and after:
+  - 12 no-quantity cases: the 4 from round 1, and the 8 year cases (R95 already made every year a year);
+  - 5 count cases: round 1's 3, "the spare part 5 units" and "the art 12 pieces";
+  - 4 rule cases: the 2 round-1 hyphen tests, "Ship to: Keizersgracht 123 - Supply Agreement" and "Page 2 - 1500 KG Steel".
+
+  The failures were the expected ones:
+  - (a): 10 cases, for example `assert {'2 Units': 0.8} == {}` ("Annex 2 Units of Measure"), `{'5 pallets': 0.8} == {}` ("Section 5 pallets", "§ 5 pallets") and `{'4 cartons': 0.8} == {}`.
+  - (c): 7 cases, for example `assert {} == {'2000 records': 0.8}` ("up to 2000 records") and `{} == {'2025 records': 0.8}` ("about 2025 records").
+  - (b): 5 engine cases. The finding was the whole header, for example `'Confidential - Acme Supplies Ltd - Page'` and `'Draft - Acme Supplies Ltd - Version 2'`. The pipeline test got `[COMPANY_2] 3` for the header line.
+  - (d): 4 rule cases, for example `assert {'Keizersgracht 123'} == {'Keizersgracht 123 - 1015 CJ Amsterdam'}`. The pipeline test got groups `ADDRESS 'Keizersgracht 123'` and `AMOUNT '1015'`.
+- **The same tests with the source re-applied**: all green (`tests/detect`: 1044 passed before my additions).
+- **My additions** (a): `uv run pytest tests/detect/test_patterns.py -q -k "reference_a_year or without_its_comma"` gave RED 7 failed: `{'30 records': 0.8} == {}`, `{'30 RECORDS': 0.8} == {}`, `{'5 pallets': 0.8} == {}`, `{'2 units': 0.8} == {}`, `{} == {'3 500 pallets': 0.8}`, `{} == {'4\xa0250 units': 0.8}` and `{} == {'30 500 records': 0.8}`. After the fix, GREEN: `uv run pytest tests/detect/test_patterns.py -q` gave 356 passed.
+
+### Probes (made-up strings, whole pipeline; HEAD = `git archive HEAD src`, final = this commit)
+| Text | HEAD | Final |
+|---|---|---|
+| Schedule 3 Pallets / Section 5 pallets / Part 2 Units | number hidden (QUANTITY) | visible |
+| The Goods under Clause 4 cartons are listed | "4 cartons" QUANTITY | visible ("Goods under" is a model COMPANY guess flagged to check, the same at HEAD) |
+| the Art. 30 records of processing activities | visible | visible (inherited diff: "30 records" hidden) |
+| as set out in Schedule 3 500 pallets shall … | "3 500 pallets" QUANTITY | "3 500 pallets" QUANTITY (inherited diff: visible) |
+| spare parts 500 units / the art 12 pieces / replacement parts 2,000 pieces | QUANTITY | QUANTITY |
+| SPARE PART 5 UNITS | "5 UNITS" QUANTITY | visible (see Concern 2) |
+| Confidential - Acme Supplies Ltd - Page 3 | one company incl. "Confidential" and "Page" | "Confidential - [COMPANY_1] - Page 3" |
+| Northwind - Acme - Supply Agreement - Page 2 | "Supply Agreement - Page" COMPANY to check | title and page visible ("Northwind - Acme" one company to check: parked) |
+| Smith - Jones Logistics Ltd / John Carter - Managing Director | one company / "John Carter - Managing" | unchanged |
+| up to / about / approximately / no more than / a total of N records | visible | QUANTITY |
+| the 2025 records / Acme's 2025 records | visible | visible |
+| Ship to: Keizersgracht 123 - 1015 CJ Amsterdam (also with ", the Netherlands"; the en dash form is in the rule tests) | ADDRESS street + AMOUNT "1015", "CJ Amsterdam" visible | one ADDRESS |
+| Delivery address: Damrak 1 - 1012 LG Amsterdam | ADDRESS + AMOUNT + COMPANY "LG" | one ADDRESS |
+| Keizersgracht 123 - 1015 CJ Amsterdam - Supply Agreement | street + AMOUNT "1015" to check | address up to "Amsterdam"; title visible |
+
+### The round trip (`test_full_round_trip_every_docx`, from the WIP commit, unchanged)
+I read the test against the brief's version. It asserts everything the brief's version does: export not blocked; every key value in the restored text; outside `existing_placeholders` files, the set of placeholders left is exactly {"[PERSON_9]"}. On top of that it checks:
+- the fingerprint: `plan_docx(ai, case).sha256` passed as `expected_sha256`;
+- every truth secret (but the deleted or hidden ones) in the restored text, a check that no value came back in another's place;
+- `needs_check == []`, and `altered_restored` equals the altered items of the plan;
+- the one altered item is the AI's `[PERSON 1]` (none when an annex names no person), and `unknown == ["[PERSON_9]"]`;
+- for `existing_placeholders` files (supply-09, nda-03, dpa-04): the file's own `[PERSON 1]` left as written, and `[PERSON_9]` reported unknown.
+
+It passes on all 28 Word files. No export, restore or masker module was touched, and there was nothing to report as BLOCKED.
+
+Command: `uv run pytest tests/test_passmarks.py -q -m slow -s -k round_trip`, run on HEAD ec8ec1c. Output:
+```
+supply-01.docx: key 41, planned 61, restored 60 (1 changed), unknown ['[PERSON_9]']
+supply-02.docx: key 44, planned 65, restored 64 (1 changed), unknown ['[PERSON_9]']
+supply-03.docx: key 42, planned 62, restored 61 (1 changed), unknown ['[PERSON_9]']
+supply-04.docx: key 39, planned 61, restored 60 (1 changed), unknown ['[PERSON_9]']
+supply-05.docx: key 40, planned 61, restored 60 (1 changed), unknown ['[PERSON_9]']
+supply-06.docx: key 39, planned 64, restored 63 (1 changed), unknown ['[PERSON_9]']
+supply-07.docx: key 43, planned 66, restored 65 (1 changed), unknown ['[PERSON_9]']
+supply-07-annex.docx: key 17, planned 25, restored 24 (1 changed), unknown ['[PERSON_9]']
+supply-08.docx: key 43, planned 64, restored 63 (1 changed), unknown ['[PERSON_9]']
+supply-09.docx: key 41, planned 62, restored 60 (0 changed), unknown ['[PERSON 1]', '[PERSON_9]']
+supply-10.docx: key 43, planned 64, restored 63 (1 changed), unknown ['[PERSON_9]']
+services-01.docx: key 47, planned 66, restored 65 (1 changed), unknown ['[PERSON_9]']
+services-02.docx: key 46, planned 66, restored 65 (1 changed), unknown ['[PERSON_9]']
+services-03.docx: key 47, planned 68, restored 67 (1 changed), unknown ['[PERSON_9]']
+services-04.docx: key 47, planned 67, restored 66 (1 changed), unknown ['[PERSON_9]']
+services-05.docx: key 48, planned 70, restored 69 (1 changed), unknown ['[PERSON_9]']
+services-05-annex.docx: key 14, planned 22, restored 21 (1 changed), unknown ['[PERSON_9]']
+nda-01.docx: key 28, planned 51, restored 50 (1 changed), unknown ['[PERSON_9]']
+nda-02.docx: key 28, planned 49, restored 48 (1 changed), unknown ['[PERSON_9]']
+nda-03.docx: key 27, planned 50, restored 48 (0 changed), unknown ['[PERSON 1]', '[PERSON_9]']
+nda-04.docx: key 26, planned 49, restored 48 (1 changed), unknown ['[PERSON_9]']
+nda-05.docx: key 27, planned 48, restored 47 (1 changed), unknown ['[PERSON_9]']
+dpa-01.docx: key 30, planned 53, restored 52 (1 changed), unknown ['[PERSON_9]']
+dpa-02.docx: key 30, planned 55, restored 54 (1 changed), unknown ['[PERSON_9]']
+dpa-02-annex.docx: key 11, planned 19, restored 18 (0 changed), unknown ['[PERSON_9]']
+dpa-03.docx: key 31, planned 55, restored 54 (1 changed), unknown ['[PERSON_9]']
+dpa-04.docx: key 31, planned 55, restored 53 (0 changed), unknown ['[PERSON 1]', '[PERSON_9]']
+dpa-05.docx: key 31, planned 58, restored 57 (1 changed), unknown ['[PERSON_9]']
+.
+1 passed, 13 deselected in 77.74s (0:01:17)
+```
+Reading the lines:
+- "planned" = "restored" + the unknown placeholders. "1 changed" is the AI's `[PERSON 1]`, caught and restored once confirmed.
+- "0 changed" has two causes. In the three `existing_placeholders` files (supply-09, nda-03, dpa-04), the first `[PERSON_1]` is the file's own, so it stays as written and is listed unknown. dpa-02-annex's key names no person.
+
+### Evaluation re-run (pass marks)
+Command: `uv run python -m tools.make_corpus <scratchpad>/r97/corpus` (the generator the tests' `corpus` fixture uses; 28 Word files with their truth and 8 PDFs), then `uv run python -m tools.evaluate <scratchpad>/r97/corpus`, which printed **PASS** and exited 0.
+
+| Check (spec §9) | Word | PDF | All | Pass mark |
+|---|---|---|---|---|
+| Pattern-type items found before review | 100.0 % (719/719) | 100.0 % (194/194) | 100.0 % (913/913) | ≥ 99 % |
+| Names, companies, addresses found before review | 100.0 % (255/255) | 100.0 % (65/65) | 100.0 % (320/320) | ≥ 95 % |
+| Never-hide terms hidden by mistake | 0 | 0 | 0 | 0 |
+| Thirty-page contract analysed (slowest) | 4.3 s | 7.8 s | 7.8 s | < 60 s |
+| Found items hidden as their own type (info) | 99.9 % | 100.0 % | 99.9 % | – |
+
+- 35 files analysed; `scanned-01.pdf` is not analysed. Misses 0. Never-hide terms hidden 0. Groups hiding no secret: 2 (supply-08's two, as before). Places hidden outside every secret: 0. Secrets under more than one placeholder: 6 (as before). Secrets not in the text: the same 7.
+- Every detection figure equals round 1's. The corpus holds none of the shapes R97 touches. I counted them over every analysed text, printing counts only: no reference word, "Part" or "Art./Sec./Para." before a figure and unit, no year before "records", no spaced hyphen at all, and no spaced hyphen or en dash before a Dutch postcode. The only "N records" are counts ("up to N records"), which stay quantities.
+- Times: this Linux container measured 4.3 s (Word) and 7.8 s (PDF), against the M3's 2.2 s and 3.4 s in the plan. The plan's table keeps the M3 figures; a dated bullet records this re-run (commit ec8ec1c).
+
+### Full gate (from the worktree root, on the committed tree)
+- `uv run pytest -q -m "slow or not slow"` on ec8ec1c: **3010 passed, 6 skipped in 348.21s (0:05:48)**. Output pristine: no warnings and no failures; the 6 skips are the macOS-only tests, as on mac-v1. An earlier run of the same tree with `-p no:cacheprovider` gave 3010 passed, 6 skipped in 325 s. No wall-clock test failed, so nothing was re-run alone.
+- `uv run ruff check src tests tools`: All checks passed!
+- `uv run ruff format --check src tests tools`: 129 files already formatted.
+- `uv run mypy src`: Success: no issues found in 48 source files.
+- Focused: `uv run pytest tests/detect -q` gave 1044 passed on the inherited state, before my additions. `uv run pytest tests/detect/test_patterns.py -q` gave 356 passed after them.
+
+### Commits (on top of 9438038; nothing amended, squashed or rebased; not pushed)
+- 993a12e fix: references, hyphenated headers, record counts and Dutch postcodes (R97)
+- ec8ec1c docs: the round-trip pass mark and the R97 re-run under Results
+
+### Files changed this round
+- `src/themask/detect/patterns.py`, `src/themask/detect/engine.py`, `src/themask/detect/contract_rules.py`
+- `tests/detect/test_patterns.py`, `tests/detect/test_contract_rules.py`, `tests/detect/test_pipeline.py`
+- `docs/superpowers/plans/2026-10-17-the-mask-mac-v1.md` (Results: the round-trip bullet, and the dated re-run bullet)
+- `tests/test_passmarks.py`: unchanged since the WIP commit.
+
+### Self-review findings (fixed before the commit)
+- Two regressions of the inherited (a) against HEAD, found by probing HEAD and the inherited state side by side: "the Art. 30 records" hidden, and "Schedule 3 500 pallets" left visible. Both are fixed, each with RED tests.
+- Formatting: `ruff format --check` failed on two inherited files. Fixed.
+- Readability: the inherited guard was inlined in `score_match`, with regexes that `ruff format` spread over ten lines. It is now two named helpers and compact regex building; `_AND` was renamed `_BETWEEN_YEARS`, with a comment. One docstring line was over 100 characters and is wrapped.
+- Checked that nothing still uses the removed names (`_RECORDS`, `_PLAIN_YEAR`, `_are_records_named`). The bare-number guard keeps its own `_REFERENCE_BEFORE`.
+- Checked that no assertion was weakened: the WIP commit and the inherited diff only add test cases. The one changed line is the comment above `test_a_quantity_after_a_word_like_parts_is_still_found`, whose R95 wording ("only records after a reference word is a reference") R97 replaces.
+
+### Concerns
+1. **Conservative reading of R97 (a), "drops art/para/sec".** I dropped the words, but kept "Art.", "Sec." and "Para." as references when they are written with their full stop. Abbreviated like that they are unambiguous, and the ruling's own counter-example has none ("the art 12 pieces"). HEAD kept "the Art. 30 records of processing activities" visible, a phrase a DPA uses, and the literal reading would have hidden "30 records". UK-style abbreviations without a full stop ("Art 30 records", "para 2 units") now count, as the ruling drops those words. If the controller wants the literal reading, the change is to delete `|(?:art|sec|para)\.` and its four test cases.
+2. **All-caps "PART".** "PART" in capitals is read as the heading reference ("PART 2 UNITS OF MEASURE", an inherited test), so the unlikely all-caps "SPARE PART 5 UNITS" leaves "5 UNITS" visible. HEAD hid it.
+3. **Side effects of (b), accepted by the ruling's "either side".**
+   - A double name with a contract word or never-hide term next to its hyphen is now cut. "Mary Price - Jones" gives PERSON "Mary Price" and a flagged PERSON "Jones": both hidden, but under two placeholders (HEAD gave one).
+   - In "Draft - Acme Supplies Ltd - Version 2", "Version 2" stays as the model's own COMPANY guess, flagged to check. At HEAD it was inside the one whole-header company.
+4. **Reading of (c).** Taken literally ("a year only after the/a possessive"): any other word before a year-range figure makes it a count, so "In 2025 records were lost" hides "2025 records". "these 2025 records" is a count too. Year ranges ("the 2024-2025 records") stay parked.
+5. **Pre-existing, the same at HEAD (not touched).**
+   - The model's flagged COMPANY guess on a title-case heading hides "Annex 2 Units of Measure" whole, alone or in a sentence.
+   - "Page 2 - 1500 KG Steel" gives QUANTITY "2 - 1500 KG" (a range reading).
+   - In "Greystone - Brinkhof - Agreement", "Brinkhof" stays visible when nothing else names it.
+   - "The Goods under Clause 4 cartons…" gives a model guess "Goods under".
+6. **Edges of (d).** A weight with a capitalised word after a street and a spaced hyphen has the shape of a Dutch postcode and town, so "Keizersgracht 123 - 1500 KG Steel per month" gives the address "Keizersgracht 123 - 1500 KG Steel". It is hidden either way, and is contrived. On the other side, "Address: Northwind Trading B.V. - 1015 CJ Amsterdam" now hides "1015 CJ Amsterdam" (HEAD hid nothing), and "12 High Street - 1015 CJ Amsterdam" is one address.
+7. **Timing in the plan.** The Results table's times are the Apple M3's (Word 2.2 s, PDF 3.4 s). This container measured 4.3 s (Word) and 7.8 s (PDF). I did not overwrite the M3 figures. I added a dated bullet with the container's figures, and replaced the bullet that said the round trip was still to come.
+8. **Environment.** In this container `uv` prints a deprecation warning for `UV_NATIVE_TLS` before every command. It comes from the environment, not from the tests.
