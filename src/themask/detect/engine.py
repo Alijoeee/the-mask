@@ -4,7 +4,10 @@ the contract rules.
 ``Engine.analyze`` turns the analyzer's results into ``Finding`` objects. Presidio's entity names
 become placeholder types, each finding says whether a pattern, the language model or a contract rule
 found it, and findings scored below ``MIN_SCORE`` are dropped. Dates stay visible: so does a number
-that lies within one, such as 01.03.2026 read as an Italian phone number.
+that lies within one, such as 01.03.2026 read as an Italian phone number, or that is a numeric
+date itself ("2026.03.01"), unless its label says it is a registration or account number. The
+label before a number also decides between a phone number and an ID ("registered under number
+...", "telephone ...").
 
 The contract rules (``contract_rules``) check the language model: a place it finds is an address
 only next to an address the rules found ("the laws of the Netherlands" stays visible), unless it is
@@ -116,9 +119,14 @@ _DROPPED_ENTITIES = frozenset({_DATE, "NRP"})
 
 # The types a numeric date can pass for: "01.03.2026" is a valid phone number in Italy and
 # "2026-03-01" one in Denmark. A finding of one of these types that lies within a date found by
-# Presidio's DateRecognizer is dropped, so that the date stays visible.
+# Presidio's DateRecognizer is dropped, so that the date stays visible, and so is one that is a
+# numeric date in a form that recognizer does not know ("2026.03.01", "01-03-26", "01 03 2026").
 _DATE_SHAPED_TYPES = frozenset(
     {PlaceholderType.PHONE, _ID, PlaceholderType.AMOUNT, PlaceholderType.QUANTITY}
+)
+_NUMERIC_DATE = re.compile(
+    r"(?P<a>\d{1,2})(?P<sep>[./\- ])(?P<b>\d{1,2})(?P=sep)(?P<year>\d{4}|\d{2})"
+    r"|(?P<long_year>\d{4})(?P<sep2>[./\- ])(?P<month>\d{1,2})(?P=sep2)(?P<day>\d{1,2})"
 )
 
 # Presidio's recognizers that ours replace: the e-mail and URL recognizers (patterns.py says why)
@@ -140,9 +148,10 @@ _MODEL_RECOGNIZER = SpacyRecognizer.__name__
 
 # What the label before a number calls it beats what else its digits could be. Our recognizers of a
 # number after its label ("registered under number", "Account number:") beat a phone reading of the
-# same digits: Presidio's phone recognizer takes "number" for its own context word. A telephone
-# label beats Presidio's NHS reading, which takes the 3-3-4 shape of many national phone numbers
-# ("telephone 013 625 5086") for an NHS number.
+# same digits: Presidio's phone recognizer takes "number" for its own context word. What they find
+# is kept even in the shape of a date ("Company No. 12/2024"). A telephone label beats Presidio's
+# NHS reading, which takes the 3-3-4 shape of many national phone numbers ("telephone 013 625
+# 5086") for an NHS number.
 _LABELLED_NUMBER_RECOGNIZERS = frozenset(
     {RegistrationNumberRecognizer.__name__, AccountNumberRecognizer.__name__}
 )
@@ -160,6 +169,7 @@ _TRAILING_PUNCTUATION = frozenset(
     ".,;:!?'\"\N{RIGHT SINGLE QUOTATION MARK}\N{RIGHT DOUBLE QUOTATION MARK}"
 )
 _CLOSING_BRACKETS = {")": "(", "]": "[", "}": "{"}
+_OPENING_BRACKETS = {opening: closing for closing, opening in _CLOSING_BRACKETS.items()}
 
 # A place the model finds counts as part of an address the rules found when it overlaps it or is
 # at most this many characters away ("Keizersgracht 123" in "Keizersgracht 123, 1015 CJ ...").
@@ -241,9 +251,14 @@ class Engine:
         best: dict[tuple[PlaceholderType, int, int], tuple[Finding, str]] = {}
         for result in results:
             finding = self._finding(text, result)
-            if finding is None or _within_a_date(finding, dates):
-                continue
             recognizer = str(result.recognition_metadata.get(RecognizerResult.RECOGNIZER_NAME_KEY))
+            if finding is None:
+                continue
+            # A number after its label is what the label says, even in the shape of a date
+            # ("Company No. 12/2024").
+            labelled = recognizer in _LABELLED_NUMBER_RECOGNIZERS
+            if not labelled and _is_a_date(finding, dates):
+                continue
             key = (finding.type, finding.start, finding.end)
             if key not in best or finding.score > best[key][0].score:
                 best[key] = (finding, recognizer)
@@ -465,20 +480,50 @@ def _read_as_labelled(text: str, found: list[tuple[Finding, str]]) -> list[Findi
     return kept
 
 
-def _within_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
-    """Whether ``finding`` is a number that lies within one of the ``dates`` (start, end)."""
-    return finding.type in _DATE_SHAPED_TYPES and any(
-        start <= finding.start and finding.end <= end for start, end in dates
-    )
+def _is_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
+    """Whether ``finding`` is a number that is a date: one that lies within one of the ``dates``
+    (start, end), or that is a numeric date itself (``_is_a_numeric_date``).
+    """
+    if finding.type not in _DATE_SHAPED_TYPES:
+        return False
+    within = any(start <= finding.start and finding.end <= end for start, end in dates)
+    return within or _is_a_numeric_date(finding.text)
+
+
+def _is_a_numeric_date(text: str) -> bool:
+    """Whether ``text`` is a date in figures: day and month in either order and then the year, or
+    the year first ("01.03.2026", "03/31/26", "2026.03.01"), each part a day, month and year that
+    can be. A two-figure year may be any; a four-figure one is from 1900 to 2099.
+    """
+    parts = _NUMERIC_DATE.fullmatch(text)
+    if parts is None:
+        return False
+    if parts["a"] is not None:
+        a, b, year = int(parts["a"]), int(parts["b"]), parts["year"]
+        day_and_month = (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
+    else:
+        month, day, year = int(parts["month"]), int(parts["day"]), parts["long_year"]
+        day_and_month = 1 <= month <= 12 and 1 <= day <= 31
+    return day_and_month and (len(year) == 2 or 1900 <= int(year) <= 2099)
 
 
 def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:
-    """The span ``start``-``end`` without white space around it and without trailing punctuation."""
-    while start < end and text[start].isspace():
+    """The span ``start``-``end`` without white space around it, without trailing punctuation,
+    and without an opening bracket at its start that it does not close ("(01.03.2026").
+    """
+    while start < end and (text[start].isspace() or _opens_outside_the_value(text, start, end)):
         start += 1
     while end > start and _ends_outside_the_value(text, start, end):
         end -= 1
     return start, end
+
+
+def _opens_outside_the_value(text: str, start: int, end: int) -> bool:
+    """Whether the first character of the span opens a bracket that the span does not close."""
+    closing = _OPENING_BRACKETS.get(text[start])
+    return closing is not None and text.count(closing, start, end) < text.count(
+        text[start], start, end
+    )
 
 
 def _ends_outside_the_value(text: str, start: int, end: int) -> bool:

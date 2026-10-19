@@ -150,8 +150,10 @@ _DAY_KIND = "(?i:(?:business|working|calendar|banking)" + _SPACE + "+)?"
 _TIME_UNIT = r"(?i:day|week|month|year|hour)s?\b"
 _DURATION_AFTER = re.compile("(?:" + _SPACE + r"|-|\))*" + _DAY_KIND + _TIME_UNIT)
 
-# What may stand between a label such as "number" and the value after it.
-_LABEL_TO_VALUE = _SPACE + "*[:#]?" + _SPACE + "*"
+# What may stand between a label such as "number" and the value after it: spaces, and the tab a
+# form in Word puts there ("BIC:\tDEUTDEBB").
+_LABEL_GAP = "[" + _SPACE_CHARS + "\t]"
+_LABEL_TO_VALUE = _LABEL_GAP + "*[:#]?" + _LABEL_GAP + "*"
 
 # The words that make the number after them a reference into the contract or a law, which stays
 # visible: "section 1159", "Article 1101", "§ 1004".
@@ -498,22 +500,61 @@ class BicRecognizer(CheckedPatternRecognizer):
         return 0.0
 
 
-# Account numbers and sort codes come directly after their label, on the same line.
+# Account numbers and sort codes come directly after their label, on the same line, maybe after
+# "is" ("the account number is 12345678").
 _ACCOUNT_SEP = "[" + _SPACE_CHARS + r"\-]?"
 _ACCOUNT_NUMBER_WORD = "(?:" + _SPACE + r"+(?i:number|no|nr)\b\.?)?"
-_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
+_IS = "(?:" + _SPACE + r"+(?i:is)\b)?"
+_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)" + _ACCOUNT_NUMBER_WORD + _IS + _LABEL_TO_VALUE
 _ACCOUNT_DIGITS = r"(?P<value>\d(?:" + _ACCOUNT_SEP + r"\d){5,17})(?!\d)"
-_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)" + _LABEL_TO_VALUE
+_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)" + _IS + _LABEL_TO_VALUE
 _SORT_CODE_DIGITS = r"(?P<value>\d{2}" + _ACCOUNT_SEP + r"\d{2}" + _ACCOUNT_SEP + r"\d{2})(?!\d)"
-# A date written with hyphens (01-03-2026, 2026-03-01) is not an account number.
-_HYPHENATED_DATE = re.compile(r"\d{1,2}-\d{1,2}-\d{4}|\d{4}-\d{1,2}-\d{1,2}")
+# A date written with hyphens (01-03-2026, 03-31-2026, 2026-03-01) is not an account number; one
+# whose day or month cannot be (1234-56-78) may be.
+_HYPHENATED = re.compile(
+    r"(?P<a>\d{1,2})-(?P<b>\d{1,2})-\d{4}|\d{4}-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
+)
+# An IBAN after its label, its check digits right or wrong: a country, two digits, then up to 30
+# letters and digits, in groups of four or in one piece.
+_IBAN_LABEL = r"(?i:\biban\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
+_IBAN_SHAPE = (
+    r"(?P<value>[A-Z]{2}\d{2}(?:"
+    + _SPACE
+    + r"?[A-Z0-9]{4}){2,7}(?:"
+    + _SPACE
+    + r"?[A-Z0-9]{1,3})?)"
+    r"(?![A-Za-z0-9])"
+)
+_IBAN = "IBAN after its label"
+
+
+def _is_a_hyphenated_date(value: str) -> bool:
+    """Whether ``value`` is a date written with hyphens: day and month first in either order, or
+    the year first, each of them a day and a month that can be.
+    """
+    parts = _HYPHENATED.fullmatch(value)
+    if parts is None:
+        return False
+    if parts["a"] is not None:
+        a, b = int(parts["a"]), int(parts["b"])
+        return (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
+    return 1 <= int(parts["month"]) <= 12 and 1 <= int(parts["day"]) <= 31
+
+
+def _iban_is_valid(value: str) -> bool:
+    """Whether the check digits of the IBAN ``value`` are right (ISO 7064, mod 97)."""
+    compact = "".join(value.split())
+    moved = compact[4:] + compact[:4]
+    return int("".join(str(int(character, 36)) for character in moved)) % 97 == 1
 
 
 class AccountNumberRecognizer(CheckedPatternRecognizer):
     """Bank account numbers and sort codes, found by the label directly before them.
 
     "Account number: 12345678" · "A/C 87654321" · "Sort code: 12-34-56". An IBAN on an account
-    line is left to Presidio's IBAN recognizer, which checks it.
+    line is left to Presidio's IBAN recognizer, which checks it. After its own label, an IBAN
+    whose check digits are wrong is still the party's number, with a typing error in it: it is
+    found at 0.6, for the owner to check, as a VAT number with wrong check digits is.
     """
 
     def __init__(self) -> None:
@@ -522,11 +563,14 @@ class AccountNumberRecognizer(CheckedPatternRecognizer):
             [
                 Pattern("Account number", _ACCOUNT_LABEL + _ACCOUNT_DIGITS, 0.7),
                 Pattern("Sort code", _SORT_CODE_LABEL + _SORT_CODE_DIGITS, 0.7),
+                Pattern(_IBAN, _IBAN_LABEL + _IBAN_SHAPE, 0.6),
             ],
         )
 
     def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
-        return 0.0 if _HYPHENATED_DATE.fullmatch(match["value"]) else pattern.score
+        if pattern.name == _IBAN:
+            return 0.0 if _iban_is_valid(match["value"]) else pattern.score
+        return 0.0 if _is_a_hyphenated_date(match["value"]) else pattern.score
 
 
 _BSN = "Dutch BSN"

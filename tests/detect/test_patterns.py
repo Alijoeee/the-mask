@@ -346,6 +346,11 @@ def test_bic_needs_a_real_one(text):
     assert found_by(BicRecognizer(), text) == {}
 
 
+def test_a_bic_after_its_label_and_a_tab(engine):
+    # Forms in Word put a tab between a label and its value.
+    assert found_by(BicRecognizer(), "BIC:\tDEUTDEBB") == {"DEUTDEBB": 0.9}
+
+
 @pytest.mark.parametrize(
     "text,needle",
     [
@@ -377,6 +382,32 @@ def test_account_numbers(engine, text, needle):
 )
 def test_account_number_needs_its_label(text):
     assert found_by(AccountNumberRecognizer(), text) == {}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Account number:\t12345678", "12345678"),
+        ("The account number is 12345678.", "12345678"),
+        ("Sort code is 12-34-56", "12-34-56"),
+        ("Account number: 1234-56-78", "1234-56-78"),  # no date: there is no 56th month
+    ],
+)
+def test_account_numbers_in_more_forms(text, needle):
+    assert found_by(AccountNumberRecognizer(), text) == {needle: 0.7}
+
+
+def test_a_mistyped_iban_after_its_label_is_an_id_to_check(engine):
+    # A wrong check digit: Presidio's IBAN recognizer turns it down, but it is the party's number.
+    text = "IBAN: NL91 ABNA 0417 1643 01"
+    assert found_by(AccountNumberRecognizer(), text) == {"NL91 ABNA 0417 1643 01": 0.6}
+    assert ID in types_at(engine, text, "NL91 ABNA 0417 1643 01")
+    # A valid one is Presidio's, found as an IBAN.
+    assert found_by(AccountNumberRecognizer(), "IBAN: NL91 ABNA 0417 1643 00") == {}
+
+
+def test_a_labelled_number_shaped_like_a_date_is_still_an_id(engine):
+    assert ID in types_at(engine, "Company No. 12/2024", "12/2024")
 
 
 # --- VAT, registration and identity numbers ------------------------------------------------------
@@ -753,10 +784,27 @@ def test_dates_stay_visible(engine):
         "on March 1, 2026",
         "This Agreement commences on 2026-03-01 and ends on 01.09.2027.",
         "taking into account the 01-03-2026 forecast",
+        # A bracket before the date, and the forms Presidio's date recognizer does not know.
+        "signed (01.03.2026) by both",
+        "on 2026.03.01",  # yyyy.mm.dd
+        "on 01-03-26",  # dd-mm-yy
+        "on 01 03 2026",  # dd mm yyyy
+        "on 2026/03/01",
     ],
 )
 def test_dates_are_not_findings(engine, text):
     assert engine.analyze(text) == []
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Tel: (030) 360 7352", "(030) 360 7352"),
+        ("Telephone: 01 03 2026 99", "01 03 2026 99"),
+    ],
+)
+def test_a_phone_number_that_starts_like_a_date_is_still_found(engine, text, needle):
+    assert texts_of(engine, text, PlaceholderType.PHONE) == {needle}
 
 
 def test_a_phone_number_next_to_a_date_is_still_found(engine):
