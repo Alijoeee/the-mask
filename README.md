@@ -51,7 +51,7 @@ and the build checks that (`tools/check_bundle_lock.py`) before it makes the zip
 few minutes, starts from scratch every time, and ends with:
 
 - the app, `build/themask/macos/app/The MASK.app`, about 535 MB;
-- a zip of it, `dist/The MASK-0.1.0.app.zip`, about 185 MB.
+- a zip of it, `dist/The MASK-0.1.0.app.zip`, about 183 MB.
 
 The app's icon is `packaging/icon/themask.icns`; `uv run python packaging/make_icon.py` draws it
 again.
@@ -66,7 +66,8 @@ Then copy `The MASK.app` to the Applications folder, in Finder or, in Terminal i
 root folder, with
 
 ```bash
-rm -rf "/Applications/The MASK.app"   # only if an older one is still there
+# Only if an older one is still there:
+rm -rf "/Applications/The MASK.app"
 ditto "build/themask/macos/app/The MASK.app" "/Applications/The MASK.app"
 ```
 

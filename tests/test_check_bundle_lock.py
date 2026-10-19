@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
+
 from tools.check_bundle_lock import (
     EXPORT_ARGUMENTS,
     bundled_packages,
