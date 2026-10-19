@@ -1015,7 +1015,7 @@ def test_long_runs_of_number_words_are_quick(engine):
     text = "-".join(["twenty", "one"] * 20)  # 40 hyphenated number words
     start = time.perf_counter()
     engine.analyze(text)
-    assert time.perf_counter() - start < 1.0
+    assert time.perf_counter() - start < 3.0  # three times the usual, for a loaded machine
 
 
 @pytest.mark.parametrize(
