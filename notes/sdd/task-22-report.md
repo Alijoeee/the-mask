@@ -15,8 +15,9 @@ Worktree `/home/user/the-mask-worktrees/task-22`, branch `task-22`. Commits on t
 | `2df47eb` fix: finish the restore and cases screens the interrupted build left half done | the interrupted implementer's uncommitted edits, kept as they were (section 1) |
 | `4bea355` fix: the Cases screen says it cannot read the cases instead of that there are none | found in my review |
 | `49d69ca` feat: the restore screen refuses to guess between cases that fit alike (R103) | R103 (b), (c) and what goes with them |
+| `0cc94ca` fix: a case the owner chose stays chosen; a better fit is pointed out, not forced (R103) | fix round 1, finding I-1 (see "Fix round 1" at the end) |
 
-Gate, run on exactly the tree of `49d69ca`: `uv run pytest -q` 3041 passed, 6 skipped (macOS-only) in 245 s;
+Gate, run on exactly the tree of `49d69ca`: `uv run pytest -q` 3041 passed, 6 skipped (the IPv6 variants of `tests/test_netguard.py`: no sockets of that family here) in 245 s;
 `ruff check src tests tools`, `ruff format --check src tests tools` and `mypy src` clean. Task 22 (the
 export dialog, `d06fb7f`) is unchanged by me; I re-read it against its brief and the dispatch decisions
 and found nothing to change.
@@ -43,7 +44,7 @@ choice stays" half (`insist`); nothing of (a), (b) or (c) existed, so I did them
 `insist` (and adding to `refresh_cases`: a visit returns early when the cases have not changed).
 
 The checkpoint's own state, which the controller said was unknown: `uv run pytest tests/ui` 308
-passed, whole suite 2984 passed, 6 skipped (macOS-only), before I changed anything.
+passed, whole suite 2984 passed, 6 skipped (the IPv6 variants of `tests/test_netguard.py`), before I changed anything.
 
 ## 2. What the briefs, the dispatch decisions and R103 require, where it is, and what proves it
 
@@ -96,7 +97,8 @@ Readings of R103 I had to choose (conservative; the controller can overrule any 
    nothing could be written anyway. Test: `test_when_no_case_fits_the_newest_is_selected_and_nothing_is_asked`,
    and the old `test_the_most_recent_case_comes_first_while_there_is_nothing_to_fit`.
 2. **How long a hand-chosen case stands.** "A case the owner chose by hand stays chosen" is kept
-   while the text is edited and the screen is visited (`test_a_case_the_owner_chose_stays_chosen...`,
+   while the text is edited and the screen is visited, whatever fits better (as first built, a case that
+   fitted better replaced it: finding I-1, Fix round 1 at the end) (`test_a_case_the_owner_chose_stays_chosen...`,
    `test_a_visit_changes_nothing_while_the_cases_are_the_same`). But a choice that outlived its file
    would be the same bug by another road: restore contract 1 with a hand-picked case, drop contract 2,
    and on a tie the old pick would silently apply. So a pick ends with the restore it was made for, and
@@ -159,7 +161,7 @@ of five, the preview read as rich text, a pick that outlives its file, a pick th
 
 ```
 $ uv run pytest -q
-3041 passed, 6 skipped in 244.90s (0:04:04)          # the 6 skips are the macOS-only tests
+3041 passed, 6 skipped in 244.90s (0:04:04)          # the 6 skips: the IPv6 variants in tests/test_netguard.py
 $ uv run ruff check src tests tools          All checks passed!
 $ uv run ruff format --check src tests tools 134 files already formatted
 $ uv run mypy src                            Success: no issues found in 52 source files
@@ -228,8 +230,9 @@ Found and fixed while doing it (each with a failing test first):
   screens now say only that the cases cannot be read (RED: three failing assertions, then green).
 - **The one pre-R103 test whose premise R103 removes**: `test_the_owner_s_case_is_kept_while_it_fits_as_well_as_the_best`
   asserted that on a tie the NEWER case is preselected. It now asserts that nothing is selected and the
-  owner is asked; the rest of that test (the owner's pick is kept, a clearly better fit is offered
-  again) is unchanged. It is the only existing test I changed.
+  owner is asked; the rest of that test was unchanged in the first round (Fix round 1 below changes its
+  tail: a clearly better fit is now pointed out, no longer offered in place of the owner's case). It was the
+  only existing test I changed in the first round.
 - A segmentation fault in the suite (section 4).
 
 Checked and fine: no `TODO`, no `print`, every `noqa` / `type: ignore` in `src/themask/ui` is explained
@@ -292,3 +295,106 @@ the Restore screen needs to rank the cases by their placeholders; `list()` is no
 before). Both could be done with the old API (`delete(stem)`, `list()` + `load(id)` for each case) at the cost
 of a loose guard and one key fetch per case; I kept them because the first is safer and the second avoids a
 partial failure half way through the cases. Say the word and they go.
+
+## Fix round 1 (review finding I-1)
+
+**The finding.** A case the owner chose by hand, or came with from the Cases screen ("Restore from this
+case"), was replaced by another case that holds more of the placeholders, without a question
+(`_order_cases`, the `keep = None` branch). Probe B: `refresh_cases("B2B2")`, then `load_file` of a file
+where A1A1 fits better -> A1A1 selected; with the file loaded first and the request second B2B2 stayed, so
+the same request gave different results by order. Probe C: pick B2B2 by hand, edit the paste box -> A1A1.
+I reproduced both on `49d69ca` first (probe C printed `A1A1 / B2B2 / A1A1` for before the pick, picked,
+after an edit; the restore the screen then offered wrote Alice Smith's values although the owner had
+asked for Bob Jones's case).
+
+**What changed** (commit `0cc94ca`, `src/themask/ui/restore_screen.py` plus one README clause):
+
+- `_order_cases(chosen)` honours `chosen` ALWAYS: the branch that dropped a chosen case which holds fewer
+  placeholders than the best fit is gone, and with it the `insist` parameter (`refresh_cases` no longer
+  needs it). The only things that end a pick are the ones already ruled: its restore, and the next file
+  (the case asked for in the Cases screen counts for the next file).
+- New plain notice under the case box, `better_fit_label`: "Another case fits this file better — check the
+  case." (exact words from the controller). It shows while another case holds MORE of the placeholders of the
+  text the cases were last ranked on (the file, or the pasted text) than the selected case, and goes when
+  the selected case is the best fit or the owner picks the better one. It never changes the selection and
+  never switches Restore / Restore text off (the owner chose). It follows the combo however the selection
+  changed (a click, `setCurrentIndex`, the Cases screen, a store that changed) because it is worked out
+  in `_update_state`, which every re-plan ends with.
+- `_is_a_guess` became a method and, with the new notice, shares a small memo (`_fit_of`: how many
+  placeholders each case holds of the ranked text, looked up once per ranking), so a paste-box keystroke does
+  not parse the text once per case.
+- Docstrings (module, class, `refresh_cases`, `_order_cases`) say what is now true; the README says a
+  chosen case is never replaced.
+
+**Tests** (`tests/ui/test_restore_screen.py`, 99 now, was 87):
+
+- The two that asserted the old override are changed to assert the new behaviour:
+  `test_a_text_that_another_case_fits_better_does_not_take_the_owner_s_case_away` (was `..._makes_another_case_the_best_fit_reads_the_file_again_for_it`:
+  B2B2 stays after the paste, the file's ticks stay, the notice shows, Restore stays enabled, picking
+  A1A1 re-reads the file and hides the notice) and `test_the_owner_s_case_is_kept_whatever_the_text_says`
+  (was `..._kept_while_it_fits_as_well_as_the_best`: its last three lines asserted the override; the notice
+  now comes and goes with the text and the pick never moves).
+- `test_the_case_asked_for_in_the_cases_screen_wins_over_a_better_fit` gains the notice and the preview
+  (`[PERSON_1] → John Smith`, B2B2's pair only).
+- The controller's Cases-screen sequence, as `test_the_case_asked_for_in_the_cases_screen_stays_though_the_file_fits_another_better`
+  (K4F7 holds person + company, M5N6 the person only): "Restore from this case" M5N6, load a file that fits K4F7
+  better -> M5N6 stays, the notice shows with the exact words, Restore is enabled, the preview is `[PERSON_1] → Bob Jones`,
+  the fit line says 1 of 2.
+- Order independence (probe B): `test_the_case_asked_for_stays_whichever_comes_first` (2 cases: asked first,
+  file first).
+- Probe C: `test_a_case_picked_by_hand_stays_when_the_text_is_edited_and_another_fits_better`, ending with a
+  restore that writes "Bob Jones and [COMPANY_1]" (the chosen case, not the better one).
+- `test_a_chosen_case_is_used_for_the_restore_whatever_fits_better` (Word file: Bob Jones written, company left,
+  reported as not in the case).
+- The notice itself: `test_the_hint_goes_when_the_owner_picks_the_better_case`,
+  `test_the_hint_follows_the_selection_however_it_changed` (no click, and -1),
+  `test_the_hint_follows_the_cases_the_store_holds` (a better case appears, then is deleted),
+  `test_a_case_named_by_the_file_stays_and_a_better_fit_is_pointed_out`,
+  `test_there_is_no_hint_when_no_case_fits_better_than_the_one_selected` (fit alike, nothing fits, no placeholder).
+
+TDD: the new and changed tests were written first against `49d69ca`: `14 failed, 84 passed` (the probe-B
+tests failed on `assert 'K4F7' == 'M5N6'`, the restore test on "Alice Smith signs for Northwind Trading B.V."
+where "Bob Jones signs for [COMPANY_1]." was owed, the rest on the missing `better_fit_label`); after the
+change all pass. Eight planted bugs, one at a time in a copy of the tree, all caught: the screen replacing
+a chosen case again, the notice never shown, shown for every selected case, shown on a tie, a fit
+remembered across rankings, Restore switched off while it shows, Restore text switched off while it shows,
+other words. I also looked at the screen offscreen (yellow notice under the case box, preview of M5N6's
+pair, Restore enabled).
+
+**Readings I chose** (the controller can overrule):
+
+1. The notice is about the SELECTED case, however it was selected: a case picked by the owner, asked for in
+   the Cases screen, picked by a file name (`MASKED-<code>`), or the best fit (then nothing fits better, so no
+   notice). A file name that points to a case with fewer of the file's placeholders therefore selects it (the
+   name still decides) and shows the notice.
+2. "More" counts placeholders only. A hand pick that differs from the case a file name points to is not
+   flagged unless another case also holds more placeholders.
+3. With a file and pasted text both on the screen the notice speaks about whichever the cases were last
+   ranked on, as the ranking itself does; the sentence says "file" for both, as the other sentence does.
+
+**Still as it was (not part of this round):** a pick made for pasted text that was never restored stays for the
+next pasted text, and on a tie nothing says so (the reviewer's note under I-1); the minors M-1 to M-10 and the
+residual risks of the review are parked, not touched.
+
+**Wording note from the reviewer, applied above:** the 6 skipped tests are the IPv6 variants at
+`tests/test_netguard.py:85` ("This computer has no sockets of that family."), not macOS-only tests; the
+three places in this report that said macOS-only are corrected.
+
+**Commands and their last lines** (worktree root, tree = the fix-round commit):
+
+```
+$ uv run pytest tests/ui/test_restore_screen.py -q      # the screen's own file, after the change
+99 passed in 17.61s                                      # 98 + the store test; was 87 before the round
+$ uv run pytest tests/ui -q
+353 passed in 66.27s (0:01:06)
+$ uv run pytest -q
+3053 passed, 6 skipped in 232.96s (0:03:52)             # 3041 + 12 new; the 6 skips: IPv6 variants, tests/test_netguard.py
+$ uv run ruff check src tests tools
+All checks passed!
+$ uv run ruff format --check src tests tools
+134 files already formatted
+$ uv run mypy src
+Success: no issues found in 52 source files
+```
+
+`git status` is clean at `0cc94ca`; the gate ran on exactly that tree before the commit.
