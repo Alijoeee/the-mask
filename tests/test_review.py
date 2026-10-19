@@ -596,6 +596,83 @@ def test_a_group_the_case_key_holds_is_not_taken_over_by_a_longer_hidden_text(li
     assert [f.start for f in new.findings] == [text.rindex("Project Falcon")]
 
 
+def test_two_groups_the_case_key_holds_cannot_be_merged(lists):
+    # Ruling R107: two stored parties can never be one placeholder in the new file without a
+    # silent wrong value in the restore (the reviewer's reproduction).
+    text = "Acme Supplies Ltd and Zeta Holdings B.V. sign this annex."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    zeta = group(
+        C,
+        "[COMPANY_3]",
+        "Zeta Holdings B.V.",
+        [spot(C, text, "Zeta Holdings B.V.", source="sweep")],
+        ["Zeta"],
+    )
+    review = hand_made(text, [acme, zeta], lists, reserved=["[COMPANY_1]", "[COMPANY_3]"])
+    with pytest.raises(ValueError) as refused:
+        review.merge([acme.id, zeta.id])
+    assert str(refused.value) == (
+        "[COMPANY_1] and [COMPANY_3] are both in the case's key and cannot be merged; leave them"
+        " as two values."
+    )
+    assert placeholders(review) == ["[COMPANY_1]", "[COMPANY_3]"]
+    assert [g.canonical for g in review.groups] == ["Acme Supplies Ltd", "Zeta Holdings B.V."]
+
+
+def test_a_group_the_case_key_holds_survives_a_merge_with_its_form(lists):
+    # Ruling R107: the stored group survives whatever its number and keeps its canonical form,
+    # the value the key will keep; the other group's forms join its variants.
+    text = "Acme Supplies Ltd signs. Acme Supplies Limited pays. ACME delivers."
+    stored = group(
+        C,
+        "[COMPANY_3]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    fuller = group(
+        C,
+        "[COMPANY_2]",
+        "Acme Supplies Limited",
+        [spot(C, text, "Acme Supplies Limited")],
+        ["ACME"],
+    )
+    review = hand_made(text, [stored, fuller], lists, reserved=["[COMPANY_3]"])
+    merged = review.merge([fuller.id, stored.id])
+    assert (merged.placeholder, merged.canonical) == ("[COMPANY_3]", "Acme Supplies Ltd")
+    assert merged.variants >= {"Acme Supplies Ltd", "Acme Supplies Limited", "Acme", "ACME"}
+    assert placeholders(review) == ["[COMPANY_3]"]
+    assert [f.text for f in merged.findings] == [
+        "Acme Supplies Ltd",
+        "Acme Supplies Limited",
+        "ACME",
+    ]
+    assert [r.placeholder for r in review.mask_plan().replacements] == ["[COMPANY_3]"] * 3
+
+
+def test_splitting_a_group_the_case_key_holds_leaves_its_canonical(lists):
+    text = "Acme signs. Acme Supplies Ltd pays."
+    stored = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme", source="sweep"), spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    review = hand_made(text, [stored], lists, reserved=["[COMPANY_1]"])
+    new = review.split(stored.id, [1])  # the full name moves out; the stored form stays the same
+    kept = review.groups[0]
+    assert (kept.placeholder, kept.canonical) == ("[COMPANY_1]", "Acme Supplies Ltd")
+    assert "Acme Supplies Ltd" in kept.variants and [f.text for f in kept.findings] == ["Acme"]
+    assert (new.placeholder, new.canonical) == ("[COMPANY_2]", "Acme Supplies Ltd")
+
+
 def test_a_merge_does_not_take_over_a_group_the_case_key_holds(lists):
     text = "Project Falcon starts. Later Project Falcon ends. Orion leaves."
     seeded = group(CUSTOM, "[CUSTOM_1]", "Falcon", [spot(CUSTOM, text, "Falcon", source="sweep")])

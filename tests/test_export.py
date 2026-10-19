@@ -810,8 +810,9 @@ def test_a_merge_in_a_file_added_never_rewrites_a_value_of_the_case(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
     # Ruling R86: in the added file's review the owner merges the case's company with another
-    # name, whose fuller form becomes the group's. The case's first file still restores to the
-    # stored value; the new form joins the entry's variants.
+    # name. The case's first file still restores to the stored value; the new form joins the
+    # entry's variants. (Ruling R107: the stored group keeps its canonical form in the review
+    # too, so the review shows the value the key will keep.)
     case = Case(
         "TEST",
         datetime(2026, 10, 1, tzinfo=UTC),
@@ -829,10 +830,8 @@ def test_a_merge_in_a_file_added_never_rewrites_a_value_of_the_case(
     review = ReviewState(text, [seeded], [], lists, CaseLists([], [], set()), reserved)
     other = review.hide_text("Northwind Holdings International Limited", COMPANY)
     merged = review.merge([seeded.id, other.id])
-    assert (merged.placeholder, merged.canonical) == (
-        "[COMPANY_1]",
-        "Northwind Holdings International Limited",
-    )
+    assert (merged.placeholder, merged.canonical) == ("[COMPANY_1]", "Northwind Trading B.V.")
+    assert "Northwind Holdings International Limited" in merged.variants
     saved: list[Case] = []
     options = ExportOptions(tmp_path / "out", existing_case=case)
     export_case([source], review, options, engine, lists, saved.append)
