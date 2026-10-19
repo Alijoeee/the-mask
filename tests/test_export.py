@@ -529,7 +529,12 @@ def test_places_split_off_and_switched_off_whole_are_left_visible_not_leftovers(
         for m in re.finditer(r"Acme(?! Supplies)", text)
     ]
     acme = Group(
-        uuid.uuid4().hex, COMPANY, "Acme Supplies Ltd", {"Acme Supplies Ltd", "Acme"}, [full, *shorts], "[COMPANY_1]"
+        uuid.uuid4().hex,
+        COMPANY,
+        "Acme Supplies Ltd",
+        {"Acme Supplies Ltd", "Acme"},
+        [full, *shorts],
+        "[COMPANY_1]",
     )
     review = ReviewState(text, [acme], [], lists, CaseLists([], [], set()))
     shown = review.split(acme.id, [2, 3])
@@ -780,6 +785,47 @@ def test_a_file_added_to_a_case_merges_the_key(
     # The case given is left as it was.
     assert len(case.entries) == 3 and case.entries[2].value == "Thamesgate Catering plc"
     assert len(case.masked_files) == 1 and case.source_files == ["Supply Agreement.docx"]
+
+
+def test_a_stored_entry_takes_no_bare_surname_and_nothing_too_short_from_an_added_review(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # F-14: the stored person's entry takes the added review's forms the way a key entry lists
+    # them (ruling R52: never a bare surname, nothing too short to search for); "Smith" in the
+    # key would block every "Smith" of a later file.
+    case = Case(
+        "TEST",
+        datetime(2026, 10, 1, tzinfo=UTC),
+        ["a.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [KeyEntry("[PERSON_1]", PERSON, "John Smith", [])],
+    )
+    annex = make_docx(para("Mr John Smith signs. Smith countersigns."))
+    (source,) = load_sources([annex], False)
+    text = combined_text([source]).text
+    john = group_of(text, "[PERSON_1]", PERSON, "John Smith")
+    at = text.rindex("Smith")  # the bare surname, swept as the analysis sweeps it (ruling R50)
+    john.findings.append(Finding(PERSON, at, at + 5, "Smith", 1.0, "sweep"))
+    john.variants |= {"Mr John Smith", "Smith", "J. Smith", "J"}
+    reserved = [entry.placeholder for entry in case.entries]
+    review = ReviewState(text, [john], [], lists, CaseLists([], [], set()), reserved)
+    saved: list[Case] = []
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    res = export_case([source], review, options, engine, lists, saved.append)
+    assert not res.blocked, res.leak_hits
+    (entry,) = saved[0].entries
+    assert (entry.placeholder, entry.value) == ("[PERSON_1]", "John Smith")
+    assert entry.variants == ["J. Smith", "John Smith", "Mr John Smith"]
+
+
+def test_the_merged_key_lists_forms_the_way_a_key_entry_does() -> None:
+    # F-14, on the merge itself: whatever an added review hands over, the stored entry takes
+    # the forms worth searching for and never the person's bare surname (ruling R52).
+    stored = KeyEntry("[PERSON_1]", PERSON, "Jan van der Berg", ["J. van der Berg"])
+    added = KeyEntry("[PERSON_1]", PERSON, "Berg", ["van der Berg", "Berg", "Mr Berg", "J", ""])
+    (merged,) = export._merged([stored], [added])
+    assert merged.value == "Jan van der Berg"
+    assert merged.variants == ["J. van der Berg", "Mr Berg"]
 
 
 @pytest.mark.parametrize(

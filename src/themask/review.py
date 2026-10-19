@@ -112,16 +112,17 @@ def _in_text_order(group: Group) -> None:
     group.disabled = {new for new, old in enumerate(order) if old in group.disabled}
 
 
-def _key_variants(group: Group) -> list[str]:
-    """The variants a group's key entry lists: those worth searching for, but for a person's bare
-    surname (ruling R52). The sweep hides it only where it stands as a name, which the leak
-    check's plain scan cannot tell from "the Smith report"; the leak check looks for it with the
-    sweep's own test instead.
+def key_variants(kind: PlaceholderType, canonical: str, forms: Iterable[str]) -> list[str]:
+    """The variants a key entry of ``kind`` with the value ``canonical`` lists out of ``forms``:
+    those worth searching for, but for a person's bare surname (ruling R52). The sweep hides it
+    only where it stands as a name, which the leak check's plain scan cannot tell from "the
+    Smith report"; the leak check looks for it with the sweep's own test instead. The export
+    merges an added review's forms into a stored entry the same way (F-14).
     """
     bare = set()
-    if group.type is PlaceholderType.PERSON:
-        bare = {normalize(form) for form in PersonName.of(group.canonical).surnames()}
-    return sorted(v for v in group.variants if is_searchable(v) and normalize(v) not in bare)
+    if kind is PlaceholderType.PERSON:
+        bare = {normalize(form) for form in PersonName.of(canonical).surnames()}
+    return sorted(v for v in set(forms) if is_searchable(v) and normalize(v) not in bare)
 
 
 class ReviewState:
@@ -357,7 +358,12 @@ class ReviewState:
         """
         masked = [g for g in self.groups if g.active_findings()]
         masked.sort(key=lambda g: (_TYPE_ORDER[g.type], _number(g.placeholder)))
-        return [KeyEntry(g.placeholder, g.type, g.canonical, _key_variants(g)) for g in masked]
+        return [
+            KeyEntry(
+                g.placeholder, g.type, g.canonical, key_variants(g.type, g.canonical, g.variants)
+            )
+            for g in masked
+        ]
 
     def counts(self) -> ReviewCounts:
         """The numbers for the screen's summary."""

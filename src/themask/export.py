@@ -50,6 +50,7 @@ from themask.leakcheck import LeakHit, media_left, rescan_detection, scan_packag
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
 from themask.pdf.to_docx import pdf_to_docx
+from themask.review import key_variants
 from themask.textnorm import normalize
 
 if TYPE_CHECKING:
@@ -602,7 +603,8 @@ def _merged(kept: list[KeyEntry], added: list[KeyEntry]) -> list[KeyEntry]:
     """The key of a case a file was added to: its entries, in their order, then the new review's
     other entries, in theirs. A stored value is never rewritten, as the case's other files are
     restored with it (ruling R86): where the new review has an entry of the same placeholder, its
-    value and variants join the stored entry's variants.
+    value and variants join the stored entry's variants, listed the way a key entry lists them
+    (``key_variants``: nothing too short to search for, never the person's bare surname).
     """
     new = {entry.placeholder: entry for entry in added}
     merged = []
@@ -611,6 +613,6 @@ def _merged(kept: list[KeyEntry], added: list[KeyEntry]) -> list[KeyEntry]:
         if update is None:
             merged.append(replace(entry, variants=list(entry.variants)))
         else:
-            forms = {*entry.variants, update.value, *update.variants}
-            merged.append(replace(entry, variants=sorted(forms)))
+            forms = [*entry.variants, update.value, *update.variants]
+            merged.append(replace(entry, variants=key_variants(entry.type, entry.value, forms)))
     return merged + list(new.values())
