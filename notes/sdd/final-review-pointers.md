@@ -30,7 +30,8 @@ confirms. Everything else stays parked and is listed for the owner in notes/RULI
 7. R103 — (restore screen; sent to the Tasks 22+23 implementer first; the fix wave verifies) file-name code preference in suggest_cases, no preselection on ambiguity, case titles with file names, placeholder → value preview.
 8. R104 — zip limits in DocxPackage.open (entries, per-entry and total expanded size, capped inflate).
 9. Owner's instruction: set `OWNER_NAME = "Alican Yazdic"` in src/themask/about.py (the About panel shows it; the About test must still pass).
-10. README: no stale wording that export/restore are future work (the external review saw such wording on the packaging branch).
+10. R105 (Task 24 re-review G1, Important): a count written as a range after a reference number goes visible — "Schedule 3 - 500 pallets per week", "Clause 7 – 250 tonnes per quarter" must be hidden as QUANTITY again (the reviewer's one-line `_SPACED_DIGITS` fix in src/themask/detect/patterns.py; both sentences as tests). Cheap companions if trivial: G2 reference words used as verbs/nouns ("shall schedule 500 pallets", "exhibit 12 units", "per article 12 pieces") and G4 a one-word side of a spaced-hyphen name ("Price - Jones Logistics Ltd" → one company). G3 ("From 1 January 2026 records…" loses the year) and G5 stay parked.
+11. README: no stale wording that export/restore are future work (the external review saw such wording on the packaging branch).
 
 ## B. Parked items with a leak, restore or crash angle (verify; fix if Important)
 
