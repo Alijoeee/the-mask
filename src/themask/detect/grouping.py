@@ -35,7 +35,8 @@ person that is nobody's surname or first name joins the company it fits, and a s
 as a company that fits no company joins the one person whose surname it is.
 
 Every other type: the findings with the same value, however it is spelt (``normalize``), are one
-group.
+group. A phone number is the same value with its country code and in its national form ("+31 30
+360 7352" and "030 360 7352"), unless two numbers found have that national form.
 
 The variants of a group are the forms it was seen in and the forms ``variants_of`` derives from
 them ("J. Smith" of John Smith, "Northwind" of Northwind Trading B.V.); for a name of three words
@@ -64,6 +65,8 @@ import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+
+import phonenumbers
 
 from themask.detect.lists import is_default_term
 from themask.detect.sweep import (
@@ -388,13 +391,52 @@ def _may_join(finding_type: PlaceholderType, group_type: PlaceholderType) -> boo
 
 
 def _by_value(kind: PlaceholderType, findings: list[Finding]) -> list[_Bucket]:
-    """One group for each value, however it is spelt."""
+    """One group for each value, however it is spelt; a phone number written with its country
+    code and in its national form is one value (``_phone_keys``).
+    """
+    same = _phone_keys(findings) if kind is PlaceholderType.PHONE else {}
     buckets: dict[str, _Bucket] = {}
     for finding in findings:
         key = normalize(finding.text)
+        key = same.get(key, key)
         bucket = buckets.setdefault(key, _Bucket(kind, names={key}))
         bucket.add(finding)
     return list(buckets.values())
+
+
+def _phone_keys(findings: list[Finding]) -> dict[str, str]:
+    """The key of the number each phone finding writes, by the finding's normalised text: the
+    number with its country code for a valid number written with one ("+31 30 360 7352"), and the
+    same for a number in its national form ("030 360 7352") when exactly one number with a
+    country code among ``findings`` is written so at home. A national form two of them share
+    ("030 360 7352" is in Utrecht and in Berlin) stays a value of its own.
+    """
+    keys: dict[str, str] = {}
+    at_home: dict[str, set[str]] = defaultdict(set)
+    for finding in findings:
+        number = _international_number(finding.text)
+        if number is not None:
+            key = normalize(phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164))
+            keys[normalize(finding.text)] = key
+            national = phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.NATIONAL)
+            at_home[normalize(national)].add(key)
+    for finding in findings:
+        written = normalize(finding.text)
+        owners = at_home.get(written, set())
+        if written not in keys and len(owners) == 1:
+            keys[written] = next(iter(owners))
+    return keys
+
+
+def _international_number(text: str) -> phonenumbers.PhoneNumber | None:
+    """The phone number ``text`` writes with its country code ("+31 ..."), if it is a valid one."""
+    if not text.lstrip().startswith("+"):
+        return None
+    try:
+        number = phonenumbers.parse(text, None)
+    except phonenumbers.NumberParseException:
+        return None
+    return number if phonenumbers.is_valid_number(number) else None
 
 
 # --- People ------------------------------------------------------------------------------------

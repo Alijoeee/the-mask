@@ -342,6 +342,34 @@ def test_other_types_group_by_their_normalised_value():
     assert {"NL91 ABNA 0417 1643 00", "NL91ABNA0417164300"} <= g.variants
 
 
+def test_a_phone_number_with_and_without_its_country_code_is_one_value():
+    phone = PlaceholderType.PHONE
+    txt = (
+        "Call 030 360 7352, from abroad +31 30 360 7352; in Dublin (01) 471 4299, +353 1 471 4299."
+    )
+    fs = [
+        F(phone, "030 360 7352", txt),
+        F(phone, "+31 30 360 7352", txt),
+        F(phone, "(01) 471 4299", txt),
+        F(phone, "+353 1 471 4299", txt),
+    ]
+    gs = by_canonical(group_findings(fs, txt))
+    assert set(gs) == {"+31 30 360 7352", "+353 1 471 4299"}
+    assert {"030 360 7352", "+31 30 360 7352"} <= gs["+31 30 360 7352"].variants
+    assert len(gs["+353 1 471 4299"].findings) == 2
+
+
+def test_a_national_form_two_numbers_share_joins_neither():
+    phone = PlaceholderType.PHONE
+    txt = "Utrecht +31 30 360 7352, Berlin +49 30 3607352, and 030 360 7352."
+    fs = [
+        F(phone, "+31 30 360 7352", txt),
+        F(phone, "+49 30 3607352", txt),
+        F(phone, "030 360 7352", txt),
+    ]
+    assert len(group_findings(fs, txt)) == 3
+
+
 def test_a_value_seen_on_its_own_is_not_a_variant_of_another_group():
     amount = PlaceholderType.AMOUNT
     txt = "EUR 1,250,000 or USD 1,250,000; 1,250,000 in all."
