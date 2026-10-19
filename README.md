@@ -36,7 +36,9 @@ Mac it was built on, and there is no installer, just the app.
 
 ### Build it
 
-You need [uv](https://docs.astral.sh/uv/) and Xcode's command line tools. Then:
+You need [uv](https://docs.astral.sh/uv/) and Xcode's command line tools, and the repository must
+not be in a folder that iCloud syncs (the Desktop and Documents folders, when iCloud Drive keeps
+them): Briefcase stops with an error there. Then, in the repository's root folder:
 
 ```bash
 bash packaging/build_mac.sh
@@ -44,25 +46,40 @@ bash packaging/build_mac.sh
 
 This is the one step that needs the network. Briefcase downloads its Python for macOS and the
 pinned packages (the language model too), a few hundred MB that it keeps in a cache, so the next
-build is quicker. The build takes a few minutes, starts from scratch every time, and ends with:
+build is quicker. The packages in the app are the versions in `uv.lock`, the ones the tests run on,
+and the build checks that (`tools/check_bundle_lock.py`) before it makes the zip. The build takes a
+few minutes, starts from scratch every time, and ends with:
 
-- the app, `build/themask/macos/app/The MASK.app`, about 570 MB;
-- a zip of it, `dist/The MASK-0.1.0.app.zip`, about 195 MB.
+- the app, `build/themask/macos/app/The MASK.app`, about 535 MB;
+- a zip of it, `dist/The MASK-0.1.0.app.zip`, about 185 MB.
 
 The app's icon is `packaging/icon/themask.icns`; `uv run python packaging/make_icon.py` draws it
 again.
 
 ### Install it on this Mac
 
-Copy `The MASK.app` to the Applications folder, in Finder or with
+If an older The MASK.app is already in Applications, quit it and move it to the Trash first.
+Copying a new app onto an old one with `ditto` merges the two: files that only the old build had
+stay, and the signature no longer fits what is there. (In Finder, Replace is fine.)
+
+Then copy `The MASK.app` to the Applications folder, in Finder or, in Terminal in the repository's
+root folder, with
 
 ```bash
+rm -rf "/Applications/The MASK.app"   # only if an older one is still there
 ditto "build/themask/macos/app/The MASK.app" "/Applications/The MASK.app"
 ```
 
 and open it from there. The window opens at once and says "Loading…" while the language model
 loads. macOS may ask whether The MASK may use its Keychain item (see below): choose Always Allow.
 A rebuilt app is a new program to macOS, so it can ask again.
+
+If the app does not open, or closes at once, start it from Terminal: the errors that Finder hides
+are printed there.
+
+```bash
+"/Applications/The MASK.app/Contents/MacOS/The MASK"
+```
 
 ### Open it on another Mac
 
@@ -79,16 +96,17 @@ for each copy.
   always-hide and never-hide lists and the settings.
 - The log, `~/Library/Application Support/The MASK/logs/themask.log`. It holds counts, types and
   durations, never a word of a contract.
-- The masked files, in `~/Documents/The MASK` unless you choose another folder.
+- The masked files, in `~/Documents/The MASK` unless you choose another folder. The first time the
+  app writes there, macOS may ask whether it may use your Documents folder: choose Allow.
 - The key that locks the cases is not a file. It is an item in the macOS Keychain (service
   "The MASK", account "master-key").
 
 ### It never uses the network
 
 The app carries its language model, so it works with Wi-Fi off, and as it starts it shuts the
-internet off for itself (`src/themask/netguard.py`): any attempt to open a connection fails. To
-see for yourself, open the app and run this in Terminal. It prints nothing when the app has no
-network connection open:
+internet off for itself (`src/themask/netguard.py`): any attempt by the app's own code to open an
+internet connection fails. The evidence is what the system sees, not that promise: open the app
+and run this in Terminal. It prints nothing when the app has no network connection open:
 
 ```bash
 lsof -i -a -p $(pgrep -f "The MASK.app")

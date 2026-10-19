@@ -9,6 +9,7 @@ path would otherwise go unseen.
 
 from __future__ import annotations
 
+import functools
 import re
 import shutil
 import subprocess
@@ -24,10 +25,12 @@ from briefcase.config import parse_config
 from PIL import Image
 
 from themask.about import APP_NAME, VERSION
+from tools.check_bundle_lock import EXPORT_ARGUMENTS
 
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 MAKE_ICON = ROOT / "packaging" / "make_icon.py"
+BUILD_SCRIPT = ROOT / "packaging" / "build_mac.sh"
 APP = "themask"  # the app's name in [tool.briefcase.app.themask], and its Python package
 
 # The names iconutil gives the files of an .iconset, and the size in pixels of each.
@@ -52,6 +55,28 @@ def read_briefcase_config() -> tuple[dict[str, Any], MagicMock]:
     return apps[APP], console
 
 
+@functools.cache
+def vtool_works() -> bool:
+    """Whether ``vtool`` is there and runs. Without Xcode's command line tools, /usr/bin/vtool is
+    only a stub that asks to install them, so ``vtool -h`` is tried once: it prints its usage.
+    """
+    if shutil.which("vtool") is None:
+        return False
+    try:
+        probe = subprocess.run(
+            ["vtool", "-h"], capture_output=True, text=True, timeout=60, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "-show-build" in probe.stdout + probe.stderr
+
+
+def padded(version: tuple[int, ...]) -> tuple[int, int, int]:
+    """A version as exactly three numbers, so that 26, 26.0 and 26.0.0 are the same version."""
+    major, minor, patch = (*version, 0, 0, 0)[:3]
+    return major, minor, patch
+
+
 def macos_needed_by(module: Path) -> tuple[int, ...]:
     """The macOS version the arm64 slice of the Mach-O file ``module`` says it needs (its minos)."""
     shown = subprocess.run(
@@ -66,11 +91,16 @@ def macos_needed_by(module: Path) -> tuple[int, ...]:
     return tuple(int(part) for part in match.group(1).split("."))
 
 
-def python_modules_of(package: str) -> list[Path]:
-    """The compiled Python modules (``*.abi3.so``) that sit directly in an installed package."""
+def package_dir(package: str) -> Path:
+    """The folder of an installed package."""
     spec = find_spec(package)
     assert spec is not None and spec.submodule_search_locations, f"{package} is not installed"
-    return sorted(Path(next(iter(spec.submodule_search_locations))).glob("*.abi3.so"))
+    return Path(next(iter(spec.submodule_search_locations)))
+
+
+def python_modules_of(package: str) -> list[Path]:
+    """The compiled Python modules (``*.abi3.so``) that sit directly in an installed package."""
+    return sorted(package_dir(package).glob("*.abi3.so"))
 
 
 def test_briefcase_installs_exactly_the_runtime_dependencies() -> None:
@@ -102,16 +132,59 @@ def test_the_sources_icon_and_architecture_are_those_of_the_plan() -> None:
     assert config["universal_build"] is False  # one slice (arm64), as the plan says
 
 
-@pytest.mark.skipif(shutil.which("vtool") is None, reason="vtool is part of Xcode's tools")
 def test_the_bundle_asks_for_a_macos_new_enough_for_pyside6() -> None:
     # Ruling R92: Info.plist declares what the wheels support, not the lowest macOS that pip
     # would accept. The PySide6 wheels are tagged 14.0, but their Python modules are marked 26.0.
+    if not vtool_works():
+        pytest.skip("vtool is not available: it comes with Xcode's command line tools")
     modules = python_modules_of("PySide6") + python_modules_of("shiboken6")
     assert modules
-    needed = max(macos_needed_by(module) for module in modules)
+    needed = max(padded(macos_needed_by(module)) for module in modules)
     config, _ = read_briefcase_config()
-    declared = tuple(int(part) for part in config["min_os_version"].split("."))
+    declared = padded(tuple(int(part) for part in config["min_os_version"].split(".")))
     assert declared >= needed
+
+
+def test_briefcase_installs_the_versions_uv_locks() -> None:
+    # Ruling R93. pip would take the newest version of every package nothing pins (certifi and
+    # filelock were newer than uv.lock in the first build). Briefcase gives pip the file that
+    # build_mac.sh makes from uv.lock; "./" is the one form of path Briefcase resolves against the
+    # project folder, and a file that is not there stops pip instead of being passed over.
+    config, _ = read_briefcase_config()
+    assert config["requirement_installer_args"] == ["--constraint", "./build/constraints.txt"]
+    script = BUILD_SCRIPT.read_text(encoding="utf-8")
+    # The script writes that file, from the same list of packages the check of the bundle reads.
+    assert f"uv {' '.join(EXPORT_ARGUMENTS)} -o build/constraints.txt" in script
+    assert "tools.check_bundle_lock" in script
+
+
+def test_the_cleanup_paths_drop_what_the_app_never_runs() -> None:
+    # Ruling R94. Briefcase removes these globs from the bundle, and passes over one that matches
+    # nothing in silence, so a misspelt path would go on shipping what it was meant to drop.
+    config, _ = read_briefcase_config()
+    cleanup = config["cleanup_paths"]
+    assert all(path.startswith("**/") for path in cleanup)
+    inside = [path.removeprefix("**/") for path in cleanup]
+    assert {
+        "app_packages/bin",  # the console scripts pip wrote: each starts with the build's path
+        "PySide6/Designer.app",
+        "PySide6/Assistant.app",
+        "PySide6/Linguist.app",
+        "PySide6/Qt/qml",
+        "PySide6/Qt/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib",
+    } <= set(inside)
+    assert not any(".framework" in path for path in inside)  # Qt's frameworks stay
+    pyside6 = package_dir("PySide6")
+    for path in inside:
+        if path.startswith("PySide6/"):
+            assert list(pyside6.glob(path.removeprefix("PySide6/"))), f"{path} is not in PySide6"
+
+
+def test_the_build_script_is_valid_bash() -> None:
+    done = subprocess.run(
+        ["bash", "-n", str(BUILD_SCRIPT)], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert done.returncode == 0, done.stderr
 
 
 @pytest.mark.skipif(shutil.which("iconutil") is None, reason="iconutil is part of macOS")

@@ -84,3 +84,31 @@ universal_build = false  # one slice, for the Mac this is built on (Apple silico
 # all pip checks, but their Python modules are marked as needing macOS 26.0. Info.plist says 26.0.
 min_os_version = "26.0"
 requires = []  # nothing that only the Mac version needs
+# Ruling R93: pip keeps to the versions in uv.lock, the ones the tests run on; left alone it takes
+# the newest of every package that nothing pins. packaging/build_mac.sh writes this file from the
+# lock before Briefcase starts and checks the finished app against the lock. A path that starts
+# with "./" is the one kind Briefcase resolves against this folder.
+requirement_installer_args = ["--constraint", "./build/constraints.txt"]
+# Ruling R94: what the app never runs and should not carry, as globs below build/themask/macos/app
+# (one that matches nothing is passed over in silence: tests/test_packaging.py looks for them in
+# the installed PySide6). Qt's frameworks stay.
+cleanup_paths = [
+    # The console scripts pip writes: each one starts with the path of the build and the user name.
+    "**/app_packages/bin",
+    # Qt's own programs: Designer, Assistant and Linguist, the compilers and the QML tools, and
+    # the scripts behind the pyside6-* commands.
+    "**/PySide6/Designer.app",
+    "**/PySide6/Assistant.app",
+    "**/PySide6/Linguist.app",
+    "**/PySide6/lrelease",
+    "**/PySide6/lupdate",
+    "**/PySide6/qmlformat",
+    "**/PySide6/qmllint",
+    "**/PySide6/qmlls",
+    "**/PySide6/svgtoqml",
+    "**/PySide6/scripts",
+    "**/PySide6/Qt/libexec",
+    # The app is made of widgets, not QML; and the on-screen keyboard's plug-in.
+    "**/PySide6/Qt/qml",
+    "**/PySide6/Qt/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib",
+]
