@@ -517,14 +517,9 @@ _HYPHENATED = re.compile(
 # An IBAN after its label, its check digits right or wrong: a country, two digits, then up to 30
 # letters and digits, in groups of four or in one piece.
 _IBAN_LABEL = r"(?i:\biban\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
-_IBAN_SHAPE = (
-    r"(?P<value>[A-Z]{2}\d{2}(?:"
-    + _SPACE
-    + r"?[A-Z0-9]{4}){2,7}(?:"
-    + _SPACE
-    + r"?[A-Z0-9]{1,3})?)"
-    r"(?![A-Za-z0-9])"
-)
+_IBAN_GROUP = "(?:" + _SPACE + r"?[A-Z0-9]{4})"
+_IBAN_REST = "(?:" + _SPACE + r"?[A-Z0-9]{1,3})"
+_IBAN_SHAPE = r"(?P<value>[A-Z]{2}\d{2}" + _IBAN_GROUP + "{2,7}" + _IBAN_REST + r"?)(?![A-Za-z0-9])"
 _IBAN = "IBAN after its label"
 
 

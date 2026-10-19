@@ -1123,3 +1123,19 @@ def test_full_round_trip_every_docx(corpus, engine, lists, tmp_path):   # mask �
 
 - Spec coverage: §4 round trip → Tasks 15, 18, 22, 23, 26; §8.1 → 2, 8; §8.2 → 6, 7, 8, 24; §8.3 → 9, 21; §8.4 Word → 10–13, 15; §8.4 PDF → 16; §8.5 → 14, 15; §8.6 → 17; §8.7 → 18, 23; §8.8 → 2, 22; §8.9 (several files, add a file to an existing case) → 8, 15, 20, 23; §8.10 Mac → 1, 19, 25; §9 → 24, 25, 26; §10 clipboard note → Settings About copy (Task 23). Windows items deferred by design.
 - Names used across tasks: `DocText/Segment/TextNode` (10 → 13, 18), `replace_in_paragraph` (13 → 18), `Group/KeyEntry/MaskPlan` (2 → 8, 9, 13, 14, 15, 18), `CombinedText` (8 → 15, 21), `ExportResult/LeakHit` (14, 15 → 22), `CaseStore/CaseSummary` (17 → 20, 23), `simulate_ai` helper defined once in `tests/helpers.py` (Task 18) and reused (23, 24).
+
+## Results
+
+**Detection pass marks (spec §9), 19 October 2026** (Task 24). Measured with `uv run python tools/evaluate.py` on the corpus generated afresh, on an Apple M3 Mac with 16 GB (the 8 GB office-laptop timing is Task 25's to confirm). Every Word file and every PDF is analysed on its own, annexes too, as the app does before the owner's review; a secret counts as found when every place of it, in every form its truth file lists, lies inside one replacement of the review's plan.
+
+| Check (spec §9) | Word (28 files) | PDF (7 of 8 files) | All | Pass mark |
+|---|---|---|---|---|
+| Pattern-type items found before review (e-mail, phone, IBAN, ID, amount, percent, quantity, URL) | 100.0 % (719/719) | 100.0 % (194/194) | 100.0 % (913/913) | ≥ 99 % |
+| Names, companies and addresses found before review | 100.0 % (255/255) | 100.0 % (65/65) | 100.0 % (320/320) | ≥ 95 % |
+| Never-hide terms hidden by mistake | 0 | 0 | 0 | 0 |
+| Thirty-page contract read and analysed (slowest file) | 2.2 s | 3.4 s | 3.4 s | < 60 s |
+| Found secrets hidden as their own type (informational) | 99.9 % | 100.0 % | 99.9 % | — |
+
+- Not counted: `scanned-01.pdf` (no text; v1 refuses scanned PDFs), and seven secrets the analysed text does not hold (six only in tracked-deleted or hidden text, which the prepared copy drops; the IBAN on the picture page of `mixed-01.pdf`).
+- Before the tuning the same run gave 99.3 % (907/913: the six "N records" data volumes) and 100 %, with 96.3 % of found secrets typed right and 39 groups that hid no secret (29 of them running headers read whole). After it, 2 such groups are left: "Project Falcon" (kept on purpose, see the corpus README) and "Kraft" in "Kraft carrier bags" (a model guess, marked to check).
+- Enforced by `tests/test_passmarks.py` (`test_pass_marks`, `test_thirty_pages_under_sixty_seconds`); the round-trip pass marks follow with `test_full_round_trip_every_docx` once Task 18's Word restore is in.

@@ -121,9 +121,9 @@ _EDGE_MARKS = frozenset(
     "\N{BULLET}\N{MIDDLE DOT}-\N{EN DASH}\N{EM DASH}"
 )
 _BRACKETS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_CLOSING = {closing: opening for opening, closing in _BRACKETS.items()}
 # The word after a finding, on its line.
 _NEXT_WORD = re.compile(r"[ \t]+([^\W\d_][\w\-']*)")
-_CLOSING = {closing: opening for opening, closing in _BRACKETS.items()}
 
 
 @dataclass

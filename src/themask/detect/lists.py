@@ -17,8 +17,8 @@ before a colon is part of the value ("Note: keep" is hidden as it is).
 spacing and punctuation, in the singular and the plural, with or without a leading "the" and a
 possessive "'s". A document word with its reference ("SCHEDULE 1", "Clause 4.2", "1.2 Clause",
 "Annex II") is never hidden either, nor is a date in words ("25 June 2026"), nor a standard with
-its number ("ISO 9001", "EN 1090"). A text that holds a
-term but is longer than it is no term: "Supplier Logistics Ltd" is a name. The names found in a document beat its defined terms: after
+its number ("ISO 9001", "EN 1090"). A text that holds a term but is longer than it is no term:
+"Supplier Logistics Ltd" is a name. The names found in a document beat its defined terms: after
 ``"Acme" means Acme Supplies Ltd`` the term "Acme" is still a name to hide. The owner's own
 never-hide lists and the defaults always win.
 """
@@ -51,12 +51,12 @@ _ROLES = _terms(
     Landlord, Tenant, Employer, Employee, Worker, Lender, Borrower, Guarantor, Distributor,
     Reseller, Agent, Principal, Manufacturer, Producer, Carrier, Shipper, Consignee, Consignor,
     Party, Parties, Other Party, First Party, Second Party, Disclosing Party, Receiving Party,
-    Discloser, Recipient, Data
-    Controller, Data Processor, Controller, Processor, Sub-processor, Joint Controller, Data
-    Subject, Data Exporter, Data Importer, Supervisory Authority, Beneficiary, Affiliate, Group
-    Company, Subsidiary, Holding Company, Parent Company, Company, Group, Supplier Group, Buyer
-    Group, Customer Group, Representative, Authorised Representative, Authorised Signatory,
-    Signatory, Third Party, Personnel, Staff, Supplier Personnel, Customer Personnel
+    Discloser, Recipient, Data Controller, Data Processor, Controller, Processor, Sub-processor,
+    Joint Controller, Data Subject, Data Exporter, Data Importer, Supervisory Authority,
+    Beneficiary, Affiliate, Group Company, Subsidiary, Holding Company, Parent Company, Company,
+    Group, Supplier Group, Buyer Group, Customer Group, Representative, Authorised Representative,
+    Authorised Signatory, Signatory, Third Party, Personnel, Staff, Supplier Personnel, Customer
+    Personnel
     """
 )
 # The document's own words: what the contract calls itself, its parts, labels and headings.

@@ -13,9 +13,10 @@ The contract rules (``contract_rules``) check the language model: a place it fin
 only next to an address the rules found ("the laws of the Netherlands" stays visible), unless it is
 a short form of a name in the document, which it then is (ruling R21: the footer's "Greystone" for
 Greystone Logistics Ltd); a company it finds with neither a legal form nor a rule behind it is
-marked for checking; a job title is no name; and a finding never runs from one line into the next,
+marked for checking; a job title is no name; a finding never runs from one line into the next,
 nor across a tab into the next field of a form, nor across the separators of a running header
-from one party's name to the other's.
+from one party's name to the other's; and it loses a label or a salutation it starts with
+("Country: Netherlands", "Dear Smith").
 Overlapping findings are kept, for the analysis pipeline to decide between, except that a rule's
 finding replaces the model's on the same span.
 
@@ -263,9 +264,9 @@ class Engine:
         best: dict[tuple[PlaceholderType, int, int], tuple[Finding, str]] = {}
         for result in results:
             finding = self._finding(text, result)
-            recognizer = str(result.recognition_metadata.get(RecognizerResult.RECOGNIZER_NAME_KEY))
             if finding is None:
                 continue
+            recognizer = str(result.recognition_metadata.get(RecognizerResult.RECOGNIZER_NAME_KEY))
             # A number after its label is what the label says, even in the shape of a date
             # ("Company No. 12/2024").
             labelled = recognizer in _LABELLED_NUMBER_RECOGNIZERS
