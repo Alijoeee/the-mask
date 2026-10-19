@@ -88,7 +88,7 @@ BANK · 3" — group the twelve types this way), each row: 10 px tint chip, cano
 "[COMPANY_1] · 6 places · also “Northwind”, “the Buyer’s group”" (secondary 11), a switch (QCheckBox styled
 as a toggle, accent-coloured), a "CHECK" pill (notice colours, 10/700) on flagged groups; the selected row on
 accent-soft; clicking a row selects it and scrolls the document to its first place; Space toggles; ↑/↓ move.
-Footer: "12 hidden · 2 to check · 0 shown on purpose" left, "Space toggles · ↑↓ moves" right. The document
+Footer: "12 hidden · 2 to check · 0 shown on purpose" left, "Space toggles · ↑↓ moves" right. Reserve, ABOVE the type sections, a "Not sure — hide?" section (same row shape, a Hide and a Show button per row instead of the switch; hidden when empty): D2 builds the widget and feeds it the flagged, shown-by-default groups once D4 (ruling R122) produces them; until then it lists the CHECK groups that are switched off. The document
 pane keeps today's highlight behaviour (tints, darker tint for the selected group, click-to-select) and the
 summary line moves to the toolbar caption. The redline-split check box sits in the toolbar before "Export…".
 Keep today's keyboard and selection logic; only the presentation and the grouping of rows change.
