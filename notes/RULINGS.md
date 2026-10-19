@@ -165,8 +165,49 @@ The app's own network guard covers Python-level connections only; what macOS see
    durations only, no words from the documents, no file names.
 7. Turn Wi-Fi back on. Record the result in `docs/acceptance/2026-10-xx-mac-smoke.md`.
 
-## Deferred minors — triage
-TODO (filled in after the final whole-branch review)
+## Deferred minors — triage (from the final whole-branch review of 19 Oct; full detail in notes/sdd/final-review.md)
+
+### Fixed in the final fix wave (one implementer, one re-review; rulings R100–R115)
+1. One identity per value type, so "EUR 1.25"/"EUR 125", "$100"/"€100" and two e-mail spellings get their own placeholders and restore to their own values (R100).
+2. Every picture or media file is removed from the masked copy wherever it is referenced, and the export is refused if one is still inside (R101).
+3. XML namespace declarations and custom element names are scanned; unused declarations are stripped (R102).
+4. Web and e-mail links, link-bearing fields, permission marks, field data and leftover author marks are removed from the masked copy; the link text stays (R112).
+5. The "[image removed]" note no longer glues to the word before it, and a found value never runs across a note (R113).
+6. Merging two groups that both come from a stored key is refused; a stored group keeps its value through merges and splits (R107).
+7. A count written as a range after a reference number ("Schedule 3 - 500 pallets") is hidden again; "shall schedule 500 pallets" too where it is a one-line change (R105).
+8. Word files are checked for size and entry count before unpacking (R104).
+9. The three Task 14 leak-check folds (a decimal part ends a number; the byte-scan threshold; a shared fold attributed to every entry).
+10. Co-authoring conflict marks are resolved like tracked changes (R110); a misplaced tracked-change record can no longer empty a paragraph on "reject".
+11. Hiding text inside a switched-off occurrence now works instead of silently doing nothing; the leak gate no longer blocks after you split occurrences off and switch them off (R114); a stored key value never gains a bare surname as a variant; a case file with the same placeholder twice is listed as unreadable (R108); the unused LeakBlockedError is gone (R109).
+12. Garbage collection runs from the window's own thread, closing the PySide6 teardown crash the tests had hit (R111).
+13. Your name in the About panel; every wall-clock test limit tripled so the suite does not flake under load (R115).
+
+### Parked — known limits of v1, all visible to you in the review or on the fail-closed side
+- Detection shapes left to the review screen (the pass marks hold: 100 % of values and names in the made-up corpus): a surname before "in"/"on" and a capitalised word ("Smith in London") stays visible unless the model found it; a heading word or month the model tags as a person is hidden as that person (flagged); "Dear Smith" is read as a two-word person; "Smith/Jones" as a flagged company; "Price - Jones Logistics Ltd" shows "Price"; "John Carter - Managing Director" keeps "Managing" in the name; "Annex 2 Units of Measure" may be hidden as a flagged company; "Either/Neither Party", "GMT"/"EC", "the Federal Republic of Germany" appear as flagged companies; year ranges before "records"; two parties in one hyphenated header share a placeholder; a company short name that is a contract word ("Quality" of Quality Foods Ltd) stays visible; the model misses very short first names ("Jo Banks"). Cost if left: a value visible in the review that you hide by hand, or a flagged row you dismiss.
+- Leak check, all on the fail-closed side: an exotic namespace or font named after a party, a hyphenated word that folds onto a short company name, a very long paragraph (> 8,192 characters) with field words, a damaged theme part ("not a .docx"), a link counted twice, "10.00 %" counted as checkable, cents matching ("EUR 1,250.00" also hits "1,250.05") — each can block an export you then resolve in Word; none can leak. The byte scan reads UTF-8/UTF-16 only (after the wave the only binary parts left are embedded fonts).
+- Review screen: merging a group you never-hid into an enabled group takes the term back into the merged variants (the twin gate still masks those places); an always-/never-hide entry stays in memory if the lists file cannot be written until the next save.
+- Restore (cosmetic, in your own file): a banner paragraph that also holds a bookmark or a tracked insertion is emptied rather than deleted; a text-box backup copy that differs from its main copy is restored without a note; if the AI deletes one word of the banner the restore shows a tracked change for it; a "> " quote line or a numbered-item banner stays; a dropped "[" leaves a stray "]".
+- Word cleaner: unbalanced field markers after a partially hidden field (Word repairs them); the external transform path in settings.xml (scanned for marked values); compressed or exotic binary parts.
+- PDF: a page-number footer set wholly in bold is kept on every page; a page holding only a small picture and a stamp drops the picture without a note; multi-column pages read line by line.
+- Packaging (build tooling only, nothing the running app does): `check_bundle_lock` exits with a traceback instead of code 2 on an unreadable line; icon files not validated by a test; `make_icon` hides iconutil's errors; an empty platforminputcontexts folder; Designer/SQL/QML payload still in the bundle (matters only if the app leaves your Macs — Windows-phase SBOM).
+- Code structure for the Windows phase: duplicated relationship plumbing in the cleaner, three vocabularies defined twice, `_count` copied four times, large modules (leakcheck 1,572 lines, contract_rules 1,535, cleaner 1,060, grouping 831, restore_screen 754, review_screen 710, main_window 617), test inflation in the early tasks, a few stale docstrings and the README's BIC check-digit remark.
+
+### No longer applies (verified at the final review)
+MaskPlan validation (done in Task 2's model since), the zip archive comment (never copied into a masked file), `int()` on very long digit runs (every call guarded), the README's wording on export and restore (fine), the automatic case choice (R103/R106 verified in the code and the 99 restore-screen tests).
+
+## Using v1 safely — what no one-line change fixes
+1. The MASK hides values, not the story: industry, places, unusual terms and clause structure can still identify the parties (design §10). Read the masked copy once before uploading it.
+2. The leak check proves that marked values are gone; it cannot find what nobody marked. The review screen is the net: look at the "check" rows, at headers and footers (shown after the body) and at anything the model typed oddly.
+3. Restore writes a group's full form ("Mr Smith" comes back as "John Smith"; a national phone number as the international form). Intended.
+4. Restored files and copied text hold the real values. The restored file is written next to the AI's file: if that folder syncs (iCloud Drive, OneDrive, a synced Downloads), the restored contract syncs too. Keep the AI's downloads in a local folder. Copied text is on the clipboard in clear.
+5. Copilot with a Microsoft 365 licence can read your OneDrive, SharePoint and Outlook originals; the masked copy does not hide those (design §10).
+6. The always-hide list is a plain text file (`~/Library/Application Support/The MASK/lists.json`, readable by your account only): put product and project code names there knowing that.
+7. Keys die with the Mac or the user account and expire after the retention period (30 days by default, up to 365 in Settings; the purge runs at every start). Set a longer retention before a long-running matter; a deleted or expired case means its masked files can never be restored.
+8. A font or theme named after a party blocks the export: re-save the file from Word with a standard font. A damaged theme part is refused as "not a .docx".
+9. PDFs: only selectable text is read; image-only pages are listed and left out; multi-column pages read line by line; nothing hidden in the PDF (comments, form fields, attachments, properties) is carried over.
+10. Do not mask a masked copy again: placeholders already there are respected and numbering continues, but a second round makes the key harder to follow.
+11. "No network" rests on two things: the Python-level guard the suite runs under, and your own Wi-Fi-off smoke test of the built app with `lsof`. Qt and macOS frameworks are outside the guard; nothing in the app calls them for the network, but the monitor is the proof.
+12. The built app is ad-hoc signed: a rebuilt app is a new program to the Keychain and macOS may ask again. There is no CI; the local suite is the gate (an option for the Windows phase).
 
 ## The remaining local step (your Mac; the cloud cannot build or sign a Mac app)
 
