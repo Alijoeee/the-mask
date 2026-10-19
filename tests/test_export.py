@@ -355,15 +355,18 @@ def test_several_files_with_a_redline_are_numbered(
     assert res.case.source_files == ["supply-03.docx", "supply-01.docx"]
 
 
-def test_a_value_marked_in_one_file_leaves_the_links_of_the_others(
+def test_a_value_marked_in_one_file_leaves_the_names_and_links_of_the_others(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
-    # The annex never names the company where it is read, but links to its sales address
-    # (ruling R82): the key's values leave every file's links, not only the file they were in.
+    # The annex never names the company where it is read, but a bookmark is named after it and
+    # a link leads to its sales address (ruling R82): the key's values leave every file's names
+    # and links, not only the file they were in. (Since ruling R112 the cleaner takes every
+    # link to the outside out anyway; the bookmark is the masker's to rename.)
     contract = make_docx(para(SUPPLY) + para("Orders go to sales@northwind.example."))
     link = (
-        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
-        "</w:hyperlink></w:p>"
+        '<w:p><w:bookmarkStart w:id="0" w:name="Northwind_Trading_BV_orders"/>'
+        '<w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        '</w:hyperlink><w:bookmarkEnd w:id="0"/></w:p>'
     )
     rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
     annex = make_docx(para("Annex 1: the price list.") + link, raw=rels)
@@ -375,9 +378,23 @@ def test_a_value_marked_in_one_file_leaves_the_links_of_the_others(
         sources, review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
     )
     assert not res.blocked and res.leak_hits == [] and len(res.outputs) == 2
-    targets = DocxPackage.open(res.outputs[1]).raw("word/_rels/document.xml.rels")
-    assert b"northwind" not in targets.lower()
+    masked = DocxPackage.open(res.outputs[1])
+    assert b"northwind" not in masked.raw("word/document.xml").lower()
+    assert "word/_rels/document.xml.rels" not in masked.names()  # the link went with its target
     assert "Write to the sales desk." in body_text(res.outputs[1])
+
+
+@pytest.mark.parametrize("name", ["services-01", "nda-01", "dpa-01"])
+def test_the_corpus_files_with_links_export_without_their_links(
+    name: str, corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R112: the masked copy keeps the link text and loses every address behind it.
+    srcs, review = reviewed([corpus / f"{name}.docx"], engine, lists)
+    res = export_case(srcs, review, ExportOptions(tmp_path), engine, lists, lambda c: None)
+    assert not res.blocked and res.leak_hits == [], res.leak_hits
+    with zipfile.ZipFile(res.outputs[0]) as archive:
+        everything = b"\n".join(archive.read(entry) for entry in archive.namelist())
+    assert b"mailto:" not in everything and b"relationships/hyperlink" not in everything
 
 
 def test_a_pdf_is_masked_like_a_word_file(
@@ -841,12 +858,14 @@ def northwind_case() -> Case:
 def test_a_value_of_the_case_leaves_a_file_added_that_never_shows_it(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
-    # Ruling R83: the annex shows neither value of the case, so its review finds neither, but it
-    # links to the case's sales address.
+    # Ruling R83: the annex shows neither value of the case, so its review finds neither, but a
+    # bookmark is named after the case's sales address and a link leads to it. (Since ruling
+    # R112 the cleaner takes the link out anyway; the bookmark is the masker's to rename.)
     case = northwind_case()
     link = (
-        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
-        "</w:hyperlink></w:p>"
+        '<w:p><w:bookmarkStart w:id="0" w:name="sales_northwind_example"/>'
+        '<w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        '</w:hyperlink><w:bookmarkEnd w:id="0"/></w:p>'
     )
     rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
     annex = make_docx(para("Burren Logistics Limited carries the goods.") + link, raw=rels)
@@ -858,8 +877,9 @@ def test_a_value_of_the_case_leaves_a_file_added_that_never_shows_it(
     res = export_case([source], review, options, engine, lists, saved.append)
     assert not res.blocked and res.leak_hits == []
     assert res.outputs == [tmp_path / "out" / "MASKED-TEST-2.docx"]
-    targets = DocxPackage.open(res.outputs[0]).raw("word/_rels/document.xml.rels")
-    assert b"northwind" not in targets.lower()
+    masked = DocxPackage.open(res.outputs[0])
+    assert b"northwind" not in masked.raw("word/document.xml").lower()
+    assert "word/_rels/document.xml.rels" not in masked.names()
     assert "Write to the sales desk." in body_text(res.outputs[0])
     assert [e.placeholder for e in saved[0].entries] == ["[COMPANY_1]", "[EMAIL_1]", "[COMPANY_2]"]
 

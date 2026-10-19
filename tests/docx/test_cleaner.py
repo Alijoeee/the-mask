@@ -406,7 +406,8 @@ def test_every_corpus_file_is_cleaned_and_keeps_its_visible_text(
         assert DocxPackage.open(tmp_path / file).TEXT_PARTS == text_parts, file
 
 
-STRUCTURE = ("w:p", "w:tbl", "w:tr", "w:tc", "w:numPr", "w:sectPr", "w:hyperlink")
+# (Not w:hyperlink: the links to the outside go since ruling R112, their text stays.)
+STRUCTURE = ("w:p", "w:tbl", "w:tr", "w:tc", "w:numPr", "w:sectPr")
 STRUCTURE += ("w:footnoteReference", "w:bookmarkStart", "w:tblGrid")
 
 
@@ -825,14 +826,135 @@ def test_a_link_in_a_field_goes_when_nothing_visible_is_left_in_either() -> None
     assert b"bookmarkStart" in document(pkg)  # what else was in the link stays where it was
 
 
-def test_a_link_that_also_holds_visible_text_keeps_its_target() -> None:
+def test_a_link_that_also_holds_visible_text_keeps_the_text_and_loses_its_target() -> None:
+    # Ruling R112: every link to the outside goes, with or without hidden text in it.
     mixed = (
         '<w:hyperlink r:id="rId1"><w:r><w:rPr><w:vanish/></w:rPr><w:t>note</w:t></w:r>'
         f"{run('portal')}</w:hyperlink>"
     )
     pkg = package(para(mixed), rels=[(HYPERLINK, "https://portal.example/", "External")])
-    assert clean(pkg).hidden_runs == 1
-    assert text_of(pkg) == "portal" and b"portal.example" in everywhere(pkg)
+    rep = clean(pkg)
+    assert rep.hidden_runs == 1 and rep.links_removed == 1
+    assert text_of(pkg) == "portal" and b"portal.example" not in everywhere(pkg)
+    assert_consistent(pkg)
+
+
+# ---- links to the outside, permissions and field data (ruling R112) ------------------------------
+
+LINKED = "pieter.de.vries@pdv-advocaten.example"
+FIELD_ADDRESS = "legal.desk@lexpoint.example"
+EDITOR = "jane.doe@brightwater-foods.example"
+
+
+def contact_in_links() -> DocxPackage:
+    """The reviewer's file: an address behind "click here", one in a HYPERLINK simple field, one
+    as the editor of a permission range, and a name in the text."""
+    body = (
+        para(
+            run("Notices to the Supplier: "),
+            '<w:hyperlink r:id="rId1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>'
+            "<w:t>click here</w:t></w:r></w:hyperlink>",
+            run(" or "),
+            f'<w:fldSimple w:instr=" HYPERLINK &quot;mailto:{FIELD_ADDRESS}&quot; ">'
+            "<w:r><w:t>this address</w:t></w:r></w:fldSimple>",
+            run("."),
+        )
+        + para(
+            f'<w:permStart w:id="100" w:edGrp="everyone" w:ed="{EDITOR}"/>',
+            run("The Buyer may edit this clause."),
+            '<w:permEnd w:id="100"/>',
+        )
+        + para(run("Signed by John Carter for the Buyer."))
+    )
+    return package(body, rels=[(HYPERLINK, f"mailto:{LINKED}", "External")])
+
+
+def test_contact_data_that_stands_only_in_links_and_marks_goes(tmp_path: Path) -> None:
+    pkg = contact_in_links()
+    rep = clean(pkg)
+    saved = saved_bytes(pkg, tmp_path)
+    for address in (LINKED, FIELD_ADDRESS, EDITOR):
+        assert address.encode() not in saved, address
+    assert b"relationships/hyperlink" not in saved and b"permStart" not in saved
+    assert b"permEnd" not in saved and b"w:ed=" not in saved and b"edGrp" not in saved
+    assert text_of(pkg) == (
+        "Notices to the Supplier: click here or this address.\nThe Buyer may edit this clause.\n"
+        "Signed by John Carter for the Buyer."
+    )
+    assert rep.links_removed == 1 and rep.fields_flattened == 1
+    assert "word/_rels/document.xml.rels" not in pkg.names()
+    assert_consistent(pkg)
+
+
+def test_an_internal_link_stays_and_a_hyperlink_field_becomes_its_text() -> None:
+    body = para(
+        '<w:hyperlink w:anchor="_Toc1" w:history="1">',
+        run("Definitions"),
+        "</w:hyperlink>",
+        run(" and "),
+        field(' HYPERLINK "https://portal.example/login" ', run("the portal")),
+    )
+    pkg = package(body)
+    rep = clean(pkg)
+    assert b'w:anchor="_Toc1"' in document(pkg) and text_of(pkg) == "Definitions and the portal"
+    assert b"portal.example" not in everywhere(pkg) and b"fldChar" not in document(pkg)
+    assert rep.links_removed == 0 and rep.fields_flattened == 1
+
+
+@pytest.mark.parametrize("name", ["INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT", "LINK"])
+def test_a_field_that_reads_a_file_or_an_address_becomes_its_result(name: str) -> None:
+    instruction = f' {name} "C:\\\\Clients\\\\Acme\\\\terms.docx" '
+    pkg = package(para(field(instruction, run("the terms"))))
+    rep = clean(pkg)
+    assert text_of(pkg) == "the terms" and b"Acme" not in everywhere(pkg)
+    assert rep.fields_flattened == 1
+
+
+def test_links_on_shapes_go_and_the_shapes_stay() -> None:
+    box = (
+        '<w:drawing><wp:anchor><wp:docPr id="2" name="Text Box 2">'
+        '<a:hlinkClick r:id="rId1" tooltip="Acme portal"/><a:hlinkHover r:id="rId1"/></wp:docPr>'
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        f"<wps:wsp><wps:txbx><w:txbxContent>{para(run('Boxed'))}</w:txbxContent></wps:txbx></wps:wsp>"
+        "</a:graphicData></a:graphic></wp:anchor></w:drawing>"
+    )
+    vml = (
+        '<w:pict><v:rect id="_x0000_s1026" href="https://acme.example/terms" '
+        'o:href="https://acme.example/terms" o:hrlabel="Acme terms" style="width:100pt">'
+        f"<v:textbox><w:txbxContent>{para(run('VML box'))}</w:txbxContent></v:textbox></v:rect>"
+        "</w:pict>"
+    )
+    pkg = package(
+        para(f"<w:r>{box}</w:r><w:r>{vml}</w:r>"),
+        rels=[(HYPERLINK, "https://acme.example/portal", "External")],
+    )
+    rep = clean(pkg)
+    assert b"acme.example" not in everywhere(pkg) and b"Acme" not in everywhere(pkg)
+    assert b"hlink" not in document(pkg) and b"href" not in document(pkg)
+    assert text_of(pkg).splitlines()[1:] == ["Boxed", "VML box"]
+    assert rep.links_removed == 3  # two on the drawing, the VML shape's
+    assert_consistent(pkg)
+
+
+def test_field_data_and_editing_marks_go_and_the_rest_stays() -> None:
+    page = (
+        '<w:r><w:fldChar w:fldCharType="begin"><w:fldData>QWNtZSBTdXBwbGllcw==</w:fldData>'
+        '</w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+        f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>{run("7")}'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+    marked = (
+        '<w:p w:author="Jane Doe"><w:r w:ed="jane.doe@brightwater-foods.example">'
+        '<w:t>Reviewed</w:t></w:r><w:permStart w:id="1" w:edGrp="everyone"/><w:permEnd w:id="1"/>'
+        "</w:p>"
+    )
+    pkg = package(para(page) + marked)
+    rep = clean(pkg)
+    assert b"fldData" not in document(pkg) and b"QWNt" not in everywhere(pkg)
+    assert b"Jane Doe" not in everywhere(pkg) and b"jane.doe" not in everywhere(pkg)
+    assert b"w:author" not in document(pkg) and b"w:ed" not in document(pkg)
+    assert b" PAGE " in document(pkg) and text_of(pkg) == " PAGE 7\nReviewed"
+    assert rep.links_removed == 0 and rep.attributes_cleared == 2
     assert_consistent(pkg)
 
 
@@ -1052,10 +1174,11 @@ def test_a_field_in_the_instruction_of_a_flattened_field_goes_with_it(nested: st
 
 
 def test_other_fields_are_left_alone() -> None:
+    # (A HYPERLINK field is flattened since ruling R112: its address is a link to the outside.)
     body = para(
         run("Page "),
         '<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>',
-        field(r' HYPERLINK "https://example.test/x" ', run("link")),
+        field(r" REF _Ref1 \h ", run("clause 2")),
         field(" NUMPAGES ", run("9")),
     )
     pkg = package(body)
@@ -1268,15 +1391,17 @@ def test_form_field_data_goes_and_the_field_stays() -> None:
     assert document(pkg).count(b"w:fldChar ") == 3 and text_of(pkg) == " FORMTEXT Acme Holdings"
 
 
-def test_a_link_keeps_its_target_and_loses_its_tooltip() -> None:
+def test_a_link_loses_its_tooltip_and_its_target_and_keeps_its_text() -> None:
+    # Ruling R112: the target goes with the tooltip; the AI reads text, not links.
     link = (
         '<w:hyperlink r:id="rId1" w:tooltip="Open the Acme portal" w:history="1">'
         f"{run('portal')}</w:hyperlink>"
     )
     pkg = package(para(link), rels=[(HYPERLINK, "https://portal.example/login", "External")])
-    assert clean(pkg).attributes_cleared == 1
+    rep = clean(pkg)
+    assert rep.attributes_cleared == 1 and rep.links_removed == 1
     assert b"tooltip" not in everywhere(pkg) and b"Acme portal" not in everywhere(pkg)
-    assert text_of(pkg) == "portal" and b"portal.example" in everywhere(pkg)  # the masker's to do
+    assert text_of(pkg) == "portal" and b"portal.example" not in everywhere(pkg)
     assert_consistent(pkg)
 
 
@@ -1514,8 +1639,10 @@ def test_a_link_on_a_picture_goes_with_it() -> None:
         ],
         parts={"word/media/a.png": b"PNG"},
     )
-    clean(pkg)
-    assert b"secret.example" not in everywhere(pkg) and b"kept.example" in everywhere(pkg)
+    rep = clean(pkg)
+    # Ruling R112: the link on the text goes as well, its text stays.
+    assert b"secret.example" not in everywhere(pkg) and b"kept.example" not in everywhere(pkg)
+    assert text_of(pkg).endswith("visible") and rep.links_removed == 2  # the picture's, the text's
     assert_consistent(pkg)
 
 

@@ -28,6 +28,14 @@ Then each text part (the document, the headers, the footers, the notes), in read
    tooltips, descriptions of tables and the hidden copy of a VML text box.
 6. Hidden text: every run with ``w:vanish`` or ``w:specVanish``, and the hyperlink or simple field
    it leaves without a run (its target or instruction would stay behind).
+6a. Links to the outside (ruling R112): the AI reads text, not links, and an address behind
+   "click here" reaches no review. Every ``w:hyperlink`` with a target outside the file is
+   unwrapped (its text stays; a link to a place in the file stays whole), the links on shapes
+   (``a:hlinkClick`` and its kin, a VML shape's ``href``) go, and so do the editing permissions
+   (``w:permStart``, ``w:permEnd``, whose editor is an address), every ``w:fldData`` (field data
+   Word regenerates) and, last, every ``w:author``, ``w:ed`` and ``w:edGrp`` attribute left in
+   the part. The HYPERLINK, INCLUDE, INCLUDEPICTURE, INCLUDETEXT, IMPORT and LINK fields are
+   flattened with step 4: their result stays, their address or path goes.
 7. Pictures, charts (Word 2016's too), diagrams, ink and embedded objects become a note and their
    parts go. A drawing that holds a text box as well (ruling R28: a group of a picture and a text
    box, a text box filled with a picture) loses only the picture and the note stands beside it.
@@ -120,6 +128,10 @@ _CUSTOM_XML, _CUSTOM_XML_PR = _q("w", "customXml"), _q("w", "customXmlPr")
 _COMBO_BOX, _DROP_DOWN_LIST = _q("w", "comboBox"), _q("w", "dropDownList")
 _LAST_VALUE, _FF_DATA = _q("w", "lastValue"), _q("w", "ffData")
 _HYPERLINK, _TOOLTIP = _q("w", "hyperlink"), _q("w", "tooltip")
+_PERM_START, _PERM_END = _q("w", "permStart"), _q("w", "permEnd")
+_AUTHOR, _ED, _ED_GRP = _q("w", "author"), _q("w", "ed"), _q("w", "edGrp")
+_SHAPE_LINKS = tuple(_q("a", name) for name in ("hlinkClick", "hlinkHover", "hlinkMouseOver"))
+_VML_LINKS = ("href", _q("o", "href"), _q("o", "hrlabel"))
 _TBL_CAPTION, _TBL_DESCRIPTION = _q("w", "tblCaption"), _q("w", "tblDescription")
 _DATA_BINDING, _W15_DATA_BINDING = _q("w", "dataBinding"), _q("w15", "dataBinding")
 _PRINTER_SETTINGS = _q("w", "printerSettings")
@@ -154,7 +166,9 @@ _GFX_DATA = _q("o", "gfxdata")
 # R22: the fields that show who or where the file is from (author, user, file name, template) and
 # those that read a property or a document variable the cleaner removes. Updating one in the
 # masked file would put an error or nothing where the masked result stands, so each becomes the
-# plain text of its result. Word ignores case in a field's name.
+# plain text of its result. And the fields whose instruction is an address or a path outside
+# the file (ruling R112): their result stays, the address goes. Word ignores case in a field's
+# name.
 _FLATTENED_FIELDS = frozenset(
     {
         "AUTHOR",
@@ -171,6 +185,12 @@ _FLATTENED_FIELDS = frozenset(
         "KEYWORDS",
         "COMMENTS",
         "DOCVARIABLE",
+        "HYPERLINK",
+        "INCLUDEPICTURE",
+        "INCLUDETEXT",
+        "INCLUDE",
+        "IMPORT",
+        "LINK",
     }
 )
 _FIELD_NAME = re.compile(r"\s*([A-Za-z]+)\b")
@@ -221,7 +241,9 @@ class CleanReport:
     ``properties_cleared`` names the file properties that held something, as ``dc:creator``,
     ``Company`` or ``custom:<name>``, and ``parts_removed`` the parts taken out of the package, in
     the order of the zip. ``fields_flattened`` counts the fields turned into plain text,
-    ``fallbacks_removed`` the second copies of drawings, ``equations_removed`` and
+    ``links_removed`` the links to the outside taken out, a link round text, a link on a shape
+    or a VML shape's link (ruling R112), ``fallbacks_removed`` the second copies of drawings,
+    ``equations_removed`` and
     ``altchunks_removed`` the notes put in place of equations and embedded documents, and
     ``attributes_cleared`` the pieces of text kept in attributes that were removed: a tooltip, a
     description, a title, the name of a shape, a text watermark, a smart tag, the items of a
@@ -238,6 +260,7 @@ class CleanReport:
     properties_cleared: list[str] = field(default_factory=list)
     parts_removed: list[str] = field(default_factory=list)
     fields_flattened: int = 0
+    links_removed: int = 0
     fallbacks_removed: int = 0
     equations_removed: int = 0
     altchunks_removed: int = 0
@@ -268,6 +291,8 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
         report.fields_flattened += _flatten_fields(root)
         report.attributes_cleared += _clear_attribute_text(root)
         report.hidden_runs += _remove_hidden_runs(root)
+        report.links_removed += _remove_external_links(root)
+        report.attributes_cleared += _remove_editing_marks(root)
         _replace_pictures(root, report)
         _replace_equations(root, report)
         _replace_embedded_documents(root, report)
@@ -558,6 +583,57 @@ def _unwrap_emptied_links(element: etree._Element | None) -> None:
 def _is_on(toggle: etree._Element) -> bool:
     """Whether a property such as ``w:vanish`` is switched on: it is, unless w:val says off."""
     return toggle.get(_VAL, "true").casefold() not in {"0", "false", "off"}
+
+
+# ---- links to the outside (ruling R112) ----------------------------------------------------------
+
+
+def _remove_external_links(root: etree._Element) -> int:
+    """Takes out every link to the outside; returns how many. The text of a link stays.
+
+    A ``w:hyperlink`` with a relationship (a web page, an e-mail address, a file) is unwrapped;
+    one that only leads to a place in the file (``w:anchor``) stays as it is. The links on
+    drawings (``a:hlinkClick``, ``a:hlinkHover``, ``a:hlinkMouseOver``) go, and a VML shape
+    loses its ``href`` and its label. The relationships they named are released afterwards,
+    once nothing in the part refers to them.
+    """
+    count = 0
+    for link in _live(root, _HYPERLINK):
+        if _R_ID in link.attrib:
+            _unwrap(link)
+            count += 1
+    for shape_link in _live(root, *_SHAPE_LINKS):
+        _remove(shape_link)
+        count += 1
+    linked = root.xpath("//v:*[@href or @o:href or @o:hrlabel]", namespaces=_NAMESPACES)
+    for shape in _only_live(root, linked):
+        for attribute in _VML_LINKS:
+            shape.attrib.pop(attribute, None)
+        count += 1
+    return count
+
+
+def _remove_editing_marks(root: etree._Element) -> int:
+    """Takes out the editing permissions, the field data and every author left in the part;
+    returns how many pieces of text kept in attributes went.
+
+    A permission range (``w:permStart``/``w:permEnd``, Word's "Restrict Editing") names its
+    editor, an e-mail address; ``w:fldData`` is field data in base64, which Word regenerates;
+    and a ``w:author``, ``w:ed`` or ``w:edGrp`` attribute on anything left names a person: the
+    tracked changes are resolved by now, so one left is a co-authoring mark or something Word
+    adds next year.
+    """
+    count = 0
+    for mark in _live(root, _PERM_START, _PERM_END):
+        count += mark.get(_ED) is not None
+        _remove(mark)
+    for data in _live(root, _FLD_DATA):
+        _remove(data)
+    marked = root.xpath("//*[@w:author or @w:ed or @w:edGrp]", namespaces=_NAMESPACES)
+    for element in _only_live(root, marked):
+        for attribute in (_AUTHOR, _ED, _ED_GRP):
+            count += element.attrib.pop(attribute, None) is not None
+    return count
 
 
 # ---- pictures, objects, equations and embedded documents (ruling R17) ----------------------------
