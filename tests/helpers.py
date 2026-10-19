@@ -109,22 +109,25 @@ def simulate_ai(masked: Path, out: Path) -> Path:
     banner = body.find(_w("p"))
     if banner is None or "".join(banner.itertext()) != BANNER_TEXT:
         raise ValueError("The masked file does not start with the banner.")
-    texts = [t for t in body.iter(_w("t")) if banner not in t.iterancestors()]
 
-    first_person = next((t for t in texts if "[PERSON_1]" in (t.text or "")), None)
+    def first(token: str) -> etree._Element | None:
+        """The first w:t of the body that holds ``token``, the banner aside, as the body is now."""
+        texts = (t for t in body.iter(_w("t")) if banner not in t.iterancestors())
+        return next(
+            (t for t in texts if token in (t.text or "") and not _bold_alone(t, token)), None
+        )
+
+    first_person = first("[PERSON_1]")
     if first_person is not None:
         first_person.text = first_person.text.replace("[PERSON_1]", "[PERSON 1]", 1)
-    for t in [t for t in texts if "[AMOUNT_1]" in (t.text or "")]:
-        while t is not None and "[AMOUNT_1]" in (t.text or ""):
-            start = t.text.index("[AMOUNT_1]")
-            amount, after = _split_off(t, start, start + len("[AMOUNT_1]"))
-            _add_property(amount, "b", _BEFORE_BOLD)
-            t = None if after is None else after.find(_w("t"))
-    company = next((t for t in texts if "[COMPANY_1]" in (t.text or "")), None)
+    while (amount := first("[AMOUNT_1]")) is not None:
+        start = amount.text.index("[AMOUNT_1]")
+        _add_property(_split_off(amount, start, start + len("[AMOUNT_1]")), "b", _BEFORE_BOLD)
+    company = first("[COMPANY_1]")
     if company is not None:
         start = company.text.index("[COMPANY_1]")
-        whole, _ = _split_off(company, start, start + len("[COMPANY_1]"))
-        half, _ = _split_off(whole.find(_w("t")), 0, len("[COMPANY_1]") // 2)
+        whole = _split_off(company, start, start + len("[COMPANY_1]"))
+        half = _split_off(whole.find(_w("t")), 0, len("[COMPANY_1]") // 2)
         _add_property(half, "i", _BEFORE_ITALICS)
         half.set(_w("rsidR"), SPLIT_RSID)
 
@@ -162,35 +165,52 @@ def _paragraph(text: str) -> etree._Element:
     return p
 
 
-def _split_off(
-    t: etree._Element, start: int, end: int
-) -> tuple[etree._Element, etree._Element | None]:
-    """Splits the run of ``t`` so that ``t.text[start:end]`` has a run of its own.
+def _bold_alone(t: etree._Element, token: str) -> bool:
+    """Whether ``t`` holds ``token`` alone, in a bold run of its own: an amount already done."""
+    run = t.getparent()
+    alone = [child for child in run if child.tag != _w("rPr")] == [t]
+    return t.text == token and alone and run.find(f"{_w('rPr')}/{_w('b')}") is not None
 
-    The text before and after it keep runs of their own too; each run has the formatting of the
-    run it comes from. The run must hold ``t`` and nothing else but its properties. Returns the
-    new run and the run of the text after it, if there is any.
+
+def _split_off(t: etree._Element, start: int, end: int) -> etree._Element:
+    """Splits the run of ``t`` so that ``t.text[start:end]`` has a run of its own; returns it.
+
+    What comes before that text in the run, text, tabs or breaks, goes into a run before it, and
+    what comes after it into a run after it; each run has the formatting of the run split.
     """
     run = t.getparent()
-    if [child for child in run if child.tag != _w("rPr")] != [t]:
-        raise ValueError("simulate_ai only splits a run that holds a single w:t.")
+    properties = run.find(_w("rPr"))
+    content = [child for child in run if child.tag != _w("rPr")]
+    at = content.index(t)
     text = t.text or ""
-    made: list[etree._Element | None] = []
-    for piece in (text[:start], text[start:end], text[end:]):
-        if not piece:
-            made.append(None)
-            continue
-        twin = copy.deepcopy(run)
-        twin_t = twin.find(_w("t"))
-        twin_t.text = piece
-        twin_t.set(_XML_SPACE, "preserve")
-        run.addprevious(twin)
-        made.append(twin)
-    run.getparent().remove(run)
-    middle = made[1]
-    if middle is None:
+    if not text[start:end]:
         raise ValueError("simulate_ai splits off a stretch with text in it.")
-    return middle, made[2]
+    parts = (
+        [*content[:at], *_text_nodes(text[:start])],
+        _text_nodes(text[start:end]),
+        [*_text_nodes(text[end:]), *content[at + 1 :]],
+    )
+    made: dict[int, etree._Element] = {}
+    for index, part in enumerate(parts):
+        if part:
+            twin = etree.Element(_w("r"))
+            if properties is not None:
+                twin.append(copy.deepcopy(properties))
+            twin.extend(part)
+            run.addprevious(twin)
+            made[index] = twin
+    run.getparent().remove(run)
+    return made[1]
+
+
+def _text_nodes(text: str) -> list[etree._Element]:
+    """A w:t holding ``text``, or none for no text."""
+    if not text:
+        return []
+    t = etree.Element(_w("t"))
+    t.text = text
+    t.set(_XML_SPACE, "preserve")
+    return [t]
 
 
 def _add_property(run: etree._Element, name: str, after: tuple[str, ...]) -> None:

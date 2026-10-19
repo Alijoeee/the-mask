@@ -13,7 +13,12 @@ break and a tab written as Word writes them (decision 2); field instructions lef
 for the owner, a one-sided bracket kept (R79); the AI's file never changed, and no file ever
 written over. Ruling R88: placeholders in the AI's tracked changes are restored too, in what it
 deleted or moved away as in what it inserted, by the same rules and counted the same way, and
-nothing in unchanged text is reported twice.
+nothing in unchanged text is reported twice. Ruling R90: a placeholder that a tracked change runs
+through (a digit, a word, a type or a bracket of it changed) becomes one change of whole values,
+right with the change accepted and with it rejected, or is left and listed when a form of it is
+unknown or not confirmed. Ruling R91: ``plan_docx`` numbers every placeholder the restore deals
+with, comments and deletions too, and the owner confirms changed ones by those numbers.
+``simulate_ai`` copes with placeholders that share a run (review finding M4).
 """
 
 from __future__ import annotations
@@ -33,7 +38,8 @@ from themask.docx.reader import View, extract_text
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
-from themask.restore.docx_restore import restore_docx
+from themask.restore.docx_restore import plan_docx, restore_docx
+from themask.restore.report import TRACKED_CHANGE
 
 DASH = "\N{EN DASH}"
 W = f"{{{NS['w']}}}"
@@ -66,6 +72,39 @@ def italic(text: str) -> str:
 
 def text_of(path: Path, view: View = "accepted") -> str:
     return extract_text(DocxPackage.open(path), view).text
+
+
+# A key with two companies, for the changes an AI makes inside a placeholder (ruling R90).
+PARTIES = Case(
+    "TRK",
+    NOW,
+    [],
+    [],
+    [
+        KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "John Smith", []),
+        KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Acme Supplies Ltd", []),
+        KeyEntry("[COMPANY_2]", PlaceholderType.COMPANY, "Brightwater BV", []),
+    ],
+)
+
+
+def deleted(text: str) -> str:
+    """A tracked deletion of the AI's holding ``text``."""
+    return tracked("del", f'<w:r><w:delText xml:space="preserve">{escape(text)}</w:delText></w:r>')
+
+
+def inserted(text: str) -> str:
+    """A tracked insertion of the AI's holding ``text``."""
+    return tracked("ins", run(text))
+
+
+def changes(path: Path) -> list[tuple[str, str]]:
+    """The tracked changes of the Word file at ``path``, in order: (ins or del, the text)."""
+    root = DocxPackage.open(path).xml("word/document.xml")
+    return [
+        (etree.QName(change).localname, "".join(change.itertext()))
+        for change in root.iter(f"{W}ins", f"{W}del")
+    ]
 
 
 def tracked(kind: str, content: str) -> str:
@@ -422,3 +461,212 @@ def test_a_line_break_in_a_value_the_ai_deleted_is_written_as_word_writes_it(
     assert text_of(out, "rejected") == "To Line 1\nLine 2" and rep.restored == 1
     (gone,) = DocxPackage.open(out).xml("word/document.xml").findall(".//w:del/w:r", NS)
     assert [etree.QName(child).localname for child in gone] == ["delText", "br", "delText"]
+
+
+def test_a_number_the_ai_changed_inside_a_placeholder_is_one_change_of_values(
+    make_docx: MakeDocx,
+) -> None:
+    # R90: the AI made [COMPANY_1] into [COMPANY_2] by changing its digit alone. Each reading
+    # gets its own value, in a deletion and an insertion with the AI's author and date.
+    path = make_docx(
+        f"<w:p>{run('Paid by [COMPANY_')}{deleted('1')}{inserted('2')}{run('].')}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == "Paid by Brightwater BV."
+    assert text_of(out, "rejected") == "Paid by Acme Supplies Ltd."
+    assert changes(out) == [("del", "Acme Supplies Ltd"), ("ins", "Brightwater BV")]
+    root = DocxPackage.open(out).xml("word/document.xml")
+    made = list(root.iter(f"{W}ins", f"{W}del"))
+    assert {(c.get(f"{W}author"), c.get(f"{W}date")) for c in made} == {
+        ("AI tool", "2026-10-17T09:00:00Z")
+    }
+    assert len({c.get(f"{W}id") for c in made}) == 2
+    assert rep.summary() == "1 placeholders restored, 0 need your check."
+
+
+def test_a_swap_of_parties_inside_shared_brackets_shows_as_a_swap_of_values(
+    make_docx: MakeDocx,
+) -> None:
+    path = make_docx(
+        f"<w:p>{run('[')}{deleted('COMPANY_1')}{inserted('COMPANY_2')}{run('] shall indemnify [')}"
+        f"{deleted('COMPANY_2')}{inserted('COMPANY_1')}{run('].')}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == "Brightwater BV shall indemnify Acme Supplies Ltd."
+    assert text_of(out, "rejected") == "Acme Supplies Ltd shall indemnify Brightwater BV."
+    assert changes(out) == [
+        ("del", "Acme Supplies Ltd"),
+        ("ins", "Brightwater BV"),
+        ("del", "Brightwater BV"),
+        ("ins", "Acme Supplies Ltd"),
+    ]
+    assert rep.summary() == "2 placeholders restored, 0 need your check."
+
+
+def test_a_type_the_ai_changed_inside_a_placeholder(make_docx: MakeDocx) -> None:
+    path = make_docx(
+        f"<w:p>{run('[')}{deleted('PERSON')}{inserted('COMPANY')}{run('_1] signs.')}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == "Acme Supplies Ltd signs."
+    assert text_of(out, "rejected") == "John Smith signs."
+    assert rep.summary() == "1 placeholders restored, 0 need your check."
+
+
+@pytest.mark.parametrize("confirm_altered", [False, True])
+def test_a_bracket_the_ai_inserted_into_a_placeholder(
+    make_docx: MakeDocx, confirm_altered: bool
+) -> None:
+    # With the change rejected the placeholder reads "PERSON_1]", a changed form, so the whole
+    # placeholder waits for the owner's confirmation; confirmed, both readings show the value.
+    path = make_docx(f"<w:p>{run('Signed by ')}{inserted('[')}{run('PERSON_1].')}</w:p>")
+    out, rep = restore_docx(path, PARTIES, confirm_altered)
+    if confirm_altered:
+        assert text_of(out, "accepted") == text_of(out, "rejected") == "Signed by John Smith."
+        assert changes(out) == []  # both readings agree: no change is left to accept or reject
+        assert (rep.restored, rep.altered_restored, rep.needs_check) == (1, 1, [])
+    else:
+        assert text_of(out, "accepted") == "Signed by [PERSON_1]."
+        assert text_of(out, "rejected") == "Signed by PERSON_1]."
+        (item,) = rep.needs_check
+        assert (item.match.raw, item.status, item.reason) == (
+            "[PERSON_1]",
+            "altered",
+            TRACKED_CHANGE,
+        )
+        assert rep.restored == 0
+
+
+@pytest.mark.parametrize(
+    ("inside", "status"),
+    [(("PERSON", "person"), "altered"), (("1", "9"), "unknown")],
+    ids=["changed-form", "unknown"],
+)
+def test_a_placeholder_a_change_runs_through_is_left_and_listed_when_not_sure(
+    make_docx: MakeDocx, inside: tuple[str, str], status: str
+) -> None:
+    # Read with the change accepted, the placeholder is "[person_1]", a changed form not
+    # confirmed, or "[PERSON_9]", which the key does not hold: nothing of it is touched.
+    old, new = inside
+    before, after = ("[", "_1]") if old == "PERSON" else ("[PERSON_", "]")
+    path = make_docx(
+        f"<w:p>{run(before)}{deleted(old)}{inserted(new)}{run(after + ' signs.')}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == f"{before}{new}{after} signs."
+    assert text_of(out, "rejected") == f"{before}{old}{after} signs."
+    (item,) = rep.needs_check
+    assert (item.status, item.reason) == (status, TRACKED_CHANGE)
+    assert (rep.restored, rep.unknown) == (0, [])
+    if status == "altered":
+        # Confirmed by its number, it becomes one change of values like any other.
+        (planned,) = plan_docx(path, PARTIES)
+        out, rep = restore_docx(path, PARTIES, {planned.ordinal}, out_dir=out.parent / "confirmed")
+        assert text_of(out, "accepted") == text_of(out, "rejected") == "John Smith signs."
+        assert rep.summary() == "1 placeholders restored, 0 need your check."
+
+
+def test_half_a_placeholder_the_ai_inserted_keeps_the_other_reading_as_it_was(
+    make_docx: MakeDocx,
+) -> None:
+    # Rejected, the change leaves "2]", no placeholder: that reading keeps its text.
+    path = make_docx(f"<w:p>{run('Due to ')}{inserted('[COMPANY_')}{run('2] now.')}</w:p>")
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == "Due to Brightwater BV now."
+    assert text_of(out, "rejected") == "Due to 2] now."
+    assert changes(out) == [("del", "2]"), ("ins", "Brightwater BV")]
+    assert rep.summary() == "1 placeholders restored, 0 need your check."
+
+
+def test_a_placeholder_one_reading_alone_sees_keeps_the_other_reading_as_it_was(
+    make_docx: MakeDocx,
+) -> None:
+    # The AI deleted an "X" glued to "PERSON_1": accepted, the text reads the changed form
+    # "PERSON_1"; rejected, "PERSON_1X", which is no placeholder, and stays so.
+    path = make_docx(f"<w:p>{run('Rate: PERSON_1')}{deleted('X')}{run(' applies.')}</w:p>")
+    out, rep = restore_docx(path, PARTIES, confirm_altered=True)
+    assert text_of(out, "accepted") == "Rate: John Smith applies."
+    assert text_of(out, "rejected") == "Rate: PERSON_1X applies."
+    assert changes(out) == [("del", "PERSON_1"), ("ins", "John Smith"), ("del", "X")]
+    assert (rep.restored, rep.altered_restored) == (1, 1)
+
+
+def test_a_deletion_across_two_placeholders_is_left_and_listed(make_docx: MakeDocx) -> None:
+    # Deleting "1] and [COMPANY_" makes one placeholder of two: nothing here is guessed.
+    path = make_docx(f"<w:p>{run('X [PERSON_')}{deleted('1] and [COMPANY_')}{run('1] Y')}</w:p>")
+    out, rep = restore_docx(path, PARTIES, confirm_altered=True)
+    assert text_of(out, "accepted") == "X [PERSON_1] Y"
+    assert text_of(out, "rejected") == "X [PERSON_1] and [COMPANY_1] Y"
+    (item,) = rep.needs_check
+    assert item.reason == TRACKED_CHANGE and rep.restored == 0
+
+
+def test_a_confirmation_by_number_never_confirms_a_fallback_copy_by_chance(
+    make_docx: MakeDocx,
+) -> None:
+    # The fallback copy is not in the plan; with numbers confirmed, its changed placeholders
+    # stay as written rather than follow a number that names another placeholder.
+    box = TEXT_BOX.format(inside=p("person_1 signs"))
+    path = make_docx(f"{p('Dear [PERSON 1],')}<w:p>{box}</w:p>")
+    plan = plan_docx(path, CASE)
+    assert [(item.match.raw, item.ordinal) for item in plan] == [("[PERSON 1]", 0), ("person_1", 1)]
+    out, rep = restore_docx(path, CASE, {0})
+    texts = [t.text for t in DocxPackage.open(out).xml("word/document.xml").iter(f"{W}t")]
+    assert texts == ["Dear John Smith,", "person_1 signs", "person_1 signs"]
+    assert [item.ordinal for item in rep.needs_check] == [1]
+
+
+def test_plan_docx_numbers_every_placeholder_and_the_owner_confirms_by_number(
+    make_docx: MakeDocx,
+) -> None:
+    # R91: the plan holds what the restore deals with, comments and deletions too, numbered in
+    # the order the restore numbers them; a set of numbers confirms exactly those changes.
+    path = make_docx(
+        f"<w:p>{run('Dear [PERSON 1] and ')}{deleted('[COMPANY_1]')}</w:p>",
+        parts={"word/comments.xml": f'<w:comment w:id="0">{p("Ask person_1.")}</w:comment>'},
+    )
+    plan = plan_docx(path, CASE)
+    assert [(item.part, item.match.raw, item.status, item.ordinal) for item in plan] == [
+        ("word/document.xml", "[PERSON 1]", "altered", 0),
+        ("word/document.xml", "[COMPANY_1]", "exact", 1),
+        ("word/comments.xml", "person_1", "altered", 2),
+    ]
+    out, rep = restore_docx(path, CASE, {2})
+    assert text_of(out, "accepted") == "Dear [PERSON 1] and "
+    assert text_of(out, "rejected") == "Dear [PERSON 1] and Acme Supplies Ltd"
+    comments = DocxPackage.open(out).xml("word/comments.xml")
+    assert "".join(comments.itertext()) == "Ask John Smith."
+    assert [(item.part, item.match.raw, item.ordinal) for item in rep.needs_check] == [
+        ("word/document.xml", "[PERSON 1]", 0)
+    ]
+    assert (rep.restored, rep.altered_restored) == (2, 1)
+    assert plan_docx(path, CASE) == plan  # the same numbers every time
+
+
+@pytest.mark.parametrize(
+    "paragraph",
+    [
+        p("[COMPANY_1] pays [AMOUNT_1] to [PERSON_1]."),
+        p("[AMOUNT_1] and [AMOUNT_1] by [COMPANY_1] for [PERSON_1]."),
+        (
+            '<w:p><w:r><w:tab/><w:t xml:space="preserve">[COMPANY_1] owes [AMOUNT_1]</w:t><w:br/>'
+            "<w:t>to [PERSON_1].</w:t></w:r></w:p>"
+        ),
+    ],
+    ids=["company-and-amount", "amount-twice", "tab-and-break"],
+)
+def test_simulate_ai_copes_with_placeholders_that_share_a_run(
+    make_docx: MakeDocx, tmp_path: Path, paragraph: str
+) -> None:
+    # Review finding M4: Task 24 runs simulate_ai over every corpus file.
+    masked = make_docx(f"{italic(BANNER_TEXT)}<w:p/>{paragraph}")
+    ai = simulate_ai(masked, tmp_path / "ai.docx")
+    root = DocxPackage.open(ai).xml("word/document.xml")
+    amounts = root.xpath(".//w:r[w:t='[AMOUNT_1]']", namespaces=NS)
+    assert amounts and all(r.find("w:rPr/w:b", NS) is not None for r in amounts)
+    (half,) = root.xpath(f".//w:r[@w:rsidR='{SPLIT_RSID}']", namespaces=NS)
+    assert half.findtext("w:t", namespaces=NS) == "[COMP"
+    out, rep = restore_docx(ai, CASE, confirm_altered=True)
+    text = text_of(out)
+    assert all(e.value in text for e in CASE.entries) and rep.unknown == ["[PERSON_9]"]
+    assert {m.placeholder for m in find_placeholders(text)} == {"[PERSON_9]"}

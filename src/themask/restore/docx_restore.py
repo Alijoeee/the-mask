@@ -4,18 +4,26 @@
 "<name> – restored.docx", next to it or in the folder asked for, and never over a file that is
 there; the AI's file itself is never written to. Every paragraph of the text parts (the document,
 its headers, footers, footnotes and endnotes) and of the comments is restored the way
-``restore_text`` restores a text, and one report counts them all: exact placeholders are always
-put back, changed ones only once the owner confirms them, unknown ones are left as written. The
-value goes in through ``replace_in_paragraph``, so it takes the formatting of the placeholder's
-first run, also where Word split the placeholder across runs, and a tab or line break in a value
-becomes a ``w:tab`` or ``w:br`` as Word writes them. A text box's fallback copy, which Word keeps
-for old readers, is restored the same way but not counted again.
+``restore_text`` restores a text: exact placeholders are always put back, changed ones only once
+the owner confirms them, unknown ones are left as written. One plan numbers every placeholder of
+the file, and ``plan_docx`` gives that plan without changing anything, so that the owner can
+confirm changed placeholders one by one by their ordinals (ruling R91); one report counts them
+all. The value goes in through ``replace_in_paragraph``, so it takes the formatting of the
+placeholder's first run, also where Word split the placeholder across runs, and a tab or line
+break in a value becomes a ``w:tab`` or ``w:br`` as Word writes them. A text box's fallback
+copy, which Word keeps for old readers, is restored the same way but not counted again; its
+changed placeholders are put back only when the owner confirmed all of them.
 
-The AI's tracked changes are restored too (ruling R88), so that neither accepting nor rejecting
-one brings a placeholder back. A paragraph is restored first with every change accepted, its
-insertions with it, then with every change rejected, for the text only that view holds: what the
-AI deleted (``w:del``) or moved away (``w:moveFrom``). Each is counted like any other, and the
-text the two views share is restored and reported once.
+The AI's tracked changes are restored too, so that neither accepting nor rejecting one brings a
+placeholder back or a wrong value in (rulings R88, R90). A paragraph with tracked changes is read
+with every change accepted and with every change rejected. A placeholder in text both readings
+share, or wholly in one insertion or one deletion, is put back where it stands; one is planned
+once however many readings show it. A placeholder that a change runs through, a digit, a word or
+a bracket of it inserted or deleted, becomes one change of whole values: a new deletion holding
+the value the paragraph reads with the changes rejected and a new insertion holding the one it
+reads with them accepted, in the placeholder's first run's formatting and with the author and
+date of the AI's change. Where a reading's form of it is unknown, or changed and not confirmed,
+it is left as it is and listed to check, with ``TRACKED_CHANGE`` as the reason.
 
 The MASK's banner and its instruction for the AI are taken out (``banner_spans``). A paragraph
 of the body that holds nothing but one of them is deleted, with an empty paragraph right after
@@ -29,18 +37,22 @@ reads and writes the text, not those, and changing them could break the field or
 
 from __future__ import annotations
 
+import copy
+import re
+from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path
 
 from lxml import etree
 
-from themask.docx.cleaner import _comment_parts
+from themask.docx.cleaner import comment_parts
 from themask.docx.package import NS, DocxPackage
-from themask.docx.reader import paragraph_nodes
+from themask.docx.reader import TextNode, View, paragraph_nodes
 from themask.docx.restorer import replace_in_paragraph
 from themask.model import Case
-from themask.restore.matcher import banner_spans
-from themask.restore.report import RestoreReport
-from themask.restore.text import TextRestorer
+from themask.restore.matcher import banner_spans, plan_restore, restore_span
+from themask.restore.report import TRACKED_CHANGE, RestoreItem, RestoreReport, RestoreStatus
+from themask.restore.text import Confirmation, TextRestorer
 
 _W = f"{{{NS['w']}}}"
 _BODY = f"{_W}body"
@@ -48,37 +60,50 @@ _P = f"{_W}p"
 _PPR = f"{_W}pPr"
 _R = f"{_W}r"
 _RPR = f"{_W}rPr"
+_T = f"{_W}t"
+_DEL_TEXT = f"{_W}delText"
 _SECT_PR = f"{_W}sectPr"
+_INS = f"{_W}ins"
+_DEL = f"{_W}del"
+# The tracked changes of text: inserted, deleted, moved here and moved away.
+_REVISIONS = (_INS, _DEL, f"{_W}moveTo", f"{_W}moveFrom")
+_ID = f"{_W}id"
 _FALLBACK = f"{{{NS['mc']}}}Fallback"
-# What a tracked change took out: deleted text, and text moved away from here.
-_TAKEN_OUT = (f"{_W}del", f"{_W}moveFrom")
+_XML_SPACE = f"{{{NS['xml']}}}space"
+# How Word writes a tab and a line break in a run.
+_MARKS = {"\t": f"{_W}tab", "\n": f"{_W}br"}
+_MARK = re.compile("([\t\n])")
+
+Edits = list[tuple[int, int, str]]
+
+
+def plan_docx(src: Path, case: Case) -> list[RestoreItem]:
+    """Every placeholder of the AI's Word file ``src`` that ``restore_docx`` deals with.
+
+    The items come in the order the restore numbers them, each with its part and its
+    ``ordinal``, the number by which ``restore_docx`` takes the owner's confirmation; nothing is
+    restored or written. Raises what ``DocxPackage.open`` raises.
+    """
+    restorer = TextRestorer(case, confirm_altered=False)
+    _restore_package(DocxPackage.open(src), restorer, apply=False)
+    return restorer.plan
 
 
 def restore_docx(
-    src: Path, case: Case, confirm_altered: bool, out_dir: Path | None = None
+    src: Path, case: Case, confirm_altered: Confirmation, out_dir: Path | None = None
 ) -> tuple[Path, RestoreReport]:
     """Restores the AI's Word file ``src`` with the key of ``case``; returns the new file and
     the report of what was done.
 
-    ``confirm_altered`` says the owner confirmed the placeholders the AI changed. The new file
-    goes into ``out_dir``, made when it is missing, or else next to ``src``: "<stem> – restored
-    .docx", or "<stem> – restored (2).docx", "(3)" ... when that name is taken. Raises what
+    ``confirm_altered`` says which changed placeholders the owner confirmed: all (True), none
+    (False), or those whose ordinals (``plan_docx``) it holds. The new file goes into
+    ``out_dir``, made when it is missing, or else next to ``src``: "<stem> – restored.docx",
+    or "<stem> – restored (2).docx", "(3)" ... when that name is taken. Raises what
     ``DocxPackage.open`` raises for a file that is not a Word file or is protected.
     """
     pkg = DocxPackage.open(src)
     restorer = TextRestorer(case, confirm_altered)
-    copies = TextRestorer(case, confirm_altered)  # for fallback copies, its report unused
-    texts = pkg.TEXT_PARTS
-    # The comments' parts, found the way the cleaner finds them; only word/comments.xml holds
-    # text, the others (extensions, ids, people) no paragraph.
-    parts = texts + [name for name in _comment_parts(pkg, texts[0]) if name not in texts]
-    for part in parts:
-        doomed: dict[etree._Element, None] = {}
-        for p in list(pkg.xml(part).iter(_P)):
-            in_copy = next(p.iterancestors(_FALLBACK), None) is not None
-            doomed.update(dict.fromkeys(_restore_paragraph(p, copies if in_copy else restorer)))
-        for p in doomed:
-            p.getparent().remove(p)
+    _restore_package(pkg, restorer, apply=True)
     target = _new_file(
         src.parent if out_dir is None else out_dir, f"{src.stem} \N{EN DASH} restored"
     )
@@ -90,20 +115,49 @@ def restore_docx(
     return target, restorer.report
 
 
-def _restore_paragraph(p: etree._Element, restorer: TextRestorer) -> list[etree._Element]:
-    """Restores paragraph ``p``; returns the paragraphs to delete once the part is done.
+def _restore_package(pkg: DocxPackage, restorer: TextRestorer, apply: bool) -> None:
+    """Plans every paragraph the restore covers, in order, and with ``apply`` restores it.
+
+    Each paragraph is planned as it was read, before it changes, and no paragraph changes
+    another's text, so planning alone numbers the placeholders as the restore does.
+    """
+    # Fallback copies are counted apart, their report unused; with confirmations by number,
+    # which name the visible copy's placeholders, their changed ones stay as written.
+    copies = TextRestorer(restorer.case, restorer.confirm_altered is True)
+    texts = pkg.TEXT_PARTS
+    # The comments' parts, found the way the cleaner finds them; only word/comments.xml holds
+    # text, the others (extensions, ids, people) no paragraph.
+    parts = texts + [name for name in comment_parts(pkg, texts[0]) if name not in texts]
+    for part in parts:
+        doomed: dict[etree._Element, None] = {}
+        for p in list(pkg.xml(part).iter(_P)):
+            in_copy = next(p.iterancestors(_FALLBACK), None) is not None
+            found = _restore_paragraph(p, part, copies if in_copy else restorer, apply)
+            doomed.update(dict.fromkeys(found))
+        for p in doomed:
+            p.getparent().remove(p)
+
+
+def _restore_paragraph(
+    p: etree._Element, part: str, restorer: TextRestorer, apply: bool
+) -> list[etree._Element]:
+    """Plans paragraph ``p``, and with ``apply`` restores it; returns the paragraphs to delete
+    once the part is done.
 
     That is ``p`` when it stands in the body and held one of The MASK's own lines and nothing
     else, with the paragraph after it when that one is empty.
     """
     text, nodes = paragraph_nodes(p, "accepted")
-    # A placeholder in a field instruction stays (see the module's docstring).
-    instructions = [(node.start, node.end) for node in nodes if node.kind == "instr"]
-    edits = restorer.edits(text, keep=instructions)
-    if edits:
-        replace_in_paragraph(p, "accepted", edits, breaks=True)
-    if next(p.iter(*_TAKEN_OUT), None) is not None:
-        _restore_taken_out(p, restorer)
+    if next(p.iter(*_REVISIONS), None) is not None:
+        _restore_tracked(p, part, restorer, apply)
+    else:
+        # A placeholder in a field instruction stays (see the module's docstring).
+        instructions = [(node.start, node.end) for node in nodes if node.kind == "instr"]
+        edits = restorer.edits(text, keep=instructions, part=part)
+        if apply and edits:
+            replace_in_paragraph(p, "accepted", edits, breaks=True)
+    if not apply:
+        return []
     own_line = bool(text) and banner_spans(text) == [(0, len(text))]
     if not (own_line and p.getparent().tag == _BODY and _is_empty(p)):
         return []
@@ -111,19 +165,377 @@ def _restore_paragraph(p: etree._Element, restorer: TextRestorer) -> list[etree.
     return [p, after] if after is not None and _is_empty(after) else [p]
 
 
-def _restore_taken_out(p: etree._Element, restorer: TextRestorer) -> None:
-    """Restores the text that the AI's tracked changes took out of paragraph ``p``.
+# ---- tracked changes ---------------------------------------------------------------------------
 
-    The paragraph is read with every change rejected, and only the text that view alone holds is
-    planned: the rest was restored, and reported, with every change accepted. Field instructions
-    stay, as they do there.
+
+@dataclass(frozen=True)
+class _Token:
+    """A placeholder as one reading of a paragraph shows it.
+
+    ``pieces`` are the stretches of the text nodes it covers, as ``(node, start, end)`` within
+    each node's text, in document order; ``changes`` the tracked change each piece lies in (None
+    for text both readings share).
     """
-    accepted = {node.elem for node in paragraph_nodes(p, "accepted")[1]}
-    text, nodes = paragraph_nodes(p, "rejected")
-    keep = [(n.start, n.end) for n in nodes if n.elem in accepted or n.kind == "instr"]
-    edits = restorer.edits(text, keep=keep)
-    if edits:
-        replace_in_paragraph(p, "rejected", edits, breaks=True)
+
+    view: View
+    item: RestoreItem
+    pieces: tuple[tuple[etree._Element, int, int], ...]
+    changes: tuple[etree._Element | None, ...]
+
+    def touches(self, other: _Token) -> bool:
+        """Whether the two tokens cover a character of the same node."""
+        return any(
+            node is other_node and start < other_end and other_start < end
+            for node, start, end in self.pieces
+            for other_node, other_start, other_end in other.pieces
+        )
+
+
+class _Reading:
+    """Paragraph ``p`` as ``view`` reads it: its text, its nodes, and its placeholders."""
+
+    def __init__(self, p: etree._Element, view: View) -> None:
+        self.p = p
+        self.view = view
+        self.text, self.nodes = paragraph_nodes(p, view)
+
+    def tokens(self, restorer: TextRestorer) -> list[_Token]:
+        """The placeholders of this reading, but those in a field instruction."""
+        instructions = _spans([node for node in self.nodes if node.kind == "instr"])
+        tokens = []
+        for item in plan_restore(self.text, restorer.case):
+            match = item.match
+            if any(match.start < end and start < match.end for start, end in instructions):
+                continue
+            # The nodes that hold a character of it (an empty node holds none).
+            covered = [
+                n
+                for n in self.nodes
+                if n.start < n.end and n.start < match.end and match.start < n.end
+            ]
+            pieces = tuple(
+                (n.elem, max(match.start, n.start) - n.start, min(match.end, n.end) - n.start)
+                for n in covered
+            )
+            changes = tuple(_change_of(n.elem, self.p) for n in covered)
+            tokens.append(_Token(self.view, item, pieces, changes))
+        return tokens
+
+
+def _restore_tracked(p: etree._Element, part: str, restorer: TextRestorer, apply: bool) -> None:
+    """Plans and restores a paragraph with tracked changes (see the module's docstring)."""
+    accepted, rejected = _Reading(p, "accepted"), _Reading(p, "rejected")
+    shared = {node.elem for node in accepted.nodes} & {node.elem for node in rejected.nodes}
+    instructions = [n for n in accepted.nodes if n.kind == "instr"]
+    edits: dict[View, Edits] = {
+        "accepted": restorer.banner_cuts(accepted.text, keep=_spans(instructions)),
+        # In the rejected reading only what it alone holds may change.
+        "rejected": _taken_out_cuts(rejected, shared, restorer),
+    }
+    straddles: list[_Straddle] = []
+    for location in _locations(accepted.tokens(restorer) + rejected.tokens(restorer), p):
+        in_accepted = [t for t in location if t.view == "accepted"]
+        in_rejected = [t for t in location if t.view == "rejected"]
+        if len(in_accepted) > 1 or len(in_rejected) > 1:
+            # Several placeholders of one reading meet in one of the other: left to the owner.
+            restorer.hold(restorer.number(replace(location[0].item, reason=TRACKED_CHANGE), part))
+            continue
+        token_a = in_accepted[0] if in_accepted else None
+        token_r = in_rejected[0] if in_rejected else None
+        plain = _plain(token_a, token_r)
+        if plain is not None:
+            item = restorer.number(plain.item, part)
+            if restorer.restores(item) and item.entry is not None:
+                start, end = restore_span(item.match)
+                edits[plain.view].append((start, end, item.entry.value))
+            continue
+        item = restorer.number(_straddle_item(token_a, token_r), part)
+        if restorer.restores(item):
+            straddles.append(_Straddle.of(token_a, token_r, accepted, rejected, p))
+    if not apply:
+        return
+    _isolate(straddles)
+    # The rejected reading's changes touch only what it alone holds, so the accepted reading's
+    # positions still hold after them.
+    for view in ("rejected", "accepted"):
+        if edits[view]:
+            replace_in_paragraph(p, view, sorted(edits[view]), breaks=True)
+    for straddle in straddles:
+        straddle.rewrite(p)
+
+
+def _taken_out_cuts(
+    rejected: _Reading, shared: set[etree._Element], restorer: TextRestorer
+) -> Edits:
+    """Cuts for The MASK's own lines as the rejected reading alone holds them.
+
+    A line that overlaps text both readings share stays whole; of the others only the text
+    nodes are cut, so that no tab or break both readings share goes with them.
+    """
+    keep = _spans([n for n in rejected.nodes if n.elem in shared or n.kind == "instr"])
+    cuts = []
+    for start, end, _ in restorer.banner_cuts(rejected.text, keep=keep):
+        for node in rejected.nodes:
+            if node.elem not in shared and node.start < end and start < node.end:
+                cuts.append((max(start, node.start), min(end, node.end), ""))
+    return cuts
+
+
+def _spans(nodes: list[TextNode]) -> list[tuple[int, int]]:
+    return [(node.start, node.end) for node in nodes]
+
+
+def _change_of(node: etree._Element, p: etree._Element) -> etree._Element | None:
+    """The tracked change of paragraph ``p`` that ``node`` lies in, if any."""
+    for ancestor in node.iterancestors():
+        if ancestor is p:
+            return None
+        if ancestor.tag in _REVISIONS:
+            return ancestor
+    return None
+
+
+def _locations(tokens: list[_Token], p: etree._Element) -> list[list[_Token]]:
+    """The tokens grouped by the place they stand at, in document order.
+
+    A token of one reading and one of the other stand at one place when they cover a character
+    of the same node; tokens of one reading never overlap one another.
+    """
+    order = {element: index for index, element in enumerate(p.iter())}
+    groups: list[list[_Token]] = []
+    for token in tokens:
+        joined = [group for group in groups if any(token.touches(other) for other in group)]
+        merged = [token] + [other for group in joined for other in group]
+        groups = [group for group in groups if all(group is not j for j in joined)] + [merged]
+
+    def where(group: list[_Token]) -> tuple[int, int]:
+        return min((order[node], start) for token in group for node, start, _ in token.pieces[:1])
+
+    return [sorted(group, key=lambda t: t.view) for group in sorted(groups, key=where)]
+
+
+def _plain(token_a: _Token | None, token_r: _Token | None) -> _Token | None:
+    """The token to put back where it stands, if the place needs no whole-token change.
+
+    That is a token of shared text that both readings show alike, or a token wholly in one
+    insertion (shown only when the changes are accepted) or one deletion (only when rejected).
+    """
+    if token_a is not None and token_r is not None:
+        alike = token_a.pieces == token_r.pieces and set(token_a.changes) == {None}
+        return token_a if alike else None
+    token = token_a if token_a is not None else token_r
+    if token is None or len(set(token.changes)) != 1 or token.changes[0] is None:
+        return None
+    return token
+
+
+def _straddle_item(token_a: _Token | None, token_r: _Token | None) -> RestoreItem:
+    """The plan's one item for a placeholder a change runs through.
+
+    Its match is the accepted reading's form, or the rejected one's when only that reading has
+    one; its status is the weakest of the two forms: unknown, then changed, then exact.
+    """
+    tokens = [t for t in (token_a, token_r) if t is not None]
+    statuses = {t.item.status for t in tokens}
+    status: RestoreStatus = next(s for s in ("unknown", "altered", "exact") if s in statuses)
+    return replace(tokens[0].item, status=status, reason=TRACKED_CHANGE)
+
+
+@dataclass
+class _Straddle:
+    """A placeholder a tracked change runs through, and the change of whole values it becomes.
+
+    ``nodes`` are the text nodes of its place in document order, the first and the last split
+    off (``_isolate``) at ``start`` and ``end``; ``rejected`` and ``accepted`` are the place's
+    text as each reading shows it, the placeholder's value put in.
+    """
+
+    nodes: list[etree._Element]
+    start: int
+    end: int
+    rejected: str
+    accepted: str
+    properties: etree._Element | None
+    signature: dict[str, str]
+
+    @classmethod
+    def of(
+        cls,
+        token_a: _Token | None,
+        token_r: _Token | None,
+        accepted: _Reading,
+        rejected: _Reading,
+        p: etree._Element,
+    ) -> _Straddle:
+        order = {element: index for index, element in enumerate(p.iter())}
+        pieces = [piece for t in (token_a, token_r) if t is not None for piece in t.pieces]
+        first = min(pieces, key=lambda piece: (order[piece[0]], piece[1]))
+        last = max(pieces, key=lambda piece: (order[piece[0]], piece[2]))
+        lo, hi = order[first[0]], order[last[0]]
+        between = [
+            n.elem
+            for n in accepted.nodes + rejected.nodes
+            if n.kind == "t" and lo <= order[n.elem] <= hi
+        ]
+        nodes = sorted(dict.fromkeys(between), key=order.__getitem__)
+        change = next(
+            (c for node in nodes if (c := _change_of(node, p)) is not None),
+            next(p.iter(*_REVISIONS)),
+        )
+        return cls(
+            nodes=nodes,
+            start=first[1],
+            end=last[2],
+            rejected=_shown(rejected, token_r, first, last, order),
+            accepted=_shown(accepted, token_a, first, last, order),
+            properties=first[0].getparent().find(_RPR),
+            signature={k: v for k, v in change.attrib.items() if k != _ID},
+        )
+
+    def rewrite(self, p: etree._Element) -> None:
+        """Puts the change of whole values in place of the place's nodes."""
+        anchor = _anchor(self.nodes[0], p)
+        if self.rejected == self.accepted:
+            new = [self._run(self.accepted, _T)]
+        else:
+            last = _last_id(p)
+            ids = iter((last + 1, last + 2))
+            new = [
+                self._change(tag, self._run(text, text_tag), next(ids))
+                for tag, text, text_tag in (
+                    (_DEL, self.rejected, _DEL_TEXT),
+                    (_INS, self.accepted, _T),
+                )
+                if text
+            ]
+        for element in reversed(new):
+            anchor.addnext(element)
+        for node in self.nodes:
+            _prune(node, p)
+
+    def _run(self, text: str, text_tag: str) -> etree._Element:
+        run = etree.Element(_R)
+        if self.properties is not None:
+            run.append(copy.deepcopy(self.properties))
+        pieces = _MARK.split(text)
+        for index, piece in enumerate(pieces):
+            if index % 2:
+                etree.SubElement(run, _MARKS[piece])
+            elif piece:
+                node = etree.SubElement(run, text_tag)
+                node.text = piece
+                node.set(_XML_SPACE, "preserve")
+        return run
+
+    def _change(self, tag: str, run: etree._Element, number: int) -> etree._Element:
+        change = etree.Element(tag, {_ID: str(number), **self.signature})
+        change.append(run)
+        return change
+
+
+def _shown(
+    reading: _Reading,
+    token: _Token | None,
+    first: tuple[etree._Element, int, int],
+    last: tuple[etree._Element, int, int],
+    order: dict[etree._Element, int],
+) -> str:
+    """The text ``reading`` shows between ``first`` and ``last``, ``token`` given its value."""
+    lo, hi = order[first[0]], order[last[0]]
+    inside = [n for n in reading.nodes if lo <= order[n.elem] <= hi and n.kind == "t"]
+    if not inside:
+        return ""
+    begin = inside[0].start + (first[1] if inside[0].elem is first[0] else 0)
+    finish = inside[-1].start + (
+        last[2] if inside[-1].elem is last[0] else inside[-1].end - inside[-1].start
+    )
+    text = reading.text[begin:finish]
+    if token is None or token.item.entry is None:
+        return text
+    match = token.item.match
+    return text[: match.start - begin] + token.item.entry.value + text[match.end - begin :]
+
+
+def _isolate(straddles: list[_Straddle]) -> None:
+    """Splits the first and the last node of each place so that its nodes hold it alone.
+
+    A node splits into nodes of its kind, in its run, that read as it read: no reading's text
+    and no position in it changes.
+    """
+    cuts: dict[etree._Element, set[int]] = {}
+    for straddle in straddles:
+        cuts.setdefault(straddle.nodes[0], set()).add(straddle.start)
+        cuts.setdefault(straddle.nodes[-1], set()).add(straddle.end)
+    pieces: dict[tuple[etree._Element, int], etree._Element] = {}
+    ends: dict[tuple[etree._Element, int], etree._Element] = {}
+    for node, offsets in cuts.items():
+        text = node.text or ""
+        bounds = [0, *sorted(o for o in offsets if 0 < o < len(text)), len(text)]
+        made = node
+        node.text = text[bounds[0] : bounds[1]]
+        pieces[(node, 0)] = node
+        ends[(node, bounds[1])] = node
+        for begin, finish in pairwise(bounds[1:]):
+            twin = etree.Element(node.tag)
+            twin.text = text[begin:finish]
+            twin.set(_XML_SPACE, "preserve")
+            made.addnext(twin)
+            made = twin
+            pieces[(node, begin)] = twin
+            ends[(node, finish)] = twin
+        node.set(_XML_SPACE, "preserve")
+    for straddle in straddles:
+        first, last = straddle.nodes[0], straddle.nodes[-1]
+        straddle.nodes[0] = pieces.get((first, straddle.start), first)
+        straddle.nodes[-1] = ends.get((last, straddle.end), last)
+
+
+def _anchor(node: etree._Element, p: etree._Element) -> etree._Element:
+    """The element after which a change that starts at ``node`` goes.
+
+    That is ``node``'s run, or the outermost tracked change of ``p`` the run lies in. Anything
+    after ``node`` in its run first moves to a run of its own after it.
+    """
+    run = node.getparent()
+    rest = list(node.itersiblings())
+    if rest:
+        twin = etree.Element(_R)
+        properties = run.find(_RPR)
+        if properties is not None:
+            twin.append(copy.deepcopy(properties))
+        twin.extend(rest)
+        run.addnext(twin)
+    anchor = run
+    for ancestor in run.iterancestors():
+        if ancestor is p:
+            break
+        if ancestor.tag in _REVISIONS:
+            anchor = ancestor
+    return anchor
+
+
+def _prune(node: etree._Element, p: etree._Element) -> None:
+    """Takes ``node`` out, with its run when nothing but formatting is left in it, and the
+    tracked changes left empty by that."""
+    holder = node.getparent()
+    holder.remove(node)
+    while holder is not p and (holder.tag == _R or holder.tag in _REVISIONS):
+        if holder.tag == _R and any(child.tag != _RPR for child in holder):
+            return
+        if holder.tag != _R and len(holder):
+            return
+        parent = holder.getparent()
+        parent.remove(holder)
+        holder = parent
+
+
+def _last_id(p: etree._Element) -> int:
+    """The highest number any ``w:id`` of the part holds."""
+    numbers = (v for e in p.getroottree().getroot().iter() if (v := e.get(_ID)) and v.isdigit())
+    return max((int(v) for v in numbers), default=0)
+
+
+# ---- helpers -------------------------------------------------------------------------------------
 
 
 def _is_empty(element: etree._Element) -> bool:

@@ -19,6 +19,7 @@ import pytest
 from tests.fixtures.restore import CASE, NOW
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
+from themask.restore.matcher import plan_restore
 from themask.restore.text import restore_text
 
 PERSON = CASE.entries[0]
@@ -223,3 +224,19 @@ def test_an_identifier_shaped_like_a_placeholder_is_left_as_it_is() -> None:
     out, rep = restore_text("Order ID-4711 is for [PERSON_1].", CASE, confirm_altered=True)
     assert out == "Order ID-4711 is for John Smith."
     assert rep.unknown == ["ID-4711"] and (rep.restored, rep.needs_check) == (1, [])
+
+
+def test_changed_placeholders_are_confirmed_by_their_numbers() -> None:
+    # Ruling R91: a collection of ordinals, those plan_restore gives, confirms exactly those.
+    text = "Dear PERSON_1, see [person_1] and [PERSON_1]."
+    plan = plan_restore(text, CASE)
+    assert [(item.match.raw, item.ordinal) for item in plan] == [
+        ("PERSON_1", 0),
+        ("[person_1]", 1),
+        ("[PERSON_1]", 2),
+    ]
+    out, rep = restore_text(text, CASE, {1})
+    assert out == "Dear PERSON_1, see John Smith and John Smith."
+    assert [(item.match.raw, item.ordinal) for item in rep.needs_check] == [("PERSON_1", 0)]
+    assert (rep.restored, rep.altered_restored) == (2, 1)
+    assert restore_text(text, CASE, set())[0] == "Dear PERSON_1, see [person_1] and John Smith."

@@ -12,18 +12,31 @@ from themask.placeholders import PlaceholderMatch
 # only once the owner confirms it, and leave one the key does not hold as it is.
 RestoreStatus = Literal["exact", "altered", "unknown"]
 
+# The reason given for a placeholder that a tracked change of the AI runs through (ruling R90).
+TRACKED_CHANGE = "changed inside a tracked change"
+
 
 @dataclass
 class RestoreItem:
     """A placeholder in the AI's text, the key entry it stands for, and what a restore may do.
 
-    ``entry`` is None exactly when ``status`` is ``"unknown"``: the key does not hold the
-    placeholder, whether the AI kept it exact or changed it.
+    ``entry`` is the key's entry for the placeholder, None when the key does not hold it,
+    whether the AI kept it exact or changed it; ``status`` is ``"unknown"`` then. ``part`` is the
+    part of the Word file it is in ("" in a text) and ``ordinal`` its number in the plan of the
+    whole text or file, the number by which the owner confirms a changed placeholder
+    (``confirm_altered``); the match's offsets count in its paragraph's text. ``reason`` says why
+    the restore needs the owner beyond a changed form: ``TRACKED_CHANGE`` for a placeholder that
+    a tracked change of the AI runs through. Its match and entry are then those of its form with
+    the changes accepted (or rejected, when only that reading has one), and its status is the
+    weakest of its forms with and without the changes: one unknown form makes it unknown.
     """
 
     match: PlaceholderMatch
     entry: KeyEntry | None
     status: RestoreStatus
+    part: str = ""
+    ordinal: int = -1
+    reason: str = ""
 
 
 @dataclass

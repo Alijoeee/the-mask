@@ -12,7 +12,7 @@ from __future__ import annotations
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case
 from themask.placeholders import _TOKEN_RE, PlaceholderMatch, find_placeholders
-from themask.restore.report import RestoreItem
+from themask.restore.report import RestoreItem, RestoreStatus
 from themask.textnorm import normalize
 
 # The MASK's own lines as a line is compared with them: letters and digits only, case folded.
@@ -79,16 +79,17 @@ def plan_restore(text: str, case: Case) -> list[RestoreItem]:
     A placeholder the case's key holds is ``"exact"`` when the AI kept it exactly as written and
     ``"altered"`` when the AI changed it (brackets dropped or escaped, spaces, lower case, markdown
     markers); one the key does not hold is ``"unknown"``, without an entry, whatever its form.
-    Placeholders on The MASK's own lines (``banner_spans``) get no item.
+    Placeholders on The MASK's own lines (``banner_spans``) get no item. Each item's ``ordinal``
+    is its place in the list, the number ``restore_text`` knows it by.
     """
     key = {entry.placeholder: entry for entry in case.entries}
     plan: list[RestoreItem] = []
     for match in _placeholders(text):
         entry = key.get(match.placeholder)
-        if entry is None:
-            plan.append(RestoreItem(match, None, "unknown"))
-        else:
-            plan.append(RestoreItem(match, entry, "exact" if match.exact else "altered"))
+        status: RestoreStatus = (
+            "unknown" if entry is None else "exact" if match.exact else "altered"
+        )
+        plan.append(RestoreItem(match, entry, status, ordinal=len(plan)))
     return plan
 
 
