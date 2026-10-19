@@ -648,3 +648,73 @@ repository). SCRATCH = `/tmp/claude-0/-home-user-the-mask/12765d91-280c-5da7-8bf
 Size of the fix list: 20 items (F-1 … F-20): 3 Critical, 6 Important, 11 Minor-and-cheap; of these
 A1–A11 of the pointer list are covered by F-1, F-2, F-3, F-7, F-8, F-9, F-18, F-20 and the verified
 A7; sections B/C add F-10 … F-17, F-19. Nine of the twenty are one-to-ten-line changes.
+
+---
+
+## Scoped re-review of the fix wave (branch final-fixes, HEAD fa4df8e, 19 commits on 3e7d6ea)
+
+Reviewer: Claude (Fable 5.1), 19 October 2026, lean scope. Read the whole fix diff
+(`git diff 3e7d6ea..fa4df8e`: 35 files, +2,258/−274) and the implementer's report
+(`notes/sdd/final-fix-wave-report.md`, sections 1–5). Re-ran every reproduction of the review
+against the fixed worktree (`scripts/rc.py` re-pointed by `MASK_ROOT`; the one API change,
+`_whole_plan(groups)`, adapted in `twin_split_off.py`), plus three new checks
+(`rr_corpus_export_all.py`, `rr_f3_ignorable.py`, `rr_f4_anchors.py`). Nothing in the worktree
+was edited, committed, switched or pushed (`git status --short` empty before and after).
+
+### Per item
+
+| Item | Verdict | Evidence (my scripts against fa4df8e; the implementer's tests ran in the full gate) |
+|---|---|---|
+| F-1 R100 identity | **ADDRESSED** | `engine_batch.py`: six groups, each with one variant; export + `restore_text` gives the original text back verbatim: `restore: 'The unit fee is EUR 1.25 … cap is EUR 125 … deposit is $100 … refund is €100 … a.b@example.com or to ab@example.com.'`, `6 placeholders restored, 0 need your check.` One shared fold: `identity._number_key` imports `leakcheck.number_fold` (the `_COMPACT` view of `_folds`); no second copy of the decimal/zero rules anywhere in the diff. Corpus agreement: `rr_corpus_export_all.py` exports all 28 Word files unblocked, 0 allowed hits, 0 leftovers (`28 files exported in 61s; problems: []`); the suite's pass marks and round trip (inside `-m "slow or not slow"`) green. |
+| F-2 R101 media | **ADDRESSED** | `engine_batch2.py` A5: `media parts left in the masked copy: []`, `image relationships … : 0`, `w:background kept: False \| v:fill r:id kept: False`, `numPicBullet: False`, export not blocked. Corpus image files supply-05, nda-03, dpa-01 export unblocked with no `word/media/*` and no image relationship (sweep above). Planted after cleaning: `blocked: True \| hits: [('word/media/planted.png', '(picture)', 'a picture or media file the cleaner could not remove is still in the file')] \| outputs: []`. |
+| F-3 R102 namespaces | **ADDRESSED** | `a6_namespaces.py`: the unused `ns0` declaration is gone from the masked file; the used one and the element name are hits: `[('word/document.xml', 'xmlns:nw="http://[COMPANY_1].example/2026/templates"'), ('word/document.xml', 'element name="[COMPANY_1]"')]`. The mc:Ignorable trap: `rr_f3_ignorable.py` cleans all 28 corpus files, every prefix any `mc:Ignorable` names stays declared, python-docx opens every saved file: `files: 28 \| problems: []`. The corpus sweep also checks `xmlns:w14` on every masked document.xml. |
+| F-4 R112 links/marks | **ADDRESSED** | `b_links_attrs.py` + `engine_batch3.py` (real analysis, neutral domains): `masked file holds 'pieter.de.vries@…': False`, `'legal.desk@…': False`, `'jane.doe@…': False`, export not blocked; the rels part is gone. With the marked company's domain (`engine_batch2.py`) the export that was blocked at 3e7d6ea now passes with the addresses gone. Internal anchors and bookmarks (`rr_f4_anchors.py`): `bookmark names: ['bm1']`, `anchors: ['bm1', '_Toc9']`, `r:id links: 0`, link text kept, `scan hits: []`. Corpus hyperlink files (services-01, nda-01, dpa-01): no `mailto:` and no hyperlink relationship left (sweep). README sentence present. |
+| F-5 R113 notes | **ADDRESSED** | `engine_batch3.py`: review text `'…\nAcme Supplies Ltd [image removed]'`; groups: one COMPANY "Acme Supplies Ltd" with both places, no PERSON garbage; masked header `['[COMPANY_1]', ' ', '[image removed]']`. |
+| F-6 R107 reserved merge | **ADDRESSED** | `f1_reserved_merge.py`: `ValueError: [COMPANY_1] and [COMPANY_3] are both in the case's key and cannot be merged; leave them as two values.`; the survive-with-canonical and split cases are in `tests/test_review.py` (green). |
+| F-7 R105 range + G2 | **ADDRESSED** | `a10_quantity_range.py`: `'Schedule 3 - 500 pallets per week' -> [('3 - 500 pallets', 0.8)]`, the en-dash, "Section 2 - 10,000 units" and "Article 3 to 1,000 pieces" likewise; "Annex 2 Units of Measure" and "Schedule 3 Pallets and Packaging" still visible. Full pipeline: "shall schedule 500 pallets", "shall exhibit 12 units", "per article 12 pieces" now hidden as QUANTITY; G4 ("Price - Jones …") parked as ruled. |
+| F-8 R104 zip limits | **ADDRESSED** | `300 MB entry: refused in 0.00s before reading`; `30,003 entries: refused in 0.24s`; corpus files open. |
+| F-9 A1–A3 folds | **ADDRESSED** | `a1_a2_a3_leak_folds.py`: `'Fee EUR 1,250.00 100 units' -> 1 hit`, `'Fee EUR 1,250 100 units' -> 1 hit`, the other four lines 1 hit; A2: `for_bytes: {'eur10': …}` and `bytes part holding 'EUR 10.00' -> 1 hit`; A3: both `[AMOUNT_1]` and `[AMOUNT_2]` reported, and `[ID_1]` + `[PHONE_1]` for the cross-type pair. |
+| F-10 R110 conflicts | **ADDRESSED** | `b_revisions.py` B2: `has_revisions: True`; accepted `'Price: EUR 9,999'`, rejected `'Price: EUR 1,111'`; after accept/reject + clean: no `conflictIns`, no author. |
+| F-11 misplaced record | **ADDRESSED** | B1: `text after reject_all: 'Clause 1. The Buyer pays.\nClause 2. The Seller delivers.'`. |
+| F-12 hide re-enables | **ADDRESSED** | `b_review_noop.py`: `disabled after: set()`, plan places `[(0, 17), (25, 42), (49, 53)]` in both sequences. |
+| F-13 R114 twin | **ADDRESSED** | `twin_split_off.py`: twin places `[(0, 17), (25, 29), (36, 40), (51, 55)]`, `leftovers the gate would see in the twin: []`. |
+| F-14 `_merged` filter | **ADDRESSED** | By the diff (`export._merged` → `review.key_variants`) and its two tests in `tests/test_export.py` (green in the gate). |
+| F-15 R108 duplicate | **ADDRESSED** | `f2_duplicate_placeholder.py`: `ValueError: Not a stored case.` |
+| F-16 R109 | **ADDRESSED** | `LeakBlockedError` gone from `errors.py`; `tests/test_about.py` asserts it. |
+| F-17 R111 collector | **ADDRESSED** | `ui/app.GarbageCollector` (gc.disable, GUI-thread QTimer, 0,0,1,0,0,2 every 2 s, stopped after the workers are joined); the subprocess start-up test prints `collector running: True`, `gc enabled … False`, `gc enabled after: True`. |
+| F-18 owner name | **ADDRESSED** | `OWNER_NAME = "Alican Yazdic"`; About test green. |
+| F-19 wall clocks | **ADDRESSED** | Every limit ×3, the two "thirty pages" names corrected; `test_twenty_four_pages_are_scanned_in_under_six_seconds` call 0.92 s on this box. |
+| F-20 README | nothing to fix | the F-4 sentence landed. |
+
+### The fix diff itself: no new Critical or Important
+
+Read for leaks, wrong restores, crashes and visibility changes; probed the shapes above and the
+corpus. Nothing rises to Critical or Important. Parked observations (Minor, no second wave):
+
+- N-1 A damaged non-text XML part (`styles.xml` that is not XML) is now refused at clean time
+  ("not a .docx") because R101/R102 parse every XML part — fail closed; the implementer's
+  concern 1. Ruling suggested: documented limit ("re-save the file in Word").
+- N-2 The G2 companion makes a lower-case "schedule 3 pallets" / "section 3 metres" a count
+  (over-hiding side; contracts capitalise references). Owner-visible.
+- N-3 `"INCLUDE"` in `_FLATTENED_FIELDS` is not a Word field name (harmless extra).
+- N-4 R112 flattens the HYPERLINK fields a TOC is built of: the TOC text stays, the clickable
+  links go (cosmetic; the AI reads text).
+- N-5 The leak scan now builds a declaration block per element (`element.nsmap`): 24 pages scan
+  in 0.92 s against a 6 s limit (was ≈0.2 s): acceptable.
+
+### Commands (from `/home/user/the-mask-worktrees/final-fixes` at fa4df8e)
+
+| Command | Last line |
+|---|---|
+| `uv run pytest -q -m "slow or not slow" -p no:cacheprovider` (everything incl. pass marks and round trip; log SCRATCH/out/fix-suite.log) | `3343 passed, 8 skipped in 370.94s (0:06:10)` / `EXIT 0` |
+| `uv run ruff check src tests tools packaging` | `All checks passed!` |
+| `uv run ruff format --check src tests tools packaging` | `142 files already formatted` |
+| `uv run mypy src` | `Success: no issues found in 53 source files` |
+| `uv run pytest tests/test_leakcheck.py tests/docx/test_cleaner.py -q -k "twenty_four or every_corpus_file or namespace" --durations=6` | `5 passed, 197 deselected in 12.75s` (scan call 0.92 s) |
+| `uv run python SCRATCH/scripts/rr_corpus_export_all.py` | `blocked: True \| hits: [('word/media/planted.png', '(picture)', …)] \| outputs: []` (after `28 files exported in 61s; problems: []`) |
+| `uv run python SCRATCH/scripts/rr_f3_ignorable.py` | `files: 28 \| problems: []` |
+| `uv run python SCRATCH/scripts/rr_f4_anchors.py` | `scan hits: []` (bookmark `bm1`, anchors `['bm1', '_Toc9']`, no r:id links) |
+| the thirteen review scripts re-run (`a1_a2_a3…`, `a6…`, `a8…`, `a10…`, `b_revisions`, `b_zip_comment`, `b_review_noop`, `f2…`, `b_links_attrs`, `f1_reserved_merge`, `twin_split_off`, `engine_batch`, `engine_batch2`, `engine_batch3`) | outputs quoted in the table above |
+
+**Verdict: APPROVED.** F-1 … F-19 ADDRESSED, F-20 needed nothing; no new Critical or Important;
+N-1 … N-5 parked as Minor with the rulings suggested above.
