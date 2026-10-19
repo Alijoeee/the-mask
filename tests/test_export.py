@@ -44,7 +44,7 @@ from themask.export import (
     load_sources,
 )
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
-from themask.leakcheck import LeakHit
+from themask.leakcheck import MEDIA_LEFT, MEDIA_PLACEHOLDER, LeakHit
 from themask.model import Case, Finding, Group, KeyEntry, MaskedFile, PlaceholderType
 from themask.review import ReviewState
 from themask.textnorm import normalize
@@ -521,6 +521,41 @@ def test_a_place_switched_off_in_an_instruction_leaves_no_room_for_a_leftover(
     assert res.blocked
     leftovers = [(hit.part, hit.placeholder, hit.count) for hit in res.leak_hits]
     assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
+
+
+def test_a_picture_the_cleaner_could_not_remove_blocks_the_export(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R101: the leak check cannot read pixels, so a media part or an image relationship
+    # still in a masked file is a leftover, whatever points at it. Planted after the cleaning.
+    (source,) = load_sources([make_docx(para(SUPPLY))], False)
+    source.pkg_after.set_raw("word/media/planted.png", b"PNG of a signature")
+    review = by_hand(source, lists, ("Northwind Trading B.V.", COMPANY))
+    out = tmp_path / "out"
+    res = export_case([source], review, ExportOptions(out), engine, lists, lambda c: None)
+    assert res.blocked and res.outputs == [] and not out.exists()
+    assert [(hit.part, hit.placeholder, hit.context) for hit in res.leak_hits] == [
+        ("word/media/planted.png", MEDIA_PLACEHOLDER, MEDIA_LEFT)
+    ]
+    assert res.allowed_hits == []
+
+
+def test_an_image_relationship_left_behind_blocks_the_export(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    (source,) = load_sources([make_docx(para(SUPPLY))], False)
+    image = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    row = f'<Relationship Id="rId9" Type="{image}" Target="media/gone.png"/>'
+    rels = f'<Relationships xmlns="{PACKAGE_RELS}">{row}</Relationships>'
+    source.pkg_after.set_raw("word/_rels/document.xml.rels", rels.encode())
+    review = by_hand(source, lists, ("Northwind Trading B.V.", COMPANY))
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert res.blocked
+    assert [(hit.part, hit.placeholder) for hit in res.leak_hits] == [
+        ("word/_rels/document.xml.rels", MEDIA_PLACEHOLDER)
+    ]
 
 
 def test_what_nobody_marked_is_listed_once(

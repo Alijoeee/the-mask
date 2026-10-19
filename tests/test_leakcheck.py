@@ -37,9 +37,12 @@ from themask.errors import ProtectedFileError, UnsupportedFileError
 from themask.leakcheck import (
     BINARY_PART,
     FILE_NAME,
+    MEDIA_LEFT,
+    MEDIA_PLACEHOLDER,
     PART_NAME,
     LeakHit,
     hits_by_placeholder,
+    media_left,
     rescan_detection,
     scan_package,
     unverifiable,
@@ -963,6 +966,38 @@ def test_corpus_files_masked_by_the_pipeline_have_no_hits(
     masked = tmp_path / "MASKED-CORP.docx"
     pkg.save(masked)
     assert scan_package(masked, [key_of(group) for group in marked]) == []
+
+
+# ---- pictures and media (ruling R101) -----------------------------------------------------------
+
+
+def test_a_media_part_or_relationship_left_in_a_file_is_a_hit(
+    masked_docx: Path, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    assert media_left(masked_docx) == []
+    planted = plant(masked_docx, "word/media/image1.png", b"PNG", tmp_path / "with-picture.docx")
+    assert media_left(planted) == [LeakHit("word/media/image1.png", MEDIA_PLACEHOLDER, MEDIA_LEFT)]
+    image = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    row = f'<Relationship Id="rId9" Type="{image}" Target="media/gone.png"/>'
+    rels = f'<Relationships xmlns="{PACKAGE_RELS}">{row}</Relationships>'
+    linked = make_docx(para("Plain."), raw={"word/_rels/document.xml.rels": rels.encode()})
+    assert [hit.part for hit in media_left(linked)] == ["word/_rels/document.xml.rels"]
+    typed = make_docx(
+        para("Plain."),
+        raw={
+            "word/clips/intro.wav": b"RIFF",
+            "[Content_Types].xml": (
+                b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                b'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                b'<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                b'<Default Extension="xml" ContentType="application/xml"/>'
+                b'<Default Extension="wav" ContentType="audio/wav"/>'
+                b'<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+                b"</Types>"
+            ),
+        },
+    )
+    assert [hit.part for hit in media_left(typed)] == ["word/clips/intro.wav"]
 
 
 # ---- speed --------------------------------------------------------------------------------------

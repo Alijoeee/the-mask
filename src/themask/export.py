@@ -15,7 +15,7 @@ saved (ruling R83). It puts the banner on top and saves the file under a neutral
 private temporary folder. The leak gate decides on a twin of each file (ruling R84), masked the
 same way but with every place the review holds of each value of the key replaced, the places the
 owner switched off too: any value the leak check still finds in a twin is a leftover, and blocks
-the export. The files are then deleted and nothing is saved. The places the owner left visible
+the export; so does any picture or media file left in it (ruling R101). The files are then deleted and nothing is saved. The places the owner left visible
 on purpose are what the leak check finds in a file itself beyond its twin; they are listed,
 never blocking. Otherwise the detection runs again on the masked files, for what nobody marked;
 the files are written into the output folder, never over a file that is there; and the case's
@@ -46,7 +46,7 @@ from themask.docx.reader import DocText, extract_text, has_revisions
 from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
 from themask.instruction import AI_INSTRUCTION
-from themask.leakcheck import LeakHit, rescan_detection, scan_package, unverifiable
+from themask.leakcheck import LeakHit, media_left, rescan_detection, scan_package, unverifiable
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
 from themask.pdf.to_docx import pdf_to_docx
@@ -445,13 +445,21 @@ def _checked(
     left visible are what the leak check finds in the file itself beyond its twin.
     """
     path = _mask(view, plan, key, folder / name)
-    shown = scan_package(path, key)
+    shown = _scanned(path, key)
     if twin_plan.replacements == plan.replacements:
         return path, shown, []
     twins = folder / "twins"
     twins.mkdir(exist_ok=True)
-    leftovers = scan_package(_mask(view, twin_plan, key, twins / name), key)
+    leftovers = _scanned(_mask(view, twin_plan, key, twins / name), key)
     return path, leftovers, _left_visible(shown, leftovers)
+
+
+def _scanned(path: Path, key: list[KeyEntry]) -> list[LeakHit]:
+    """What the leak check finds of ``key`` in the file at ``path``, and every picture or media
+    file left in it (ruling R101): the leak check cannot read pixels, so a picture left is a
+    leftover whatever it shows.
+    """
+    return scan_package(path, key) + media_left(path)
 
 
 def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:

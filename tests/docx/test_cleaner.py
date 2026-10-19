@@ -2008,8 +2008,9 @@ BULLET = (
 )
 
 
-def test_media_that_something_else_still_uses_stays() -> None:
-    # The image of a picture bullet is kept with its link; a picture nothing uses is not.
+def test_the_image_of_a_picture_bullet_goes_with_the_bullet() -> None:
+    # Ruling R101: every media part goes, the one a picture bullet uses and the one nobody uses
+    # alike; the bullet itself goes with its image, so nothing is left dangling.
     pkg = package(
         para(f"<w:r>{picture('rId1')}</w:r>"),
         rels=[(IMAGE, "media/a.png"), (f"{REL}/numbering", "numbering.xml")],
@@ -2021,12 +2022,15 @@ def test_media_that_something_else_still_uses_stays() -> None:
             "word/media/orphan.png": b"PNG nobody uses",
         },
     )
-    clean(pkg)
-    assert [n for n in pkg.names() if "media" in n] == ["word/media/bullet.png"]
+    rep = clean(pkg)
+    assert [n for n in pkg.names() if "media" in n] == []
+    assert b"numPicBullet" not in everywhere(pkg) and rep.images == 2
+    assert "word/numbering.xml" in pkg.names()
     assert_consistent(pkg)
 
 
-def test_a_picture_that_something_else_still_uses_stays_with_its_link() -> None:
+def test_a_picture_that_something_else_still_uses_goes_as_well() -> None:
+    # Ruling R101: a picture bullet's image is a picture like any other.
     pkg = package(
         para(f"<w:r>{picture('rId1')}</w:r>"),
         rels=[(IMAGE, "media/shared.png"), (f"{REL}/numbering", "numbering.xml")],
@@ -2037,8 +2041,9 @@ def test_a_picture_that_something_else_still_uses_stays_with_its_link() -> None:
         },
     )
     rep = clean(pkg)
-    assert rep.images == 1 and "word/media/shared.png" in pkg.names()
-    assert_consistent(pkg)  # the bullet still finds its image
+    assert rep.images == 2 and "word/media/shared.png" not in pkg.names()
+    assert "word/_rels/numbering.xml.rels" not in pkg.names()
+    assert_consistent(pkg)
 
 
 def test_a_part_takes_the_parts_only_it_used_and_leaves_the_shared_ones() -> None:
@@ -2058,7 +2063,147 @@ def test_a_part_takes_the_parts_only_it_used_and_leaves_the_shared_ones() -> Non
     )
     rep = clean(pkg)
     assert {"word/chunk/afchunk.html", "word/chunk/logo.png"} <= set(rep.parts_removed)
-    assert "word/chunk/shared.png" in pkg.names()
+    # Ruling R101: the picture the bullets share is a picture, and goes with the bullet.
+    assert "word/chunk/shared.png" not in pkg.names()
+    assert_consistent(pkg)
+
+
+# ---- pictures that are not in the text (ruling R101) ---------------------------------------------
+
+THEME_WITH_IMAGE = (
+    '<a:theme name="Acme Corporate"><a:themeElements><a:clrScheme name="Office"/>'
+    '<a:fontScheme name="Office"/><a:fmtScheme name="Office"><a:fillStyleLst>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+    '<a:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>'
+    '<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+    '<a:blipFill><a:blip r:embed="rId1"/></a:blipFill>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>'
+    "</a:fmtScheme></a:themeElements></a:theme>"
+)
+PICTURE_BULLETS = (
+    BULLET + '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>'
+    '<w:numFmt w:val="bullet"/><w:lvlPicBulletId w:val="0"/><w:lvlText w:val=""/>'
+    '<w:lvlJc w:val="left"/></w:lvl></w:abstractNum>'
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+)
+MODEL3D_NS = "http://schemas.microsoft.com/office/drawing/2017/model3d"
+MODEL3D = (
+    '<w:drawing><wp:inline><wp:docPr id="7" name="3D Model 7"/><a:graphic>'
+    f'<a:graphicData uri="{MODEL3D_NS}"><am3d:model3d xmlns:am3d="{MODEL3D_NS}" r:embed="rId1">'
+    "<am3d:spPr/></am3d:model3d></a:graphicData></a:graphic></wp:inline></w:drawing>"
+)
+
+
+def media_everywhere() -> DocxPackage:
+    """The reviewer's file: a picture in the page background, a picture bullet, an image in the
+    theme, a VML shape with a picture fill, an orphan image relationship and a header picture."""
+    background = (
+        '<w:background w:color="FFFFFF"><v:background id="_x0000_s1025" o:bwmode="white">'
+        '<v:fill r:id="rId3" o:title="letterhead" recolor="t" type="frame"/></v:background>'
+        "</w:background>"
+    )
+    body = (
+        para(run("Acme Supplies Ltd (the Supplier) and Brightwater Foods Ltd (the Buyer) agree."))
+        + '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+        + run("A bulleted item with a picture bullet.")
+        + "</w:p>"
+        + para(
+            '<w:r><w:pict><v:rect id="_x0000_s1026" style="width:100pt;height:50pt">'
+            '<v:fill r:id="rId4" type="frame"/></v:rect></w:pict></w:r>',
+            run("Contact: John Carter, Director."),
+        )
+        + '<w:sectPr><w:headerReference w:type="default" r:id="rId5"/></w:sectPr>'
+    )
+    header = para(
+        run("Acme Supplies Ltd"),
+        '<w:r><w:pict><v:shape style="width:60pt;height:20pt"><v:imagedata r:id="rId1" o:title="logo"/>'
+        "</v:shape></w:pict></w:r>",
+    )
+    pkg = package(
+        body,
+        rels=[
+            (f"{REL}/numbering", "numbering.xml"),
+            (THEME_REL, "theme/theme1.xml"),
+            (IMAGE, "media/background.png"),
+            (IMAGE, "media/fill.png"),
+            (HEADER, "header1.xml"),
+            (IMAGE, "media/orphan.png"),
+        ],
+        parts={
+            "word/numbering.xml": part("w:numbering", PICTURE_BULLETS),
+            "word/_rels/numbering.xml.rels": rels_xml([(IMAGE, "media/bullet.png")]),
+            "word/theme/theme1.xml": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                + THEME_WITH_IMAGE.replace("<a:theme ", f"<a:theme {DECLARATIONS} ", 1)
+            ).encode(),
+            "word/theme/_rels/theme1.xml.rels": rels_xml([(IMAGE, "../media/themeimage.png")]),
+            **in_header(header),
+            "word/_rels/header1.xml.rels": rels_xml([(IMAGE, "media/logo.png")]),
+            **{
+                f"word/media/{name}.png": b"PNG " + name.encode()
+                for name in ("bullet", "themeimage", "logo", "background", "fill", "orphan")
+            },
+        },
+        types={
+            "word/numbering.xml": f"{WML}.numbering+xml",
+            "word/theme/theme1.xml": "application/vnd.openxmlformats-officedocument.theme+xml",
+            "word/header1.xml": HEADER_TYPE,
+        },
+    )
+    # The document's root holds the background before the body, as Word writes it.
+    root = pkg.xml("word/document.xml")
+    root.insert(0, etree.fromstring(f"<w:root {DECLARATIONS}>{background}</w:root>")[0])
+    return pkg
+
+
+def test_every_picture_goes_wherever_it_is_reached_from(tmp_path: Path) -> None:
+    # Ruling R101: pixels are what is marked (a logo is the company, a signature the person).
+    pkg = media_everywhere()
+    rep = clean(pkg)
+    assert not [n for n in pkg.names() if n.startswith("word/media/")]
+    assert all(f"{IMAGE}" not in pkg.raw(n).decode() for n in pkg.names() if n.endswith(".rels"))
+    document = pkg.raw("word/document.xml")
+    assert b"background" not in document and b'r:id="rId4"' not in document
+    assert b"<v:fill" in document  # a fill without its picture is a plain fill
+    numbering = pkg.raw("word/numbering.xml")
+    assert b"numPicBullet" not in numbering and b"lvlPicBulletId" not in numbering
+    theme = pkg.xml("word/theme/theme1.xml")
+    assert b"blip" not in pkg.raw("word/theme/theme1.xml")
+    for fills in theme.iter(f"{{{THEME_NS}}}fillStyleLst", f"{{{THEME_NS}}}bgFillStyleLst"):
+        assert len(fills) == 3 and all(f.tag == f"{{{THEME_NS}}}solidFill" for f in fills)
+    header_text = text_of(pkg).splitlines()[-1]
+    assert header_text.startswith("Acme Supplies Ltd") and header_text.endswith(IMAGE_NOTE)
+    # The header picture, the background, the bullet, the theme's two images and the VML fill.
+    assert rep.images == 6
+    assert set(rep.parts_removed) >= {f"word/media/{n}.png" for n in ("bullet", "orphan", "logo")}
+    assert_consistent(pkg)
+    saved = tmp_path / "cleaned.docx"
+    pkg.save(saved)
+    assert docx.Document(str(saved)).paragraphs[0].text.startswith("Acme Supplies Ltd")
+
+
+def test_a_3d_model_is_a_picture_with_its_part() -> None:
+    pkg = package(
+        para(run("See "), f"<w:r>{MODEL3D}</w:r>"),
+        rels=[(f"{REL}/model3d", "media/model1.glb")],
+        parts={"word/media/model1.glb": b"glTF"},
+        types={"word/media/model1.glb": "model/gltf-binary"},
+    )
+    rep = clean(pkg)
+    assert rep.images == 1 and text_of(pkg) == f"See {IMAGE_NOTE}"
+    assert pkg.names() == ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]
+    assert_consistent(pkg)
+
+
+def test_a_media_part_goes_by_its_content_type_wherever_it_is() -> None:
+    # An audio clip the document plays, under a folder of its own and an Override type.
+    pkg = package(
+        parts={"word/clips/intro.wav": b"RIFF", "word/stills/frame.bin": b"PNG"},
+        types={"word/clips/intro.wav": "audio/wav", "word/stills/frame.bin": "image/png"},
+    )
+    rep = clean(pkg)
+    assert set(rep.parts_removed) == {"word/clips/intro.wav", "word/stills/frame.bin"}
     assert_consistent(pkg)
 
 

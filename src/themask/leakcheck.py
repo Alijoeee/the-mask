@@ -41,6 +41,10 @@ It searches:
   which stray bytes do not spell by chance (ruling R14 b);
 * the file's own name and the name of every part.
 
+``media_left`` is the gate's other half (ruling R101): the leak check cannot read pixels, so every
+picture or media part still in the file, and every relationship to one, is reported as a hit of
+its own, whatever points at it.
+
 What is the file format's own vocabulary and never the document's content is not searched (rulings
 R64, R66, R67): the namespace and schema addresses (values starting with "http://schemas.",
 "http://www.w3.org" or "urn:schemas-microsoft-com") and the type of every relationship; the fonts
@@ -91,8 +95,9 @@ from lxml import etree
 from themask.detect.grouping import PersonName
 from themask.detect.pipeline import CombinedText, analyze
 from themask.detect.sweep import crosses_a_line, is_searchable, stands_as_a_name
+from themask.docx.cleaner import MEDIA_RELATIONSHIPS, MEDIA_TYPES
 from themask.docx.masker import FIELD_NAMES, FORMAT_SWITCHES, INSTRUCTION_WORD, percent_decoded
-from themask.docx.package import NS, RELS_NS, TYPES_NS, DocxPackage
+from themask.docx.package import CONTENT_TYPES, NS, RELS_NS, TYPES_NS, DocxPackage
 from themask.docx.reader import extract_text
 from themask.model import Group, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
@@ -113,6 +118,9 @@ FILE_NAME = "<file name>"
 PART_NAME = "<part name>"
 # What a hit in the bytes of a part shows when the bytes round it are not plain text.
 BINARY_PART = "<binary part>"
+# The placeholder and the context of a hit that is a picture or media file left in the file.
+MEDIA_PLACEHOLDER = "(picture)"
+MEDIA_LEFT = "a picture or media file the cleaner could not remove is still in the file"
 
 # The types whose values are names, compared by their words (ruling R63); the others are numbers
 # and codes, compared by their letters and digits alone.
@@ -207,6 +215,67 @@ def scan_package(path: Path, entries: list[KeyEntry]) -> list[LeakHit]:
     for rest in by_surname.values():
         hits += rest
     return _counted(hits)
+
+
+def media_left(path: Path) -> list[LeakHit]:
+    """Every picture or media file still in the Word file at ``path``, as hits (ruling R101).
+
+    One hit for each part under ``word/media/`` and for each part whose content type is an image,
+    a sound, a video or a 3D model, and one for each relationships part that holds a relationship
+    of such a type, in the order of the zip; each with ``MEDIA_PLACEHOLDER`` for its placeholder
+    and ``MEDIA_LEFT`` for its context, so the dialog lists it with the leftovers. A relationships
+    part or a content types part that cannot be read counts as a hit too: what cannot be checked
+    is not passed. Raises what reading the zip raises.
+    """
+    with zipfile.ZipFile(path) as archive:
+        parts = {info.filename: archive.read(info) for info in archive.infolist()}
+    types = _content_types_of(parts)
+    hits = []
+    for name, data in parts.items():
+        media = name.casefold().startswith("word/media/") or (
+            types is None or types.get(name, "").startswith(MEDIA_TYPES)
+        )
+        if media or (_is_rels_part(name) and _relates_to_media(data)):
+            hits.append(LeakHit(name, MEDIA_PLACEHOLDER, MEDIA_LEFT))
+    return hits
+
+
+def _content_types_of(parts: dict[str, bytes]) -> dict[str, str] | None:
+    """The content type of each part, in lower case, from the package's content types part:
+    its Override, else the Default for its extension; None when that part cannot be read."""
+    root = _parsed(parts[CONTENT_TYPES]) if CONTENT_TYPES in parts else None
+    if root is None:
+        return None
+    overrides = {
+        _unquoted(o.get("PartName", "")).lstrip("/").casefold(): o.get("ContentType", "")
+        for o in root.iterchildren(_OVERRIDE)
+    }
+    defaults = {
+        d.get("Extension", "").casefold(): d.get("ContentType", "")
+        for d in root.iterchildren(_DEFAULT)
+    }
+    types = {}
+    for name in parts:
+        found = overrides.get(_unquoted(name).casefold())
+        if found is None:
+            file = posixpath.basename(name)
+            found = defaults.get(file.rpartition(".")[2].casefold()) if "." in file else None
+        if found is not None:
+            types[name] = found.strip().casefold()
+    return types
+
+
+def _is_rels_part(name: str) -> bool:
+    return name.endswith(".rels") and posixpath.basename(posixpath.dirname(name)) == "_rels"
+
+
+def _relates_to_media(data: bytes) -> bool:
+    """Whether a relationships part holds a relationship to a picture or media file, or cannot
+    be read."""
+    root = _parsed(data)
+    return root is None or any(
+        r.get("Type", "").casefold().endswith(MEDIA_RELATIONSHIPS) for r in root.iter(_RELATIONSHIP)
+    )
 
 
 def unverifiable(entries: list[KeyEntry]) -> list[str]:
