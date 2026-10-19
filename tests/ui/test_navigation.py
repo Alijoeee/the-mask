@@ -1,4 +1,7 @@
-"""Moving between the screens: the tool bar, and the way from the review to the export dialog."""
+"""Moving between the screens: the sidebar and the Settings action, and the way from the review to
+the export dialog. (The window was rebuilt for the design pass: the five buttons of the old tool
+bar became the sidebar's three sections, the primary action and the Settings action.)
+"""
 
 from __future__ import annotations
 
@@ -7,8 +10,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QToolBar
 
 from themask.docx.package import DocxPackage
 from themask.docx.reader import extract_text
@@ -27,22 +28,20 @@ if TYPE_CHECKING:
     from themask.ui.app import AppContext
 
 
-def actions_of(window: MainWindow) -> dict[str, QAction]:
-    """The actions of the window's tool bar, by their text."""
-    bar = window.findChild(QToolBar)
-    assert bar is not None
-    return {action.text(): action for action in bar.actions()}
+def click_section(window: MainWindow, name: str) -> None:
+    """Click the sidebar's section ``name`` ("mask", "restore" or "cases"), as the owner does."""
+    window.sidebar.items[name].click()
 
 
-def test_the_tool_bar_moves_between_the_screens(qtbot: QtBot, app_ctx: AppContext) -> None:
+# Renamed from test_the_tool_bar_moves_between_the_screens: the sidebar moves between them now.
+def test_the_sidebar_moves_between_the_screens(qtbot: QtBot, app_ctx: AppContext) -> None:
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
-    actions = actions_of(w)
-    assert list(actions) == ["Home", "Review", "Restore", "Cases", "Settings"]
-    for text, name in (("Restore", "restore"), ("Cases", "cases"), ("Settings", "settings")):
-        actions[text].trigger()
+    assert list(w.sidebar.items) == ["mask", "restore", "cases"]  # Home, Restore, Cases
+    for section, name in (("restore", "restore"), ("cases", "cases")):
+        click_section(w, section)
         assert w.current_screen_name() == name
-    actions["Home"].trigger()
+    click_section(w, "mask")
     assert w.current_screen_name() == "home"
 
 
@@ -51,13 +50,16 @@ def test_the_review_can_be_returned_to_once_there_is_one(
 ) -> None:
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
-    review = actions_of(w)["Review"]
-    assert not review.isEnabled()  # nothing has been analysed yet
+    # On the home screen the primary action is "Review", which was the tool bar's Review button.
+    review = w.primary_action
+    assert review.text() == "Review" and not review.isEnabled()  # nothing has been analysed yet
     with qtbot.waitSignal(w.analysisFinished, timeout=60000):
         w.open_files([corpus / "supply-01.docx"], redline_split=False)
-    assert review.isEnabled() and w.current_screen_name() == "review"
-    actions_of(w)["Settings"].trigger()
-    assert w.current_screen_name() == "settings"
+    assert w.current_screen_name() == "review"
+    w.settings_action.trigger()  # a window over the review: the screen under it does not change
+    assert w.settings_window.isVisible() and w.current_screen_name() == "review"
+    click_section(w, "mask")
+    assert w.current_screen_name() == "home" and review.isEnabled()
     review.trigger()
     assert w.current_screen_name() == "review"
     # The review is as it was left: the owner's work is not lost by looking at another screen.
@@ -91,7 +93,7 @@ def test_the_work_done_in_the_review_survives_a_visit_to_another_screen(
     switched_off = [g.id for g in review.groups if not g.enabled]
     assert len(switched_off) == 1
     w.show_home()
-    actions_of(w)["Review"].trigger()
+    w.primary_action.trigger()  # "Review"
     assert w.review_screen.review is review
     assert [g.id for g in review.groups if not g.enabled] == switched_off
     item = w.review_screen.tree_item_for(switched_off[0])
@@ -104,11 +106,12 @@ def test_the_cases_and_settings_screens_are_the_real_ones(
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
     assert isinstance(w.cases_screen, CasesScreen) and isinstance(w.settings_screen, SettingsScreen)
-    actions_of(w)["Cases"].trigger()
+    click_section(w, "cases")
     assert w.current_screen_name() == "cases" and w.cases_screen.isVisibleTo(w)
-    assert not w.settings_screen.isVisibleTo(w)
-    actions_of(w)["Settings"].trigger()
-    assert w.settings_screen.isVisibleTo(w) and not w.cases_screen.isVisibleTo(w)
+    assert not w.settings_window.isVisible()
+    w.settings_action.trigger()  # the Settings are in a window of their own
+    assert w.settings_screen.isVisibleTo(w.settings_window) and w.settings_window.isVisible()
+    assert w.cases_screen.isVisibleTo(w)  # and the screen under it is as it was
 
 
 def test_the_cases_screen_shows_the_cases_as_the_store_holds_them_when_it_is_shown(
@@ -118,7 +121,7 @@ def test_the_cases_screen_shows_the_cases_as_the_store_holds_them_when_it_is_sho
     qtbot.addWidget(w)
     assert w.cases_screen.table.rowCount() == 0
     app_ctx.case_store.save(sample_case)  # an export made it while another screen was showing
-    actions_of(w)["Cases"].trigger()
+    click_section(w, "cases")
     assert w.cases_screen.table.rowCount() == 1
 
 
@@ -128,7 +131,7 @@ def test_the_settings_screen_shows_the_lists_as_they_are_kept_when_it_is_shown(
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
     app_ctx.user_lists.add_always("Project Falcon")  # what the review's "Always hide" button does
-    actions_of(w)["Settings"].trigger()
+    w.settings_action.trigger()
     assert w.settings_screen.always_edit.toPlainText() == "Project Falcon"
 
 
@@ -181,7 +184,7 @@ def test_the_restore_screen_shows_the_cases_as_the_store_holds_them_when_it_is_s
     qtbot.addWidget(w)
     assert w.restore_screen.case_combo.count() == 0
     app_ctx.case_store.save(sample_case)  # an export made it while another screen was showing
-    actions_of(w)["Restore"].trigger()
+    click_section(w, "restore")
     assert w.current_screen_name() == "restore"
     assert w.restore_screen.case_combo.currentData() == sample_case.id
 

@@ -62,6 +62,14 @@ class Tokens:
     drop zone) and ``accent_text_on_soft``. The notice colours are for a line that asks the owner
     to look (``notice_card_bg`` is the paler one for a whole card); ``success`` and ``danger``
     colour a mark, ``success_bg`` its background and ``success_text`` a sentence.
+
+    Contrast (WCAG): ``text`` and ``secondary`` on every ground, ``accent_text_on_soft`` on
+    ``accent_soft``, ``notice_text`` on the notice backgrounds, and ``danger`` and ``success_text``
+    on ``ground`` and ``panel`` are all 4.5:1 or more in both appearances (tests/ui/test_theme.py).
+    The approved mockups use three pairs that are not, and they are kept as approved: white on the
+    accent (4.36:1 light, 2.88:1 dark: ``on_accent`` is the one token to change), the accent as
+    text on a panel or on ``accent_soft`` (4.36:1 and 3.5:1 light) and ``tertiary`` on a panel
+    (3.0:1 light, 3.2:1 dark), which is for hints and for what is switched off.
     """
 
     ground: str
@@ -332,9 +340,78 @@ QProgressBar::chunk { background: $accent; border-radius: 3px; }
 """)
 
 
+# The parts of the window: the tool bar, the sidebar's notes, the home screen. The tool bar's
+# primary action is a button whose name is primaryAction; the sidebar's sections and the toggle
+# paint themselves from the palette.
+_SHELL = Template("""
+QToolBar#mainToolBar {
+    background: $chrome;
+    border: none;
+    border-bottom: 1px solid $border;
+    spacing: 12px;
+    padding: 0 16px;
+}
+QToolBar#mainToolBar QToolButton#primaryAction {
+    background: $accent;
+    color: $on_accent;
+    border: 1px solid $accent;
+    border-radius: 7px;
+    padding: 0 14px;
+    min-height: 26px;
+    font-weight: 600;
+}
+QToolBar#mainToolBar QToolButton#primaryAction:hover {
+    background: $accent_hover;
+    border-color: $accent_hover;
+}
+QToolBar#mainToolBar QToolButton#primaryAction:focus { border-color: $text; }
+QToolBar#mainToolBar QToolButton#primaryAction:disabled {
+    background: $border;
+    border-color: $border;
+    color: $tertiary;
+}
+QLabel#toolbarTitle { color: $text; font-size: 13px; font-weight: 600; }
+QLabel#toolbarCaption { color: $secondary; font-size: 11px; }
+
+QFrame#sidebar { background: $chrome; border: none; border-right: 1px solid $border; }
+QLabel#sidebarNote { color: $secondary; font-size: 11px; }
+QLabel#legendTitle { color: $text; font-size: 11px; font-weight: 600; }
+
+QScrollArea#homeScroll, QWidget#homeContent { background: transparent; border: none; }
+QLabel#sectionTitle { color: $secondary; }
+QFrame#recentPanel { background: $panel; border: 1px solid $border; border-radius: 12px; }
+QFrame#recentRow { background: transparent; border: none; }
+QFrame#recentRow[last="false"] { border-bottom: 1px solid $hairline; }
+QLabel#caseCode {
+    color: $accent;
+    background: $accent_soft;
+    border-radius: 6px;
+    padding: 3px 8px;
+}
+QLabel#caseFiles { font-weight: 600; }
+QLabel#caseCaption { color: $secondary; font-size: 12px; }
+
+QPushButton#link {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    min-height: 0;
+    color: $accent;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#link:hover { background: transparent; color: $accent_hover; }
+QPushButton#link:pressed { background: transparent; color: $accent_hover; }
+QPushButton#link:focus { background: transparent; text-decoration: underline; }
+QPushButton#link:disabled { background: transparent; color: $tertiary; }
+""")
+
+
 def stylesheet(appearance: str) -> str:
     """The application stylesheet of ``appearance``."""
-    return _TEMPLATE.substitute(asdict(tokens(appearance)))
+    values = asdict(tokens(appearance))
+    return _TEMPLATE.substitute(values) + _SHELL.substitute(values)
 
 
 # ---- the fonts ----------------------------------------------------------------------------------

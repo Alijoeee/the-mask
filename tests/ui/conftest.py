@@ -2,8 +2,9 @@
 
 A modal dialog that nobody can answer would hang the whole run. Every test here starts with the
 dialogs replaced by a function that fails the test; a test that expects a dialog replaces it with
-a recorder of its own (``monkeypatch``) and says what it expects. Python's garbage collector is
-kept out of the worker threads (``collect_in_the_main_thread_only``).
+a recorder of its own (``monkeypatch``) and says what it expects. The crossfade between screens
+is off (``no_animations``). Python's garbage collector is kept out of the worker threads
+(``collect_in_the_main_thread_only``).
 """
 
 from __future__ import annotations
@@ -29,6 +30,16 @@ def no_unanswerable_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(QMessageBox, name, staticmethod(_refuse))
     for name in ("getOpenFileNames", "getExistingDirectory", "getSaveFileName"):
         monkeypatch.setattr(QFileDialog, name, staticmethod(_refuse))
+
+
+@pytest.fixture(autouse=True)
+def no_animations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The crossfade between screens is off: no test looks at it, and a test of it switches it
+    on again (``monkeypatch.setattr(main_window, "ANIMATIONS", True)``).
+    """
+    from themask.ui import main_window
+
+    monkeypatch.setattr(main_window, "ANIMATIONS", False)
 
 
 @pytest.fixture(autouse=True)
