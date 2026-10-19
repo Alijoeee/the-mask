@@ -582,6 +582,11 @@ def test_names_are_not_job_titles(name):
         "APPENDIX 1",
         "ANNEX II",
         "Schedule 3 Prices",
+        # The titles of the corpus's contracts, as their running headers write them.
+        "Supply Agreement",
+        "Logistics Services Agreement",
+        "Non-Disclosure Agreement",
+        "Data Processing Agreement",
     ],
 )
 def test_contract_wording(text):
@@ -985,6 +990,35 @@ def test_model_findings_never_cross_a_tab(engine):
     fs = engine.analyze(t)
     assert not [f for f in fs if "\t" in f.text]
     assert "Title" not in texts(fs, t) and "Smith" in texts(fs, t)
+
+
+def test_model_findings_never_cross_a_running_header_separator(engine):
+    # The model takes a running header for one company: the two parties' short names and the
+    # title. Each name is a finding of its own, and the title stays visible.
+    t = (
+        "Northwind Trading B.V. and Thamesgate Catering plc sign.\n"
+        "Northwind / Thamesgate \N{EM DASH} Supply Agreement\n"
+        "Confidential \N{MIDDLE DOT} Northwind / Thamesgate \N{MIDDLE DOT} Page 1"
+    )
+    header = t.index("Northwind /")
+    fs = [f for f in engine.analyze(t) if f.start >= header]
+    assert [(f.type, f.text) for f in fs if f.start < t.index("Confidential")] == [
+        (COMPANY, "Northwind"),
+        (COMPANY, "Thamesgate"),
+    ]
+    assert not [f for f in fs if {"/", "\N{EM DASH}", "\N{MIDDLE DOT}"} & set(f.text)]
+
+
+def test_the_title_in_a_running_header_stays_visible(engine):
+    t = (
+        "Kanaalzicht Logistics B.V. and Harbourline Retail Ltd sign.\n"
+        "Kanaalzicht / Harbourline \N{EM DASH} Logistics Services Agreement"
+    )
+    header = t.index("Kanaalzicht /")
+    assert texts([f for f in engine.analyze(t) if f.start >= header], t) == {
+        "Kanaalzicht",
+        "Harbourline",
+    }
 
 
 def test_title_lines_and_job_titles_are_never_findings(engine):

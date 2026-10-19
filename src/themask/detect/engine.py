@@ -11,7 +11,8 @@ only next to an address the rules found ("the laws of the Netherlands" stays vis
 a short form of a name in the document, which it then is (ruling R21: the footer's "Greystone" for
 Greystone Logistics Ltd); a company it finds with neither a legal form nor a rule behind it is
 marked for checking; a job title is no name; and a finding never runs from one line into the next,
-nor across a tab into the next field of a form.
+nor across a tab into the next field of a form, nor across the separators of a running header
+from one party's name to the other's.
 Overlapping findings are kept, for the analysis pipeline to decide between, except that a rule's
 finding replaces the model's on the same span.
 
@@ -144,8 +145,14 @@ _CLOSING_BRACKETS = {")": "(", "]": "[", "}": "{"}
 _PLACE_GAP = 2
 # A part of a model finding that stands on a line of its own needs this many visible characters.
 _MIN_PART_CHARACTERS = 2
-# What a model finding is cut at: a line break, or a tab, which parts the fields of a form.
-_PART_BREAK = re.compile("[\n\t]")
+# What a model finding is cut at: a line break; a tab, which parts the fields of a form; and a
+# slash, dash, dot or bar with spaces round it, which parts the names and the title of a running
+# header ("Northwind / Thamesgate \N{EM DASH} Supply Agreement", "Confidential \N{MIDDLE DOT}
+# Northwind / Thamesgate").
+_PART_BREAK = re.compile(
+    "[\n\t]|[ \N{NO-BREAK SPACE}]+[/|\N{EM DASH}\N{EN DASH}\N{MIDDLE DOT}\N{BULLET}-]"
+    "[ \N{NO-BREAK SPACE}]+"
+)
 # A name's first word is one of its short forms when it has this many letters and is not one of
 # COMMON_WORDS ("Greystone" of Greystone Logistics Ltd, not "General" of General Supplies Ltd).
 _MIN_SHORT_FORM_LETTERS = 4
@@ -286,21 +293,27 @@ def _checked_by_rules(
 
 
 def _lines_of(text: str, finding: Finding) -> list[Finding]:
-    """A model finding cut at its line breaks and its tabs, keeping each part with at least two
-    visible characters that names somebody: the model can swallow the heading on the next line
-    ("Northwind Trading B.V.\\nCUSTOMER"), the label of the next line ("...\\nAttention:"), the
-    start of a job title ("JANE SMITH\\nManaging") or, across a tab, the next field of a form
-    ("Smith\\tTitle:", ruling R58).
+    """A model finding cut at its line breaks, its tabs and the separators of a running header
+    (``_PART_BREAK``), keeping each part with at least two visible characters that names
+    somebody: the model can swallow the heading on the next line ("Northwind Trading
+    B.V.\\nCUSTOMER"), the label of the next line ("...\\nAttention:"), the start of a job title
+    ("JANE SMITH\\nManaging"), across a tab the next field of a form ("Smith\\tTitle:", ruling
+    R58), and a running header whole: both parties and the title ("Northwind / Thamesgate -
+    Supply Agreement", with an em dash).
     """
     if finding.source != "model" or _PART_BREAK.search(finding.text) is None:
         return [finding]
     parts = []
-    offset = finding.start
-    for line in _PART_BREAK.split(finding.text):
+    piece_start = 0
+    for piece_end, next_start in [
+        *((b.start(), b.end()) for b in _PART_BREAK.finditer(finding.text)),
+        (len(finding.text), len(finding.text)),
+    ]:
+        line = finding.text[piece_start:piece_end]
         stripped = line.strip()
-        start = offset + line.find(stripped)
+        start = finding.start + piece_start + line.find(stripped)
         end = start + len(stripped)
-        offset += len(line) + 1
+        piece_start = next_start
         visible = sum(not character.isspace() for character in stripped)
         if visible >= _MIN_PART_CHARACTERS and not _names_nobody(text, start, end):
             parts.append(replace(finding, start=start, end=end, text=stripped))

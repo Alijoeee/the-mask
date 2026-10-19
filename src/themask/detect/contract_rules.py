@@ -118,8 +118,9 @@ _NOT_IN_A_NAME = _FUNCTION_WORDS | _LABEL_WORDS | _ROLE_WORDS
 _NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS
 _NOT_A_PARTY = _NOT_IN_A_COMPANY | _COUNTRIES | _CURRENCIES | frozenset({"company", "companies"})
 
-# The words of a contract's own headings ("TERMINATION", "GOVERNING LAW"): with the roles and the
-# labels, the words a part of a model finding may consist of and still name nobody.
+# The words of a contract's own headings ("TERMINATION", "GOVERNING LAW") and titles ("LOGISTICS
+# SERVICES AGREEMENT", "NON-DISCLOSURE AGREEMENT"): with the roles and the labels, the words a
+# part of a model finding may consist of and still name nobody.
 _HEADING_WORDS = _vocabulary(
     """
     operative provisions agreed terms term termination duration commencement renewal expiry notices
@@ -136,7 +137,7 @@ _HEADING_WORDS = _vocabulary(
     support maintenance hosting access staff non-solicitation competition exclusivity survival
     effect consequences return materials processing transfers breach breaches remedy part parts
     attachment attachments date dates period periods effective completion closing exchange purpose
-    purposes and of the for to in on &
+    purposes logistics non-disclosure and of the for to in on &
     """
 )
 _CONTRACT_WORDS = _ROLE_WORDS | _LABEL_WORDS | _HEADING_WORDS
