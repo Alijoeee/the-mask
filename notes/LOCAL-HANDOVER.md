@@ -17,7 +17,10 @@ below is on GitHub (github.com/Alijoeee/the-mask). Read in this order: this file
   contrast) COMPLETE, NOT YET REVIEWED. 12 commits on 4bbde49. Report: notes/design/d1-report.md;
   screenshots: notes/design/d1-shots/. Gate at its head: tests/ui 640 passed; full suite 3,614 at b106274.
 - `design-d2` — D2 (review screen): see "State of D2/D3" below.
-- `design-d3` — D3 (export sheet, restore, cases): see "State of D2/D3" below.
+- `design-d3` at **a7934c6** — D3 (export sheet in four states, restore screen as cards, cases table and
+  detail card, shared `cards.py`/`restore_parts.py`) COMPLETE, NOT YET REVIEWED. 4 commits on D1's 4146e37.
+  Report: notes/design/d3-report.md (saved by the controller; section 10 = the exact wiring for the
+  integration step and the DropZone adoption). Gate at its head: tests/ui 603, full suite 3,593 green.
 - `task-22`, `task-24`, `task-25` — old checkpoint branches, all merged into mac-v1; delete at will.
 - `controller-notes` — this folder: ledger, briefs, reports, RULINGS.md, the design brief, the mockup sources
   (`notes/design/mockups/`), the reports and screenshots of the design pass.
