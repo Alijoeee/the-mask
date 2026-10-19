@@ -28,11 +28,76 @@ The window opens at once and says "Loading…" for a few seconds while it loads 
 Drop a Word or PDF contract on it (or use "Choose files…") to analyse it and review what it found.
 The export and the restore screens are added in later steps of the build plan.
 
+## Install on your Mac
+
+The MASK is also a normal Mac app, "The MASK.app". It is built for Apple silicon and asks for
+macOS 14 or later. It is signed "ad hoc", not by an Apple developer: that is enough to run on the
+Mac it was built on, and there is no installer, just the app.
+
+### Build it
+
+You need [uv](https://docs.astral.sh/uv/) and Xcode's command line tools. Then:
+
+```bash
+bash packaging/build_mac.sh
+```
+
+This is the one step that needs the network. Briefcase downloads its Python for macOS and the
+pinned packages (the language model too), a few hundred MB that it keeps in a cache, so the next
+build is quicker. The build takes a few minutes, starts from scratch every time, and ends with:
+
+- the app, `build/themask/macos/app/The MASK.app`, about 570 MB;
+- a zip of it, `dist/The MASK-0.1.0.app.zip`, about 195 MB.
+
+The app's icon is `packaging/icon/themask.icns`; `uv run python packaging/make_icon.py` draws it
+again.
+
+### Install it on this Mac
+
+Copy `The MASK.app` to the Applications folder, in Finder or with
+
+```bash
+ditto "build/themask/macos/app/The MASK.app" "/Applications/The MASK.app"
+```
+
+and open it from there. The window opens at once and says "Loading…" while the language model
+loads. macOS may ask whether The MASK may use its Keychain item (see below): choose Always Allow.
+A rebuilt app is a new program to macOS, so it can ask again.
+
+### Open it on another Mac
+
+Copy the zip from `dist/` over (AirDrop, a USB stick), unzip it and move the app to Applications.
+macOS refuses to open an app from an unknown developer the first time. Either open System
+Settings, then Privacy & Security, scroll down to the message that "The MASK" was blocked and
+press Open Anyway; or, on macOS 14, Control-click the app, choose Open and press Open. On macOS 15
+and later only the first way works. It is needed once for each copy.
+
+### Where it keeps its files
+
+- The data folder, `~/Library/Application Support/The MASK`: the encrypted cases (`cases/`), your
+  always-hide and never-hide lists and the settings.
+- The log, `~/Library/Application Support/The MASK/logs/themask.log`. It holds counts, types and
+  durations, never a word of a contract.
+- The masked files, in `~/Documents/The MASK` unless you choose another folder.
+- The key that locks the cases is not a file. It is an item in the macOS Keychain (service
+  "The MASK", account "master-key").
+
+### It never uses the network
+
+The app carries its language model, so it works with Wi-Fi off, and as it starts it shuts the
+internet off for itself (`src/themask/netguard.py`): any attempt to open a connection fails. To
+see for yourself, open the app and run this in Terminal. It prints nothing when the app has no
+network connection open:
+
+```bash
+lsof -i -a -p $(pgrep -f "The MASK.app")
+```
+
 ## Develop
 
 ```bash
 uv run pytest -q              # tests, including the licence gate
-uv run ruff check src tests   # lint
+uv run ruff check src tests tools packaging   # lint
 uv run mypy src               # types (strict)
 ```
 

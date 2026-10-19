@@ -59,3 +59,27 @@ line-length = 100
 strict = true
 ignore_missing_imports = true
 files = ["src"]
+
+# Packaging: packaging/build_mac.sh builds "The MASK.app" with Briefcase, ad-hoc signed and with
+# no installer. Briefcase takes the project's name, version and dependencies from [project] above,
+# so the app holds exactly the pinned runtime dependencies and this section lists none of its own
+# (tests/test_packaging.py checks that, and the version and name).
+[tool.briefcase]
+# Briefcase adds the app's name to the bundle: the app's identifier is local.themask.themask.
+# The owner's own reverse-domain name goes here if the app is ever shared.
+bundle = "local.themask"
+# Briefcase wants a licence for every app. The MASK has none yet, which is the owner's decision:
+# this says "all rights reserved" until they choose one.
+license = "LicenseRef-Proprietary"
+
+[tool.briefcase.app.themask]
+formal_name = "The MASK"
+description = "Masks confidential values in contracts before they go to an AI tool."
+sources = ["src/themask"]
+icon = "packaging/icon/themask"
+
+[tool.briefcase.app.themask.macOS]
+universal_build = false  # one slice, for the Mac this is built on (Apple silicon)
+# The PySide6 6.12 wheels are tagged macosx_14_0, so pip finds none for anything lower.
+min_os_version = "14.0"
+requires = []  # nothing that only the Mac version needs
