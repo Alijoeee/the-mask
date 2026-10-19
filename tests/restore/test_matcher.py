@@ -8,6 +8,9 @@ of a changed placeholder planned as unknown (decision 6); and the ranking of cas
 placeholders they hold, then by the newest, with cases that hold none still listed (decision 5).
 Ruling R78: a banner the AI rewrote is still left out of the plan. Ruling R79: the stretch a
 restore replaces leaves out a bracket that stands on one side of a changed placeholder only.
+Ruling R103: the code of a case in the name of the file puts that case first, whatever the
+placeholders say (placeholder names repeat from case to case, so they cannot tell which
+contract a file belongs to).
 """
 
 from __future__ import annotations
@@ -19,7 +22,12 @@ import pytest
 from tests.fixtures.restore import CASE, NOW
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
-from themask.restore.matcher import plan_restore, restore_span, suggest_cases
+from themask.restore.matcher import (
+    case_in_file_name,
+    plan_restore,
+    restore_span,
+    suggest_cases,
+)
 
 PERSON, COMPANY, AMOUNT = CASE.entries
 
@@ -123,6 +131,98 @@ def test_the_banners_example_does_not_count_for_a_case() -> None:
     company_case, person_case = made("C", 0, [COMPANY]), made("P", 1, [PERSON])
     text = f"{BANNER_TEXT}\n\nHello [PERSON_1]"
     assert ids(suggest_cases(text, [company_case, person_case])) == ["P", "C"]
+
+
+# ---- the name of the file (ruling R103) ------------------------------------------------------------
+
+# Both cases hold [PERSON_1] (placeholder names repeat from case to case); the newer one holds
+# the company as well, so by the placeholders alone it is the better fit for this text.
+OLDER = made("K4F7", 5, [PERSON])
+NEWER = made("M5N6", 1, [PERSON, COMPANY])
+BOTH = "[PERSON_1] signs for [COMPANY_1]."
+
+
+def test_the_case_whose_code_is_in_the_file_name_comes_first_whatever_the_overlap() -> None:
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER])) == ["M5N6", "K4F7"]  # by the text alone
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER], "MASKED-K4F7-1.docx")) == ["K4F7", "M5N6"]
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER], "MASKED-M5N6.docx")) == ["M5N6", "K4F7"]
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "MASKED-K4F7.docx",
+        "MASKED-K4F7-1.docx",
+        "MASKED-K4F7-2-after.docx",
+        "K4F7.docx",
+        "K4F7",
+        "masked-k4f7.docx",  # an AI tool that writes names in lower case
+        "MASKED-K4F7_edited.docx",
+        "answer for K4F7 (1).docx",
+        "MASKED-K4F7 \N{EN DASH} restored.docx",
+    ],
+)
+def test_the_code_counts_as_a_whole_word_in_any_case(file_name: str) -> None:
+    assert ids(suggest_cases(BOTH, [NEWER, OLDER], file_name)) == ["K4F7", "M5N6"]
+
+
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "MASKED-K4F7X.docx",  # inside a longer word it is not the code
+        "MASKED-XK4F7.docx",
+        "MASKED-K4F78.docx",
+        "MASKEDK4F7.docx",
+        "MASKED-K4F7\N{LATIN SMALL LETTER E WITH ACUTE}.docx",
+        "MASKED-K4F.docx",
+        "contract.docx",
+        "",
+    ],
+)
+def test_a_code_inside_a_longer_word_is_not_the_code(file_name: str) -> None:
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER], file_name)) == ["M5N6", "K4F7"]  # as without
+
+
+def test_two_codes_in_one_file_name_tell_nothing() -> None:
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER], "MASKED-K4F7-M5N6.docx")) == ["M5N6", "K4F7"]
+
+
+def test_without_a_file_name_the_ranking_is_the_same_as_before() -> None:
+    for cases in ([OLDER, NEWER], [NEWER, OLDER]):
+        assert suggest_cases(BOTH, cases, None) == suggest_cases(BOTH, cases)
+        assert ids(suggest_cases(BOTH, cases, None)) == ["M5N6", "K4F7"]
+
+
+def test_the_named_case_comes_first_even_if_it_holds_none_of_the_placeholders() -> None:
+    none = made("B2C3", 9, [AMOUNT])
+    assert ids(suggest_cases(BOTH, [OLDER, NEWER, none], "MASKED-B2C3.docx")) == [
+        "B2C3",
+        "M5N6",
+        "K4F7",
+    ]
+
+
+def test_the_cases_behind_the_named_one_keep_their_order() -> None:
+    third = made("B2C3", 3, [PERSON])  # holds the person, like the older one, and is newer
+    ranked = suggest_cases(BOTH, [OLDER, third, NEWER], "MASKED-K4F7.docx")
+    assert ids(ranked) == ["K4F7", "M5N6", "B2C3"]
+    assert ids(suggest_cases(BOTH, [OLDER, third, NEWER])) == ["M5N6", "B2C3", "K4F7"]
+
+
+def test_the_cases_are_all_still_there_and_not_changed() -> None:
+    cases = [OLDER, NEWER]
+    ranked = suggest_cases(BOTH, cases, "MASKED-K4F7.docx")
+    assert cases == [OLDER, NEWER] and sorted(ids(ranked)) == ["K4F7", "M5N6"]
+    assert suggest_cases(BOTH, [], "MASKED-K4F7.docx") == []
+
+
+def test_case_in_file_name_gives_the_one_case_the_name_holds() -> None:
+    assert case_in_file_name("MASKED-K4F7-2.docx", [OLDER, NEWER]) is OLDER
+    assert case_in_file_name("masked-m5n6.docx", [OLDER, NEWER]) is NEWER
+    assert case_in_file_name("MASKED-K4F7-M5N6.docx", [OLDER, NEWER]) is None  # two codes
+    assert case_in_file_name("MASKED-B2C3.docx", [OLDER, NEWER]) is None  # a case that is not here
+    assert case_in_file_name("MASKED-K4F7X.docx", [OLDER, NEWER]) is None  # not a whole word
+    assert case_in_file_name("MASKED-K4F7.docx", []) is None
 
 
 @pytest.mark.parametrize(
