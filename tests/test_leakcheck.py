@@ -21,7 +21,7 @@ from xml.sax.saxutils import escape
 
 import pytest
 
-from tests.fixtures.docx import PACKAGE_RELS, MakeDocx
+from tests.fixtures.docx import PACKAGE_RELS, XMLNS, MakeDocx
 from tests.fixtures.leak import MASKED_ENTRIES, mask_file
 from tests.helpers import plant
 from themask import leakcheck
@@ -746,6 +746,46 @@ def test_text_kept_in_attributes(make_docx: MakeDocx) -> None:
         ("word/document.xml", "[COMPANY_1]", 'descr="Logo of [COMPANY_1]"'),
         ("word/document.xml", "[COMPANY_1]", 'tooltip="Visit [COMPANY_1]"'),
     ]
+
+
+# Ruling R102: what an element declares and what it is called is read too.
+NAMED_AFTER_THE_PARTY = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f"<w:document {XMLNS}"
+    ' xmlns:ns0="urn:northwind-trading-bv:contract-schema"'
+    ' xmlns:nw="http://northwind-trading.example/2026/templates"><w:body>'
+    "<w:p><w:r><w:t>[COMPANY_1] sells the Goods to the Buyer.</w:t></w:r></w:p>"
+    '<w:p nw:NorthwindRef="1"><w:r><w:t>Signed for the Supplier.</w:t><nw:NorthwindTradingBV/>'
+    "</w:r></w:p></w:body></w:document>"
+).encode()
+
+
+def test_namespace_declarations_and_foreign_names_are_read(make_docx: MakeDocx) -> None:
+    path = make_docx("", raw={"word/document.xml": NAMED_AFTER_THE_PARTY})
+    hits = scan_package(path, E)
+    assert [(hit.part, hit.placeholder, hit.context) for hit in hits] == [
+        ("word/document.xml", "[COMPANY_1]", 'xmlns:ns0="urn:[COMPANY_1]:contract-schema"'),
+        (
+            "word/document.xml",
+            "[COMPANY_1]",
+            'xmlns:nw="http://[COMPANY_1].example/2026/templates"',
+        ),
+        ("word/document.xml", "[COMPANY_1]", 'attribute name="[COMPANY_1] Ref"'),
+        ("word/document.xml", "[COMPANY_1]", 'element name="[COMPANY_1]"'),
+    ]
+    assert_nothing_shown(hits, E)
+
+
+def test_the_file_formats_own_namespaces_and_names_are_no_hits(make_docx: MakeDocx) -> None:
+    # Every standard declaration, and the names of the standard vocabularies, for a key whose
+    # values are spelt like them.
+    entries = [
+        KeyEntry("[COMPANY_1]", COMPANY, "Schemas Openxmlformats", ["wordprocessingml"]),
+        KeyEntry("[COMPANY_2]", COMPANY, "Purl Org", ["dcterms"]),
+        KeyEntry("[CUSTOM_1]", PlaceholderType.CUSTOM, "document", ["body", "rPr"]),
+    ]
+    body = "<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>Plain text.</w:t></w:r></w:p>"
+    assert scan_package(make_docx(body), entries) == []
 
 
 def test_field_names_and_format_keywords_are_no_hits(make_docx: MakeDocx) -> None:

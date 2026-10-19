@@ -10,6 +10,7 @@ to a part, each reference in the XML to a relationship, each Override to a part)
 
 from __future__ import annotations
 
+import copy
 import json
 import posixpath
 import zipfile
@@ -136,6 +137,14 @@ def saved_bytes(pkg: DocxPackage, tmp_path: Path) -> bytes:
 
 def document(pkg: DocxPackage, name: str = "word/document.xml") -> bytes:
     return etree.tostring(pkg.xml(name))
+
+
+def content(pkg: DocxPackage, name: str = "word/document.xml") -> bytes:
+    """The part as it is, but for the namespace declarations nothing in it uses, which the
+    cleaner drops (ruling R102), and the package's own prefixes, which it keeps."""
+    root = copy.deepcopy(pkg.xml(name))
+    etree.cleanup_namespaces(root, keep_ns_prefixes=list(NS))
+    return etree.tostring(root)
 
 
 def text_of(pkg: DocxPackage) -> str:
@@ -593,6 +602,56 @@ def test_rsids_are_stripped_from_every_part() -> None:
     assert pkg.xml("word/styles.xml").find(".//w:style", NS).get(f"{{{NS['w']}}}styleId") == "A"
 
 
+# ---- namespace declarations (ruling R102) --------------------------------------------------------
+
+
+def test_a_declaration_nothing_uses_goes_and_one_in_use_stays(tmp_path: Path) -> None:
+    document = (
+        f"<w:document {DECLARATIONS}"
+        ' xmlns:ns0="urn:northwind-trading-bv:contract-schema"'
+        ' xmlns:nw="http://northwind-trading.example/2026/templates"><w:body>'
+        "<w:p><w:r><w:t>Signed for the Supplier.</w:t><nw:NorthwindTradingBV/></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    header = (
+        f'<w:hdr {DECLARATIONS} xmlns:acme="http://acme-supplies.example/letterhead" '
+        'mc:Ignorable="w14 wp14" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing">'
+        "<w:p><w:r><w:t>Page</w:t></w:r></w:p></w:hdr>"
+    )
+    pkg = package(
+        rels=[(HEADER, "header1.xml")],
+        parts={
+            "word/document.xml": ('<?xml version="1.0" encoding="UTF-8"?>\n' + document).encode(),
+            "word/header1.xml": ('<?xml version="1.0" encoding="UTF-8"?>\n' + header).encode(),
+        },
+        types={"word/header1.xml": HEADER_TYPE},
+    )
+    clean(pkg)
+    saved = saved_bytes(pkg, tmp_path)
+    assert b"northwind-trading-bv" not in saved and b"acme-supplies" not in saved
+    # The one in use stays, for the leak check to find.
+    assert b'xmlns:nw="http://northwind-trading.example/2026/templates"' in saved
+    assert b"<nw:NorthwindTradingBV/>" in saved
+    # The prefixes mc:Ignorable names stay declared, used or not: Word refuses the file otherwise.
+    header_part = pkg.raw("word/header1.xml")
+    assert b'xmlns:w14="' in header_part and b'xmlns:wp14="' in header_part
+    assert b'mc:Ignorable="w14 wp14"' in header_part and b'xmlns:mc="' in header_part
+    opened = docx.Document(str(tmp_path / "saved.docx"))
+    assert opened.paragraphs[0].text == "Signed for the Supplier."
+
+
+def test_every_corpus_file_keeps_its_ignorable_prefixes(corpus: Path, tmp_path: Path) -> None:
+    # The corpus files declare mc:Ignorable="w14 wp14" on w:document, as Word and python-docx do.
+    pkg = DocxPackage.open(corpus / "supply-01.docx")
+    assert b'mc:Ignorable="w14 wp14"' in pkg.raw("word/document.xml")
+    clean(pkg)
+    document = pkg.raw("word/document.xml")
+    assert b'xmlns:w14="' in document and b'xmlns:wp14="' in document
+    saved = tmp_path / "supply-01-cleaned.docx"
+    pkg.save(saved)
+    assert docx.Document(str(saved)).paragraphs
+
+
 def test_the_main_document_is_cleaned_wherever_the_package_keeps_it() -> None:
     # The package may name another part as its main document; its text and rsids are cleaned too.
     body = f'<w:body><w:p w:rsidR="00AB12CD">{HIDDEN}{run("kept")}</w:p></w:body>'
@@ -952,9 +1011,9 @@ def test_a_contents_page_is_left_as_it_is() -> None:
     pkg = package(
         contents + para('<w:bookmarkStart w:id="1" w:name="_Toc1"/>', run("1. Definitions"))
     )
-    before = document(pkg)
+    before = content(pkg)
     rep = clean(pkg)
-    assert rep == CleanReport() and document(pkg) == before
+    assert rep == CleanReport() and content(pkg) == before
 
 
 def test_a_field_that_starts_in_one_paragraph_and_ends_in_the_next() -> None:
@@ -1000,9 +1059,9 @@ def test_other_fields_are_left_alone() -> None:
         field(" NUMPAGES ", run("9")),
     )
     pkg = package(body)
-    before = document(pkg)
+    before = content(pkg)
     rep = clean(pkg)
-    assert rep.fields_flattened == 0 and document(pkg) == before
+    assert rep.fields_flattened == 0 and content(pkg) == before
 
 
 def test_a_personal_field_in_the_result_of_another_is_flattened() -> None:
@@ -1024,8 +1083,8 @@ def test_a_personal_field_in_the_instruction_of_another_is_left_alone() -> None:
         + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
     )
     pkg = package(para(outer))
-    before = document(pkg)
-    assert clean(pkg).fields_flattened == 0 and document(pkg) == before
+    before = content(pkg)
+    assert clean(pkg).fields_flattened == 0 and content(pkg) == before
 
 
 def test_a_field_that_is_never_closed_does_no_harm() -> None:

@@ -52,7 +52,11 @@ And last, the package:
     type is an image, a sound, a video or a 3D model) with every relationship to it, whatever
     still points at it. The leak check cannot read pixels, and a logo is the company's name:
     the export refuses a file in which a picture is left (``leakcheck.media_left``).
-11. What is left of the folders of charts, diagrams and embedded files.
+11. The namespace declarations nothing in a part uses (ruling R102): a document-assembly schema
+    may be named after a party. Every prefix ``mc:Ignorable``, ``mc:MustUnderstand`` or
+    ``mc:ProcessContent`` names stays declared, used or not, as Word refuses the file otherwise,
+    and so does every prefix of the package's own.
+12. What is left of the folders of charts, diagrams and embedded files.
 
 A part that goes takes everything that only it used: the relationships that point at it, its own,
 its Override, and the parts it relates to. A relationship goes when nothing in its part refers to
@@ -278,6 +282,7 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
     _clean_settings(pkg, main)
     report.attributes_cleared += _reset_theme_names(pkg, main)
     _remove_media(pkg, main, texts, report)
+    _strip_unused_namespaces(pkg)
     _sweep(pkg)
     remaining = set(pkg.names())
     report.parts_removed = [n for n in names_before if n not in remaining]
@@ -929,6 +934,34 @@ def _plain_fill(fill: etree._Element, in_theme: bool) -> etree._Element:
     solid = fill.makeelement(_SOLID_FILL, {})
     etree.SubElement(solid, _SCHEME_CLR, {"val": "phClr"})
     return solid
+
+
+# ---- namespace declarations (ruling R102) --------------------------------------------------------
+
+# The markup-compatibility attributes that name prefixes, which must stay declared.
+_MC_PREFIX_LISTS = tuple(
+    _q("mc", name) for name in ("Ignorable", "MustUnderstand", "ProcessContent")
+)
+
+
+def _strip_unused_namespaces(pkg: DocxPackage) -> None:
+    """Takes the namespace declarations nothing uses out of every XML part.
+
+    Kept whether used or not: the prefixes any ``mc:Ignorable``, ``mc:MustUnderstand`` or
+    ``mc:ProcessContent`` attribute of the part names (Word and python-docx write
+    ``mc:Ignorable="w14 wp14"``, and Word refuses a file whose ignorable prefix is undeclared),
+    and the prefixes of the package's own namespaces.
+    """
+    for name in pkg.names():
+        if not _is_xml_part(name) or _is_rels(name):
+            continue
+        root = pkg.xml(name)
+        keep = set(NS)
+        for element in root.iter(etree.Element):
+            for attribute in _MC_PREFIX_LISTS:
+                for item in element.get(attribute, "").split():
+                    keep.add(item.partition(":")[0])
+        etree.cleanup_namespaces(root, keep_ns_prefixes=sorted(keep))
 
 
 # ---- the package: relationships and parts --------------------------------------------------------

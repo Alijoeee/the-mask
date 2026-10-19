@@ -32,7 +32,10 @@ It searches:
   value Word split across runs is found whole and a tab or a line break parts two words; every
   other text of its elements, its XML comments and processing instructions; and every attribute
   value on its own (ruling R19). Relationship targets and field instructions are searched
-  %-decoded as well (ruling R26). A word of a field instruction that is exactly a field's name or
+  %-decoded as well (ruling R26). Every namespace an element declares is searched too, its
+  address and its prefix, and so is the name of every element and attribute outside the file
+  format's own vocabularies, with a camel-cased name read as its words (ruling R102): a
+  document-assembly schema may be named after a party. A word of a field instruction that is exactly a field's name or
   the format keyword after a format switch (PAGE, \\* MERGEFORMAT) is no hit for a value spelt
   like it; anything else in an instruction is, a value of several words or a path led by a
   backslash too (ruling R31);
@@ -1195,8 +1198,16 @@ _SHOWN_CHARACTERS = {
 _INSTRUCTION = f"{{{_W}}}instr"
 _RELATIONSHIP = f"{{{RELS_NS}}}Relationship"
 
-# The file format's own vocabulary (ruling R64). Addresses of namespaces and schemas:
-_FORMAT_ADDRESSES = ("http://schemas.", "http://www.w3.org", "urn:schemas-microsoft-com")
+# The file format's own vocabulary (ruling R64). Addresses of namespaces and schemas, and so the
+# namespaces whose element and attribute names are the format's own (ruling R102):
+_FORMAT_ADDRESSES = (
+    "http://schemas.",
+    "http://www.w3.org",
+    "urn:schemas-microsoft-com",
+    "http://purl.org/dc/",
+)
+# Where a camel-cased name parts into words: "NorthwindTradingBV" is "Northwind Trading BV".
+_CAMEL_JOINT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 # The fonts a file names: every attribute of w:rFonts (the theme's fonts and the hint by keyword,
 # the rest by name), and these attributes of these elements.
 _RUN_FONTS = f"{{{_W}}}rFonts"
@@ -1321,7 +1332,13 @@ class _Reader:
             paragraph = _Paragraph()
             self._paragraphs.append((len(self.blocks), paragraph))
             self.blocks.append(_Block(""))
+        self._declarations(element)
+        foreign = not _is_format_namespace(tag)
+        if foreign:
+            self._name(tag, "element name")
         for name, value in element.attrib.items():
+            if (":" in name and not _is_format_namespace(name)) or (foreign and ":" not in name):
+                self._name(name, "attribute name")
             self._attribute(element, name, value)
         if paragraph is not None and tag in _SHOWN_CHARACTERS:
             paragraph.add(_SHOWN_CHARACTERS[tag], False)
@@ -1337,6 +1354,25 @@ class _Reader:
                 self._loose(child)
             if child.tail:
                 self._text(child.tail, shown_in, instruction, bearing)
+
+    def _declarations(self, element: etree._Element) -> None:
+        """The namespaces ``element`` declares itself (ruling R102): each address that is not
+        the file format's own, and each prefix, is a text of its own, searched for names only."""
+        parent = element.getparent()
+        for prefix, address in element.nsmap.items():
+            if parent is not None and parent.nsmap.get(prefix) == address:
+                continue
+            label = f"xmlns:{prefix or ''}"
+            if not _is_format_address(address):
+                self.blocks.append(_Block(address, label, no_digits=True))
+            if prefix:
+                self.blocks.append(_Block(prefix, label, no_digits=True))
+
+    def _name(self, qualified: str, label: str) -> None:
+        """The local name of an element or attribute outside the format's vocabularies, as its
+        words (ruling R102), searched for names only."""
+        local = qualified.rpartition("}")[2]
+        self.blocks.append(_Block(_CAMEL_JOINT.sub(" ", local), label, no_digits=True))
 
     def _attribute(self, element: etree._Element, name: str, value: str) -> None:
         tag = element.tag
@@ -1414,12 +1450,23 @@ class _Reader:
             self.blocks.append(_Block(text))
 
 
+def _is_format_address(value: str) -> bool:
+    """Whether ``value`` is an address of a namespace or schema of the file format's own."""
+    return value[:32].casefold().startswith(_FORMAT_ADDRESSES)
+
+
+def _is_format_namespace(qualified: str) -> bool:
+    """Whether the namespace of a Clark-form tag or attribute name is one of the file format's
+    own (ruling R102); a name in no namespace is not."""
+    return qualified.startswith("{") and _is_format_address(qualified[1:].partition("}")[0])
+
+
 def _is_format_vocabulary(tag: str, name: str, value: str) -> bool:
     """Whether an attribute holds the file format's own vocabulary, searched for nothing: an
     address of a namespace or schema, the type of a relationship (ruling R64), a font that ships
     with Office, Windows or macOS, or one of Word's own theme and scheme names (ruling R66)."""
     return (
-        value[:32].casefold().startswith(_FORMAT_ADDRESSES)
+        _is_format_address(value)
         or (tag == _RELATIONSHIP and name == "Type")
         or (tag == _RUN_FONTS and (name in _FONT_KEYWORDS or _is_office_font(value)))
         or (_FONT_NAMES.get(tag) == name and _is_office_font(value))
