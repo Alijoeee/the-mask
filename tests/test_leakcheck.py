@@ -522,6 +522,69 @@ def test_the_zeros_that_end_a_decimal_part_fold_away(make_docx: MakeDocx) -> Non
     assert scan_package(make_docx(para("A cap of EUR 125,000 applies.")), [even]) == []
 
 
+# Ruling R70's gap and the reviewer's A1–A3: a decimal part ends a number, a number written with
+# commas or dots does not go on across a plain space, the bytes of a part are searched for a
+# value by its own length, and two entries that fold alike are each reported.
+
+
+@pytest.mark.parametrize(
+    ("text", "hits"),
+    [
+        ("Fee EUR 1,250.00 100 units", 1),  # the cents end the number: "100" is another
+        ("Fee EUR 1,250 100 units", 1),  # a number with a comma does not go on with " 100"
+        ("Fee EUR 1,250.00 and 100 units", 1),
+        ("Fee EUR 1,250.00 1000 units", 1),
+        ("Fee EUR 1,250.00 10 units", 1),
+        ("Fee: EUR 1,250.00\t100 units", 1),
+        ("Price No. 100 1,250.00 applies", 1),  # "100 " before it is no thousands group either
+        ("A cap of 1 250 000 applies", 0),  # a space-grouped number goes on with its thousands
+        ("A cap of 125,000.00 applies", 1),  # the cents are no other number
+    ],
+)
+def test_a_decimal_part_or_a_group_separator_ends_a_number(
+    make_docx: MakeDocx, text: str, hits: int
+) -> None:
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 1,250.00", ["1,250", "1,250.00", "EUR 1,250"])
+    cap = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 125,000", ["125,000"])
+    found = scan_package(make_docx(para(text)), [fee, cap])
+    assert len(found) == hits, found
+    assert_nothing_shown(found, [fee, cap])
+
+
+def test_a_short_amount_is_found_in_the_bytes_of_a_part_by_its_own_length(
+    make_docx: MakeDocx,
+) -> None:
+    # "EUR 10.00" has seven letters and digits (ruling R14 b), whatever its fold keeps.
+    fee = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 10.00", [])
+    planted = make_docx(
+        para("Nothing here."),
+        raw={"word/media/note.bin": b"\x00\x01 payment EUR 10.00 due \x00"},
+    )
+    hits = scan_package(planted, [fee])
+    assert [(hit.part, hit.placeholder) for hit in hits] == [("word/media/note.bin", "[AMOUNT_1]")]
+    # A value of five letters and digits is not looked for in bytes, which spell it by chance.
+    short = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 10", [])
+    assert scan_package(planted, [short]) == []
+
+
+def test_two_entries_that_fold_alike_are_each_reported(make_docx: MakeDocx) -> None:
+    written = KeyEntry("[AMOUNT_1]", AMOUNT, "EUR 1,250.00", ["1,250.00"])
+    plain = KeyEntry("[AMOUNT_2]", AMOUNT, "EUR 1,250", ["1,250"])
+    hits = scan_package(make_docx(para("The fee is EUR 1,250 per month.")), [written, plain])
+    assert [(hit.placeholder, hit.context, hit.count) for hit in hits] == [
+        ("[AMOUNT_1]", "The fee is [AMOUNT_1] per month.", 1),
+        ("[AMOUNT_2]", "The fee is [AMOUNT_2] per month.", 1),
+    ]
+    register = KeyEntry("[ID_1]", ID, "12345678", [])
+    phone = KeyEntry("[PHONE_1]", PHONE, "1234 5678", [])
+    hits = scan_package(make_docx(para("Call 1234 5678 now.")), [register, phone])
+    assert [(hit.placeholder, hit.context) for hit in hits] == [
+        ("[ID_1]", "Call [ID_1] now."),
+        ("[PHONE_1]", "Call [PHONE_1] now."),
+    ]
+    assert hits_by_placeholder(hits) == {"[ID_1]": 1, "[PHONE_1]": 1}
+
+
 def test_a_number_counts_only_where_written_with_four_letters_and_digits(
     make_docx: MakeDocx,
 ) -> None:

@@ -24,7 +24,9 @@ compared depends on its type; a variant is compared as its entry's type:
   is not found in "11250", "EUR 1,250" not in "EUR 12,500", "1 250" not in "1 250 000"; "1,250"
   is in "In 2025 1,250 units"). A tab, a line break or any other mark parts two numbers
   ("Instalment 2<tab>125,000"), and so does a footnote mark; cents after it ("125,000.00") are
-  no other number.
+  no other number. A decimal part ends a number ("EUR 1,250.00 100 units" holds EUR 1,250.00),
+  and a number written with commas or dots goes on across no plain space ("EUR 1,250 100
+  units" holds EUR 1,250, "No. 100 1,250.00" holds 1,250.00).
 
 It searches:
 
@@ -40,8 +42,8 @@ It searches:
   like it; anything else in an instruction is, a value of several words or a path led by a
   backslash too (ruling R31);
 * every other part (pictures, embedded files, a part that is not valid XML): its bytes read as
-  UTF-8 and as UTF-16, for the values of at least six letters and digits that are not all digits,
-  which stray bytes do not spell by chance (ruling R14 b);
+  UTF-8 and as UTF-16, for the values of at least six letters and digits that are not all digits
+  ("EUR 10.00" has seven), which stray bytes do not spell by chance (ruling R14 b);
 * the file's own name and the name of every part.
 
 ``media_left`` is the gate's other half (ruling R101): the leak check cannot read pixels, so every
@@ -74,7 +76,9 @@ A hit says where it is and shows about forty characters round it, with every str
 normalises to a value, a variant or a surname of the key (wherever it stands, glued to other
 letters or not: ruling R69) replaced by its placeholder, so that no hit ever shows what it found;
 a part whose name holds a value is shown with the value hidden too. A hit counts the places in its
-part that read the same (``LeakHit.count``), and ``hits_by_placeholder`` totals them.
+part that read the same (``LeakHit.count``), and ``hits_by_placeholder`` totals them. Where two
+entries fold alike ("EUR 1,250.00" and "EUR 1,250"; an id and a phone number of the same digits),
+a place is a hit for each of them.
 ``rescan_detection`` runs the detection again on the masked file and lists what it finds that the
 owner never marked. Nothing here writes to the log.
 """
@@ -614,28 +618,36 @@ class _Match:
 _WORD_EDGES = frozenset({"", " ", "\x00"})
 
 
+# The placeholders of the entries whose forms fold to one needle, in the order of the key.
+Placeholders = tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class _Needles:
     """The key as the scan looks for it: each name folded both ways by its words (rulings R63,
-    R68) and each number as a number (rulings R14, R71), with its entry's placeholder; and every
-    form by its letters and digits alone (``plain``), the names among them in ``plain_names``,
-    for what a hit's context hides. A form shorter than ``MIN_LENGTH`` letters and digits is
-    left out; one that two entries share keeps the first one's placeholder.
+    R68) and each number as a number (rulings R14, R71), with the placeholders of the entries
+    that fold to it; and every form by its letters and digits alone (``plain``), the names among
+    them in ``plain_names``, for what a hit's context hides. A form shorter than ``MIN_LENGTH``
+    letters and digits is left out. ``raw`` names the needles (by view and key) that some form of
+    at least ``MIN_RAW_LENGTH`` letters and digits, not all digits, folds to: those are looked
+    for in bytes (ruling R14 b).
     """
 
-    names: dict[str, str]
-    tight: dict[str, str]
-    numbers: dict[str, str]
+    names: dict[str, Placeholders]
+    tight: dict[str, Placeholders]
+    numbers: dict[str, Placeholders]
     plain: dict[str, str] = field(default_factory=dict)
     plain_names: frozenset[str] = frozenset()
+    raw: frozenset[tuple[int, str]] = frozenset()
 
     @classmethod
     def of(cls, entries: Iterable[KeyEntry]) -> _Needles:
-        names: dict[str, str] = {}
-        tight: dict[str, str] = {}
-        numbers: dict[str, str] = {}
+        names: dict[str, Placeholders] = {}
+        tight: dict[str, Placeholders] = {}
+        numbers: dict[str, Placeholders] = {}
         plain: dict[str, str] = {}
         plain_names: set[str] = set()
+        raw: set[tuple[int, str]] = set()
         for entry in entries:
             for form in (entry.value, *entry.variants):
                 words, glued, number = _folds(form)
@@ -643,13 +655,18 @@ class _Needles:
                 if len(letters) < MIN_LENGTH:
                     continue
                 plain.setdefault(letters, entry.placeholder)
+                in_bytes = len(letters) >= MIN_RAW_LENGTH and not letters.isdigit()
+                found: list[tuple[int, str, dict[str, Placeholders]]]
                 if entry.type in NAME_TYPES:
-                    names.setdefault(words, entry.placeholder)
-                    tight.setdefault(glued, entry.placeholder)
+                    found = [(_WORDS, words, names), (_TIGHT, glued, tight)]
                     plain_names.add(letters)
                 else:
-                    numbers.setdefault(number, entry.placeholder)
-        return cls(names, tight, numbers, plain, frozenset(plain_names))
+                    found = [(_COMPACT, number, numbers)]
+                for view, key, needles in found:
+                    _add(needles, key, entry.placeholder)
+                    if in_bytes:
+                        raw.add((view, key))
+        return cls(names, tight, numbers, plain, frozenset(plain_names), frozenset(raw))
 
     def __bool__(self) -> bool:
         return bool(self.names or self.numbers)
@@ -659,38 +676,41 @@ class _Needles:
         return max(map(len, [*self.names, *self.numbers]), default=0)
 
     def for_bytes(self) -> _Needles:
-        """The needles looked for in bytes: at least ``MIN_RAW_LENGTH`` letters and digits long
-        and not all digits (ruling R14 b)."""
-
-        def wanted(key: str) -> bool:
-            compact = key.replace(" ", "")
-            letters = _DECIMAL_POINT_IN_KEY.sub("", compact)
-            return len(letters) >= MIN_RAW_LENGTH and _NUMERIC.fullmatch(compact) is None
-
+        """The needles looked for in bytes: those some form of at least ``MIN_RAW_LENGTH``
+        letters and digits, not all digits, folds to (ruling R14 b)."""
         return _Needles(
-            {key: ph for key, ph in self.names.items() if wanted(key)},
-            {key: ph for key, ph in self.tight.items() if wanted(key)},
-            {key: ph for key, ph in self.numbers.items() if wanted(key)},
+            {key: ph for key, ph in self.names.items() if (_WORDS, key) in self.raw},
+            {key: ph for key, ph in self.tight.items() if (_TIGHT, key) in self.raw},
+            {key: ph for key, ph in self.numbers.items() if (_COMPACT, key) in self.raw},
         )
 
     def find(self, folded: tuple[str, ...]) -> Iterator[_Match]:
         """Every place where a needle stands in a text folded the three ways: a name on the edges
-        of words, a number anywhere (``_located`` judges the digits round it)."""
+        of words, a number anywhere (``_located`` judges the digits round it); one match for each
+        entry that folds to the needle."""
         for view, needles in ((_WORDS, self.names), (_TIGHT, self.tight)):
             text = folded[view]
-            for key, placeholder in needles.items():
+            for key, placeholders in needles.items():
                 at = text.find(key)
                 while at >= 0:
                     end = at + len(key)
                     if text[at - 1 : at] in _WORD_EDGES and text[end : end + 1] in _WORD_EDGES:
-                        yield _Match(at, end, key, placeholder, view)
+                        for placeholder in placeholders:
+                            yield _Match(at, end, key, placeholder, view)
                     at = text.find(key, at + 1)
         compact = folded[_COMPACT]
-        for key, placeholder in self.numbers.items():
+        for key, placeholders in self.numbers.items():
             at = compact.find(key)
             while at >= 0:
-                yield _Match(at, at + len(key), key, placeholder, _COMPACT)
+                for placeholder in placeholders:
+                    yield _Match(at, at + len(key), key, placeholder, _COMPACT)
                 at = compact.find(key, at + 1)
+
+
+def _add(needles: dict[str, Placeholders], key: str, placeholder: str) -> None:
+    held = needles.get(key, ())
+    if placeholder not in held:
+        needles[key] = (*held, placeholder)
 
 
 # A decimal point in a folded number (ruling R71).
@@ -702,19 +722,28 @@ _NUMBER_SEPARATORS = frozenset(_GROUP_SEPARATORS)
 _CENTS = re.compile(r"[.,][0-9]{2}(?![0-9])")
 
 
-def _touched(text: str, start: int, end: int, key: str) -> bool:
+_GROUPED = re.compile(r"\d[.,]\d")
+
+
+def _touched(text: str, start: int, end: int, key: str, *, closed: bool = False) -> bool:
     """Whether another digit touches the number found at ``text[start:end]`` on a side where its
     needle ``key`` starts or ends with a digit (rulings R65, R70, R72): right beside it, beyond a
     single full stop, comma, apostrophe or space that only groups thousands, or beyond a plain
     space where the digits beyond it are a thousands group. A tab, a line break, any other mark
-    or the end of the text parts them, and so do cents after it."""
-    if key[:1].isdecimal() and _digit_at(text, start - 1, -1):
+    or the end of the text parts them, and so do cents after it. With ``closed`` the number
+    ends with its decimal part, which nothing goes on from; and a number written with a comma or
+    a full stop between its digits goes on across no plain space on either side."""
+    grouped = _GROUPED.search(text, start, end) is not None
+    if key[:1].isdecimal() and _digit_at(text, start - 1, -1, grouped):
         return True
-    return key[-1:].isdecimal() and not _CENTS.match(text, end) and _digit_at(text, end, 1)
+    if closed or not key[-1:].isdecimal() or _CENTS.match(text, end):
+        return False
+    return _digit_at(text, end, 1, grouped)
 
 
-def _digit_at(text: str, at: int, step: int) -> bool:
-    """Whether ``text[at]`` is a digit, or a number's separator with a digit beyond it."""
+def _digit_at(text: str, at: int, step: int, grouped: bool = False) -> bool:
+    """Whether ``text[at]`` is a digit, or a number's separator with a digit beyond it; a plain
+    space is none for a number that is ``grouped`` with commas or full stops."""
     if not 0 <= at < len(text):
         return False
     if text[at].isdecimal():
@@ -723,7 +752,7 @@ def _digit_at(text: str, at: int, step: int) -> bool:
     if not (0 <= beyond < len(text) and text[beyond].isdecimal()):
         return False
     if text[at] == " ":
-        return _thousands_group(text, beyond, step)
+        return not grouped and _thousands_group(text, beyond, step)
     return text[at] in _NUMBER_SEPARATORS
 
 
@@ -747,7 +776,8 @@ def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Loca
     letters and digits ("10.00%" is the number 10, and counts as "10.00" but not as the 10 of
     "Clause 10": rulings R14 c, R72); and of two matches one of which holds the other only the
     outer one ("Northwind Trading B.V." left in a file is one place, not one for each of its
-    variants). A match that cannot be placed stands at -1."""
+    variants), but a place is kept for each entry that folds to it. A match that cannot be
+    placed stands at -1."""
     placed = []
     folded_away: set[int] | None = None
     for match in matches:
@@ -761,17 +791,25 @@ def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Loca
             start, end = source
             while end in folded_away:  # what folds away at its end is its own (ruling R72)
                 end += 1
+            # A decimal part, the needle's own or one folded away, ends the number.
+            closed = end != source[1] or _DECIMAL_MARK in match.key
             source = (start, end)
             if len(normalize(text[start:end])) < MIN_LENGTH:
                 continue
-        if match.name or not _touched(text, *source, match.key):
-            placed.append((source, match))
+            if _touched(text, start, end, match.key, closed=closed):
+                continue
+        placed.append((source, match))
     kept: Located = []
     reach = -2
+    last = (-2, -2)
+    seen: set[tuple[int, int, str]] = set()  # the placeholders kept at the last place
     for (start, end), match in sorted(placed, key=lambda p: (p[0][0], -p[0][1], p[1].key)):
-        if start < 0 or end > reach:
+        again = (start, end) == last and (start, end, match.placeholder) not in seen
+        if start < 0 or end > reach or again:
             kept.append((start, end, match))
             reach = max(reach, end)
+            last = (start, end)
+            seen.add((start, end, match.placeholder))
     return kept
 
 
