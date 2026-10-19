@@ -13,9 +13,9 @@ every value of the case's key out of its link addresses, field instructions and 
 (ruling R82): the review's key, or for a file added to a case the case's whole key as it will be
 saved (ruling R83). It puts the banner on top and saves the file under a neutral name in a
 private temporary folder. The leak gate decides on a twin of each file (ruling R84), masked the
-same way but with every place the review holds of each value of the key replaced, the places the
-owner switched off too: any value the leak check still finds in a twin is a leftover, and blocks
-the export; so does any picture or media file left in it (ruling R101). The files are then deleted and nothing is saved. The places the owner left visible
+same way but with every place the review holds of any group replaced, the places the owner
+switched off too (ruling R114): any value the leak check still finds in a twin is a leftover,
+and blocks the export; so does any picture or media file left in it (ruling R101). The files are then deleted and nothing is saved. The places the owner left visible
 on purpose are what the leak check finds in a file itself beyond its twin; they are listed,
 never blocking. Otherwise the detection runs again on the masked files, for what nobody marked;
 the files are written into the output folder, never over a file that is there; and the case's
@@ -195,7 +195,7 @@ def export_case(
     # the values its own review did not find in its text (ruling R83).
     key = _merged(existing.entries, entries) if existing is not None else entries
     plans = _plans(review.mask_plan(), combined)
-    twins = _plans(_whole_plan(review.groups, key), combined)
+    twins = _plans(_whole_plan(review.groups), combined)
     not_checkable = unverifiable(key)
     # The files in the order they are listed: by source, a redline's version before first.
     order = sorted(range(len(views)), key=lambda i: (views[i].index, views[i].side == "after"))
@@ -377,18 +377,17 @@ def _plans(plan: MaskPlan, combined: CombinedText) -> list[MaskPlan]:
     return [MaskPlan(replacements) for replacements in parts]
 
 
-def _whole_plan(groups: list[Group], key: list[KeyEntry]) -> MaskPlan:
-    """The plan of the leak gate's twins (ruling R84): every finding of each group whose
-    placeholder ``key`` holds, those switched off one by one and those of a group switched off
-    whole too. The review's own plan is part of it, as a group with a finding to replace is in
-    the key. Findings never overlap, so this is a plan the masker can make.
+def _whole_plan(groups: list[Group]) -> MaskPlan:
+    """The plan of the leak gate's twins (ruling R84): every finding of every group, those
+    switched off one by one and those of a group switched off whole too, keyed or not (ruling
+    R114: a group the owner split off and switched off holds places they chose to show, which
+    the key's values may still spell). The review's own plan is part of it. Findings never
+    overlap, so this is a plan the masker can make.
     """
-    keyed = {entry.placeholder for entry in key}
     return MaskPlan(
         [
             Replacement(finding.start, finding.end, group.placeholder)
             for group in groups
-            if group.placeholder in keyed
             for finding in group.findings
         ]
     )

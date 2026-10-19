@@ -513,6 +513,38 @@ def test_a_group_switched_off_in_a_file_added_leaves_no_room_for_a_leftover(
     assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
 
 
+def test_places_split_off_and_switched_off_whole_are_left_visible_not_leftovers(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R114: the owner moves two "Acme" places into a group of their own and switches it
+    # off: "show Acme there". The twin replaces the places of every group, keyed or not, so the
+    # gate sees no leftover and the two places are listed as left visible on purpose.
+    (source,) = load_sources(
+        [make_docx(para("Acme Supplies Ltd sells. Acme buys. Acme delivers. Acme ships."))], False
+    )
+    text = combined_text([source]).text
+    full = Finding(COMPANY, 0, 17, "Acme Supplies Ltd", 1.0, "user")
+    shorts = [
+        Finding(COMPANY, m.start(), m.end(), "Acme", 1.0, "sweep")
+        for m in re.finditer(r"Acme(?! Supplies)", text)
+    ]
+    acme = Group(
+        uuid.uuid4().hex, COMPANY, "Acme Supplies Ltd", {"Acme Supplies Ltd", "Acme"}, [full, *shorts], "[COMPANY_1]"
+    )
+    review = ReviewState(text, [acme], [], lists, CaseLists([], [], set()))
+    shown = review.split(acme.id, [2, 3])
+    review.set_group_enabled(shown.id, False)
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert not res.blocked and res.leak_hits == [] and len(res.outputs) == 1
+    assert {hit.placeholder for hit in res.allowed_hits} == {"[COMPANY_1]"}
+    assert sum(hit.count for hit in res.allowed_hits) == 2
+    assert body_text(res.outputs[0]).strip() == (
+        "[COMPANY_1] sells. [COMPANY_1] buys. Acme delivers. Acme ships."
+    )
+
+
 def test_a_place_switched_off_in_an_instruction_leaves_no_room_for_a_leftover(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
