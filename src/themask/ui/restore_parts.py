@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from themask.ui.art import Illustration
-from themask.ui.cards import style_vars, tokens_for
+from themask.ui.cards import tokens_for
 from themask.ui.drop_zone import DropZone
 from themask.ui.theme import mono_font
 
@@ -132,7 +132,6 @@ class ChangeDelegate(QStyledItemDelegate):
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
         t = tokens_for(option.widget)
-        change_text = style_vars(t)["change_text"]
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = option.rect
@@ -175,7 +174,7 @@ class ChangeDelegate(QStyledItemDelegate):
             font = QFont(option.font)
             font.setPixelSize(12)
             painter.setFont(font)
-            painter.setPen(QColor(change_text))
+            painter.setPen(QColor(t.notice_text))
             tail = painter.fontMetrics().elidedText(
                 f"\N{RIGHTWARDS ARROW} {rest}", Qt.TextElideMode.ElideRight, space - gap
             )

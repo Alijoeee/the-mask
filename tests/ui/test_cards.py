@@ -66,49 +66,42 @@ def test_a_blend_goes_from_the_bottom_colour_to_the_top_one() -> None:
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
-def test_the_style_values_are_every_token_and_the_colours_the_mockups_add(appearance: str) -> None:
+def test_the_style_values_are_every_token_and_the_tints_made_from_them(appearance: str) -> None:
     t = theme.tokens(appearance)
     values = style_vars(t)
     assert all(values[name] == value for name, value in vars(t).items())
-    for name in (
-        "soft_ground",
-        "soft_text",
-        "change_text",
-        "glyph_fill",
-        "glyph_stroke",
-        "glyph_fold",
-        "accent_ink",
-        "danger_bg",
-        "danger_disc",
-        "danger_border",
-    ):
+    tints = {"danger_bg", "danger_disc", "danger_border", "glyph_stroke"}
+    assert set(values) == set(vars(t)) | tints  # no colour of its own: tokens and tints of them
+    for name in tints:
         assert QColor(values[name]).isValid(), name
+    assert values["danger_bg"] == blend(t.danger, t.panel, 0.10 if appearance == "light" else 0.07)
+    assert values["glyph_stroke"] == blend(t.secondary, t.control, 0.35)
     assert appearance_name(t) == appearance
 
 
-def test_the_two_appearances_have_colours_of_their_own() -> None:
+def test_the_two_appearances_have_tints_of_their_own() -> None:
     light, dark = style_vars(theme.tokens("light")), style_vars(theme.tokens("dark"))
-    for name in ("soft_ground", "soft_text", "change_text", "glyph_fill", "danger_bg"):
+    for name in ("danger_bg", "danger_disc", "danger_border", "glyph_stroke"):
         assert light[name] != dark[name], name
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
-def test_the_texts_these_screens_add_are_easy_to_read_on_their_grounds(appearance: str) -> None:
+def test_the_texts_these_screens_set_are_easy_to_read_on_their_grounds(appearance: str) -> None:
     t = theme.tokens(appearance)
     v = style_vars(t)
     pairs = [
-        (v["soft_text"], t.accent_soft),  # the instruction on the export sheet's box
-        (t.accent_text_on_soft, t.accent_soft),
-        (v["change_text"], t.notice_card_bg),  # an explanation on the restore screen's notice card
-        (t.notice_text, t.notice_card_bg),
-        (t.secondary, v["soft_ground"]),  # a caption on the file card
+        (t.notice_text, t.accent_soft),  # the instruction on the export sheet's box
+        (t.accent_text_on_soft, t.accent_soft),  # its title, and a code on the chosen row
+        (t.notice_text, t.notice_card_bg),  # an explanation on the restore screen's notice card
+        (t.text, t.notice_card_bg),  # and the placeholder it is about
+        (t.secondary, t.ground),  # a caption on the export sheet's file card
+        (t.secondary, t.panel),  # a caption, a grey row, a header
         (t.danger, v["danger_bg"]),  # the headline of a block
-        (t.secondary, v["danger_bg"]),
+        (t.secondary, v["danger_bg"]),  # and what it says under it
         (t.success_text, t.panel),  # "Chosen from the file name"
         (t.danger, t.panel),  # an expiry in danger colour, a Delete button
         (t.danger, t.accent_soft),  # the same on the chosen row
-        (v["accent_ink"], t.accent_soft),  # a code on the chosen row
-        (v["accent_ink"], t.panel),  # and on the other rows
+        (t.text, t.accent_soft),  # the chosen row
     ]
     for ink, ground in pairs:
         assert contrast(ink, ground) >= 4.5, (appearance, ink, ground)
@@ -247,12 +240,13 @@ def test_the_glyph_is_a_document_34_by_40(qtbot: QtBot) -> None:
     qtbot.addWidget(glyph)
     glyph.setPalette(theme.palette("light"))
     assert (glyph.width(), glyph.height()) == (34, 40)
-    values = style_vars(theme.tokens("light"))
-    assert QColor(values["glyph_fill"]).rgb() in centre_colours(glyph)
+    light = theme.tokens("light")
+    assert QColor(light.control).rgb() in centre_colours(glyph)  # the page
+    assert QColor(style_vars(light)["glyph_stroke"]).rgb() in centre_colours(glyph)  # its line
     dark = DocGlyph()
     qtbot.addWidget(dark)
     dark.setPalette(theme.palette("dark"))
-    assert QColor(style_vars(theme.tokens("dark"))["glyph_fill"]).rgb() in centre_colours(dark)
+    assert QColor(theme.tokens("dark").control).rgb() in centre_colours(dark)
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
@@ -379,3 +373,22 @@ def test_a_chevron_combo_draws_a_chevron_of_its_own_on_the_right(
     assert wanted in seen  # the chevron, in the colour of a caption
     left = {image.pixel(x, y) for x in range(30) for y in range(30)}
     assert wanted not in left
+
+
+# ---- the screens use the theme's colours and no colour of their own (ruling R124) -----------------
+
+SCREEN_MODULES = ("cards", "export_dialog", "restore_parts", "restore_screen", "cases_screen")
+
+
+@pytest.mark.parametrize("module", SCREEN_MODULES)
+def test_a_screen_names_no_colour_but_the_tokens(module: str) -> None:
+    import re
+
+    import themask.ui
+
+    source = (Path(themask.ui.__file__).parent / f"{module}.py").read_text(encoding="utf-8")
+    assert re.findall(r"#[0-9A-Fa-f]{6}\b", source) == []  # not a literal colour
+    assert not re.search(r"Qt\.GlobalColor\.(white|black)|\"white\"|\"black\"", source)
+    # ``tertiary`` is for what stands in a field and for what is off (the application's palette
+    # and style sheet say where); the words of these screens are ``secondary`` at the palest.
+    assert not re.search(r"\.tertiary\b|\$tertiary\b", source)

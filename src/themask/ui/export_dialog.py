@@ -127,7 +127,7 @@ QLabel#headline { font-size: 17px; font-weight: 600; color: $text; }
 QFrame#header[tone="danger"] QLabel#headline { color: $danger; }
 QLabel#caption { color: $secondary; }
 QFrame#fileCard {
-    background: $soft_ground;
+    background: $ground;
     border: 1px solid $border;
     border-radius: 10px;
 }
@@ -135,7 +135,7 @@ QLabel#fileName { font-weight: 600; color: $text; }
 QLabel#fileCaption { font-size: 12px; color: $secondary; }
 QFrame#instructionBox { background: $accent_soft; border: none; border-radius: 10px; }
 QLabel#instructionTitle { font-weight: 600; color: $accent_text_on_soft; }
-QLabel#instructionText { font-size: 12px; color: $soft_text; }
+QLabel#instructionText { font-size: 12px; color: $notice_text; }
 QToolButton#detailsButton {
     background: transparent;
     border: none;

@@ -4,14 +4,19 @@
 makes it again when the system changes between light and dark (the sheet of the application,
 ``theme.stylesheet``, is made the same way, but it is one for the whole window and these screens
 need rules of their own: cards, captions, small buttons). ``style_vars`` are the values such a
-sheet is filled with: the tokens, and the few colours of the mockups that no token names.
+sheet is filled with: the tokens of ``theme`` and a few tints made from them. These screens use
+no colour of their own, only the theme's tokens (ruling R124): text on the accent colour is the
+theme's ``on_accent``, captions are ``secondary`` (``tertiary`` is for what stands in a field and
+for what is off), and the accent as text is ``accent_text_on_soft`` where it stands on
+``accent_soft``.
 
 The rest draws itself from the tokens of its own palette (``theme.tokens_of``), so it follows the
 appearance without any wiring: ``MarkBadge`` (the round check or exclamation mark of a result),
 ``DocGlyph`` (the little document of a file card), ``TickLabel`` (a line of text that starts
 with a tick), ``Box`` (a text box as tall as it needs to be) and ``ChevronCombo`` (a combo box
-with a chevron that is the same on every platform). ``FlowLayout`` lays cards out side by side and wraps them onto the next row when the
-window is narrow. ``folder_trail`` writes a folder the way the mockups do: Documents › The MASK.
+with a chevron that is the same on every platform). ``FlowLayout`` lays cards out side by side
+and wraps them onto the next row when the window is narrow. ``folder_trail`` writes a folder the
+way the mockups do: Documents › The MASK.
 """
 
 from __future__ import annotations
@@ -34,29 +39,6 @@ from PySide6.QtWidgets import (
 )
 
 from themask.ui.theme import Appearance, Tokens, appearance_of, tokens, tokens_of
-
-# The colours the approved mockups use that no theme token is: the ground of a file card (the
-# window's ground in the light appearance, the sidebar's in the dark one), the text on the
-# accent-soft box of the export sheet, the grey of an explanation on the notice card, and the
-# little document.
-_EXTRAS: dict[str, dict[str, str]] = {
-    "light": {
-        "soft_ground": "#FBFAF8",
-        "soft_text": "#5B4300",
-        "change_text": "#6B655E",
-        "glyph_fill": "#FFFFFF",
-        "glyph_stroke": "#C9C2B8",
-        "glyph_fold": "#F3F0EB",
-    },
-    "dark": {
-        "soft_ground": "#262523",
-        "soft_text": "#E8D2C0",
-        "change_text": "#C9BFAE",
-        "glyph_fill": "#33312D",
-        "glyph_stroke": "#6B655E",
-        "glyph_fold": "#3A3733",
-    },
-}
 
 
 def tokens_for(widget: QWidget | None) -> Tokens:
@@ -88,21 +70,20 @@ def blend(top: str, bottom: str, amount: float) -> str:
 
 
 def style_vars(t: Tokens) -> dict[str, str]:
-    """What a style sheet of these screens is filled with: every token by its name, the colours
-    of ``_EXTRAS``, ``accent_ink`` (the accent for text: the brand colour is too pale to read
-    as small text on the white panel and on a chosen row, so text takes the darker shade the
-    theme keeps for the hover of a button), and the red tints of a card that says something
-    went wrong (``danger_bg``, ``danger_disc`` for a round badge on it and ``danger_border``:
-    the danger colour laid over the panel, thinly to strongly; thinner in the dark appearance,
-    where the red is the brighter and the text on the tint would lose its contrast).
+    """What a style sheet of these screens is filled with: every token by its name and the tints
+    made from them. ``danger_bg``, ``danger_disc`` (for a round badge on it) and
+    ``danger_border`` are the red tints of a card that says something went wrong: the danger
+    colour laid over the panel, thinly to strongly (thinner in the dark appearance, where the
+    red is the brighter and the text on the tint would lose its contrast). ``glyph_stroke`` is
+    the line of the little document of a file card: the secondary colour, thinned over the
+    colour the document is filled with (``control``).
     """
-    appearance = appearance_name(t)
-    thin = 0.10 if appearance == "light" else 0.07
-    values = {**asdict(t), **_EXTRAS[appearance]}
-    values["accent_ink"] = t.accent_hover
+    thin = 0.10 if appearance_name(t) == "light" else 0.07
+    values = dict(asdict(t))
     values["danger_bg"] = blend(t.danger, t.panel, thin)
     values["danger_disc"] = blend(t.danger, t.panel, 0.22)
     values["danger_border"] = blend(t.danger, t.panel, 0.40)
+    values["glyph_stroke"] = blend(t.secondary, t.control, 0.35)
     return values
 
 
@@ -220,25 +201,26 @@ class DocGlyph(QWidget):
         self.setFixedSize(34, 40)
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        values = style_vars(tokens_of(self))
+        t = tokens_of(self)
+        line = QColor(style_vars(t)["glyph_stroke"])
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor(values["glyph_stroke"]), 1.5)
+        pen = QPen(line, 1.5)
         pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         page = QPainterPath(QPointF(3, 2))
         for x, y in ((21, 2), (31, 12), (31, 38), (3, 38)):
             page.lineTo(x, y)
         page.closeSubpath()
         painter.setPen(pen)
-        painter.setBrush(QColor(values["glyph_fill"]))
+        painter.setBrush(QColor(t.control))
         painter.drawPath(page)
         fold = QPainterPath(QPointF(21, 2))
         fold.lineTo(21, 12)
         fold.lineTo(31, 12)
-        painter.setBrush(QColor(values["glyph_fold"]))
+        painter.setBrush(QColor(t.hairline))
         painter.drawPath(fold)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(values["glyph_stroke"]))
+        painter.setBrush(line)
         painter.drawRoundedRect(QRectF(8, 20, 18, 2.5), 1, 1)
         painter.drawRoundedRect(QRectF(8, 26, 13, 2.5), 1, 1)
         painter.end()

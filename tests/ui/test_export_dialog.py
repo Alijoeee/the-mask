@@ -965,15 +965,19 @@ def test_the_sheet_is_drawn_in_the_colours_of_its_appearance_when_saved(
     )
     assert result.case is not None
     result.case.entries.extend(key_of(13))
+    # Where the owner's files are by default, so that the picture says what the mockup says.
+    result.outputs = [Path.home() / "Documents" / "The MASK" / "MASKED-K4F7.docx"]
     d = run_dialog(qtbot, app_ctx, tmp_path, monkeypatch, lambda *a: result)
+    assert d.file_caption_label.text().startswith(
+        "Documents \N{SINGLE RIGHT-POINTING ANGLE QUOTATION MARK} The MASK"
+    )
     d.show()
     qtbot.waitExposed(d)
     image = d3_shot(d, "export-success", d3_appearance)  # type: ignore[operator]
     assert image.width() == export_dialog.WIDTH * round(image.devicePixelRatio())
     assert image.pixelColor(3, 3) == QColor(t.panel)  # the sheet's own ground
-    values = style_vars(t)
     assert appears_in(image, t.success_bg, d.badge, d)  # the disc behind the check
-    assert appears_in(image, values["soft_ground"], d.finder_button.parentWidget() or d, d)
+    assert appears_in(image, t.ground, d.finder_button.parentWidget() or d, d)  # the file card
     assert appears_in(image, t.accent_soft, d.instruction_label.parentWidget() or d, d)
     assert appears_in(image, t.accent, d.close_button, d)  # Done is the one primary button
     assert appears_in(image, t.accent, d.copy_button, d)  # and so is Copy, on the soft box
