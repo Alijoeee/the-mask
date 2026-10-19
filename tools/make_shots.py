@@ -69,7 +69,8 @@ def made_up_context(folder: Path, engine: Engine | None) -> AppContext:
         engine=engine if engine is not None else cast("Engine", object()),
         user_lists=UserLists([], []),
         case_store=store,
-        settings=Settings(out_dir=folder / "masked"),
+        # The folder is only shown: nothing is written to it, and no home folder is named.
+        settings=Settings(out_dir=Path("~/Documents/The MASK")),
     )
 
 
