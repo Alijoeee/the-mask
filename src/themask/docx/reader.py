@@ -8,7 +8,9 @@ later step can change exactly the characters it found, however Word split them a
 
 There are two views of the same file. "accepted" is the text with every tracked change accepted:
 insertions and moves in their new place are read, deletions and moves from their old place are
-not. "rejected" is the text with every change rejected: the other way round. Hidden text is read
+not (a co-authoring conflict's ``w14:conflictIns`` and ``w14:conflictDel`` count as an insertion
+and a deletion: ruling R110). "rejected" is the text with every change rejected: the other way
+round. Hidden text is read
 like any other text (the cleaner removes it later). A text box is a paragraph of its own, read
 where it sits in the document; Word stores each text box twice, as DrawingML in ``mc:Choice`` and
 as VML in ``mc:Fallback``, and only ``mc:Choice`` is read (ruling R16: the cleaner deletes every
@@ -48,6 +50,8 @@ _T = _w("t")
 _INSTR_TEXT = _w("instrText")
 _DEL_TEXT = _w("delText")
 _DEL_INSTR_TEXT = _w("delInstrText")
+_CONFLICT_INS = f"{{{NS['w14']}}}conflictIns"
+_CONFLICT_DEL = f"{{{NS['w14']}}}conflictDel"
 _ALTERNATE_CONTENT = f"{{{NS['mc']}}}AlternateContent"
 _CHOICE = f"{{{NS['mc']}}}Choice"
 _FALLBACK = f"{{{NS['mc']}}}Fallback"
@@ -78,10 +82,10 @@ _NO_TEXT = frozenset(
     }
 )
 # Read only in one view: what a tracked change put in, and what it took out.
-_INSERTED = frozenset({_w("ins"), _w("moveTo")})
-_DELETED = frozenset({_w("del"), _w("moveFrom")})
+_INSERTED = frozenset({_w("ins"), _w("moveTo"), _CONFLICT_INS})
+_DELETED = frozenset({_w("del"), _w("moveFrom"), _CONFLICT_DEL})
 
-_REVISIONS = tuple(
+_REVISIONS = (_CONFLICT_INS, _CONFLICT_DEL) + tuple(
     _w(name)
     for name in (
         "ins",
