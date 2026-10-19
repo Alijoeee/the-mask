@@ -7,9 +7,14 @@ BANNER_TEXT = (
     "Keep them unchanged."
 )
 
-# What stands in for a removed picture or embedded object in a masked file.
+# What stands in for a removed picture, embedded object, equation or embedded document in a
+# masked file. The cleaner writes each note apart from the text beside it, and the analysis cuts
+# a finding at a note as at a line break (ruling R113).
 IMAGE_NOTE = "[image removed]"
 OBJECT_NOTE = "[embedded object removed]"
+EQUATION_NOTE = "[equation removed]"
+ALTCHUNK_NOTE = "[embedded content removed]"
+NOTES = (IMAGE_NOTE, OBJECT_NOTE, EQUATION_NOTE, ALTCHUNK_NOTE)
 
 # The instruction the owner pastes into an AI tool together with the question (spec 8.8).
 AI_INSTRUCTION = (

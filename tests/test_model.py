@@ -325,6 +325,23 @@ def test_case_from_json_refuses_a_damaged_case(damage: Callable[[dict[str, Any]]
         Case.from_json(json.dumps(data))
 
 
+def test_case_from_json_refuses_a_key_holding_a_placeholder_twice() -> None:
+    # Ruling R108: the app never writes one; a file that holds one cannot be trusted, and the
+    # store lists it as unreadable instead of restoring with whichever entry comes last.
+    case = Case(
+        "K4F7",
+        datetime(2026, 10, 1, tzinfo=UTC),
+        ["a.docx"],
+        [],
+        [
+            KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "John Smith", []),
+            KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "Jane Doe", []),
+        ],
+    )
+    with pytest.raises(ValueError, match="Not a stored case."):
+        Case.from_json(case.to_json())
+
+
 def test_case_from_json_accepts_any_timezone_offset() -> None:
     data = json.loads(make_case().to_json())
     data["created_at"] = "2026-10-17T09:30:00+02:00"

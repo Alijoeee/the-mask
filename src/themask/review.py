@@ -17,6 +17,10 @@ lists. ``mask_plan`` and ``key_entries`` then give the replacements to make and 
   no finding is dropped, as the analysis does. The groups the case's key holds are never taken
   over, as in the analysis (ruling R61). Groups stay in order of first appearance and a group's
   findings in text order.
+* A group the case's key holds keeps its value (ruling R107): merged with other groups it
+  survives, whatever its number, with its canonical form, the stored value the key will keep;
+  split, it keeps its canonical form too; and two such groups are never merged, as two stored
+  values can never be one placeholder without a silent wrong value in the restore.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
 
 from themask.detect.grouping import PersonName
+from themask.detect.identity import value_key
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -85,6 +90,19 @@ def _canonical(kind: PlaceholderType, forms: Iterable[str]) -> str:
     return max(sorted(forms), key=lambda form: (len(" ".join(form.split())), not form.isupper()))
 
 
+def _two_stored(groups: list[Group]) -> str:
+    """Why two groups of the case's key cannot be merged, naming them."""
+    names = [g.placeholder for g in groups]
+    listed = f"{', '.join(names[:-1])} and {names[-1]}"
+    if len(names) == 2:
+        return (
+            f"{listed} are both in the case's key and cannot be merged; leave them as two values."
+        )
+    return (
+        f"{listed} are all in the case's key and cannot be merged; leave them as separate values."
+    )
+
+
 def _in_text_order(group: Group) -> None:
     """Put ``group``'s findings in the order they stand in; each keeps its switch."""
     order = sorted(
@@ -94,16 +112,17 @@ def _in_text_order(group: Group) -> None:
     group.disabled = {new for new, old in enumerate(order) if old in group.disabled}
 
 
-def _key_variants(group: Group) -> list[str]:
-    """The variants a group's key entry lists: those worth searching for, but for a person's bare
-    surname (ruling R52). The sweep hides it only where it stands as a name, which the leak
-    check's plain scan cannot tell from "the Smith report"; the leak check looks for it with the
-    sweep's own test instead.
+def key_variants(kind: PlaceholderType, canonical: str, forms: Iterable[str]) -> list[str]:
+    """The variants a key entry of ``kind`` with the value ``canonical`` lists out of ``forms``:
+    those worth searching for, but for a person's bare surname (ruling R52). The sweep hides it
+    only where it stands as a name, which the leak check's plain scan cannot tell from "the
+    Smith report"; the leak check looks for it with the sweep's own test instead. The export
+    merges an added review's forms into a stored entry the same way (F-14).
     """
     bare = set()
-    if group.type is PlaceholderType.PERSON:
-        bare = {normalize(form) for form in PersonName.of(group.canonical).surnames()}
-    return sorted(v for v in group.variants if is_searchable(v) and normalize(v) not in bare)
+    if kind is PlaceholderType.PERSON:
+        bare = {normalize(form) for form in PersonName.of(canonical).surnames()}
+    return sorted(v for v in set(forms) if is_searchable(v) and normalize(v) not in bare)
 
 
 class ReviewState:
@@ -178,10 +197,11 @@ class ReviewState:
         group of another type has, that whole group is re-typed: the owner's choice beats the
         analysis's guess, so it takes the next free number of ``type``, and is no longer marked
         to check. Otherwise the occurrences make a new group. Either way the group is switched
-        on, and an occurrence inside a longer finding stays inside it. Raises ValueError for text
-        too short to look for, and for text with no occurrence to hide: one that is not in the
-        document, runs over a line break (a replacement lies within one paragraph) or is hidden
-        already.
+        on, its occurrences of the value switched back on if any was off (F-12), ``value`` is one
+        of its variants, and an occurrence inside a longer finding stays inside it. Raises
+        ValueError for text too short to look for, and for text with no occurrence to hide: one
+        that is not in the document, runs over a line break (a replacement lies within one
+        paragraph) or is hidden already.
         """
         value = value.strip()
         if not is_searchable(value):
@@ -240,14 +260,19 @@ class ReviewState:
         variants of all, the fullest of their canonical forms and all their findings in text
         order; it is marked to check if any was. Each occurrence keeps its switch: where the
         merged group is on, an occurrence of a group that was off stays off. The sweep then looks
-        for each group's variants across the text.
+        for each group's variants across the text. A group the case's key holds survives
+        instead, whatever its number, and keeps its canonical form (ruling R107); raises
+        ValueError when two of the groups are the key's, which can never be one value.
         """
         groups = list({g.id: g for g in map(self._group, group_ids)}.values())
         if len(groups) < 2:
             raise ValueError("Choose at least two groups to merge.")
         if len({g.type for g in groups}) > 1:
             raise ValueError("Only groups of the same type can be merged.")
-        keep = min(groups, key=lambda g: _number(g.placeholder))
+        stored = [g for g in groups if g.placeholder in self.reserved]
+        if len(stored) > 1:
+            raise ValueError(_two_stored(stored))
+        keep = stored[0] if stored else min(groups, key=lambda g: _number(g.placeholder))
         enabled = any(g.enabled for g in groups)
         occurrences_off = sorted(
             (
@@ -258,7 +283,8 @@ class ReviewState:
             key=lambda pair: (pair[0].start, pair[0].end),
         )
         keep.variants = {form for g in groups for form in (g.canonical, *g.variants)}
-        keep.canonical = _canonical(keep.type, (g.canonical for g in groups))
+        if not stored:
+            keep.canonical = _canonical(keep.type, (g.canonical for g in groups))
         keep.needs_check = any(g.needs_check for g in groups)
         keep.enabled = enabled
         keep.findings = [f for f, _ in occurrences_off]
@@ -276,7 +302,8 @@ class ReviewState:
         its canonical form and the moved texts as its variants; it is as switched as the group it
         came from, and so are its occurrences. The original keeps the rest, and loses a form only
         the moved occurrences showed (its canonical form too, which becomes the fullest it still
-        shows). Raises ValueError for an index the group lacks, and for a split that would leave
+        shows; a group the case's key holds keeps its canonical form, the stored value: ruling
+        R107). Raises ValueError for an index the group lacks, and for a split that would leave
         the original with nothing.
         """
         group = self._group(group_id)
@@ -302,7 +329,8 @@ class ReviewState:
         gone = {normalize(f.text) for f in leaving} - {normalize(f.text) for f in staying}
         group.variants = {v for v in group.variants if normalize(v) not in gone}
         if normalize(group.canonical) in gone:
-            group.canonical = _canonical(group.type, (f.text for f in staying))
+            if group.placeholder not in self.reserved:
+                group.canonical = _canonical(group.type, (f.text for f in staying))
             group.variants.add(group.canonical)
         group.disabled = {n for n, i in enumerate(stay) if i in group.disabled}
         group.findings = staying
@@ -330,7 +358,12 @@ class ReviewState:
         """
         masked = [g for g in self.groups if g.active_findings()]
         masked.sort(key=lambda g: (_TYPE_ORDER[g.type], _number(g.placeholder)))
-        return [KeyEntry(g.placeholder, g.type, g.canonical, _key_variants(g)) for g in masked]
+        return [
+            KeyEntry(
+                g.placeholder, g.type, g.canonical, key_variants(g.type, g.canonical, g.variants)
+            )
+            for g in masked
+        ]
 
     def counts(self) -> ReviewCounts:
         """The numbers for the screen's summary."""
@@ -365,6 +398,12 @@ class ReviewState:
             ]
         kind = group.type
         group.enabled = True
+        group.variants.add(value)
+        # The places of the value the owner switched off come back on: they chose it (F-12).
+        key = value_key(kind, value)
+        group.disabled = {
+            i for i in group.disabled if value_key(kind, group.findings[i].text) != key
+        }
         known = {id(f) for f in group.findings}
         taken = Spans(
             [(f.start, f.end) for g in self.groups for f in g.findings]
@@ -382,12 +421,18 @@ class ReviewState:
         return group if group.findings else None
 
     def _holding(self, value: str, kind: PlaceholderType) -> Group | None:
-        """The group that has ``value`` among its forms however it is spelt: of ``kind`` first."""
-        key = normalize(value)
+        """The group that has ``value`` among its forms however it is spelt, as a value of
+        ``kind`` is spelt (``value_key``, ruling R100): its canonical form, its variants or a
+        form it was seen in; of ``kind`` first."""
+        key = value_key(kind, value)
         holding = [
             g
             for g in self.groups
-            if key in {normalize(form) for form in (g.canonical, *g.variants)}
+            if key
+            in {
+                value_key(kind, form)
+                for form in (g.canonical, *g.variants, *(f.text for f in g.findings))
+            }
         ]
         return next((g for g in holding if g.type is kind), holding[0] if holding else None)
 

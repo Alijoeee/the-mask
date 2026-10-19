@@ -15,7 +15,7 @@ from themask.paths import lists_path
 from themask.review import ReviewCounts, ReviewState
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
-CUSTOM = PlaceholderType.CUSTOM
+AMOUNT, CUSTOM = PlaceholderType.AMOUNT, PlaceholderType.CUSTOM
 
 
 def spot(kind, text, needle, nth=0, source="model"):
@@ -173,6 +173,19 @@ def test_hide_text_of_another_type_retypes_the_group(review):
     assert [r.placeholder for r in review.mask_plan().replacements].count("[CUSTOM_1]") == 2
 
 
+def test_hide_text_of_a_value_that_differs_only_in_a_point_makes_a_new_group(lists):
+    # Ruling R100: "EUR 125" is not "EUR 1.25", however alike their digits; another spelling of
+    # the group's own value joins it.
+    text = "The fee is EUR 1.25 per item; the cap is EUR 125, or 1,25 EUR with the discount."
+    fee = group(AMOUNT, "[AMOUNT_1]", "EUR 1.25", [spot(AMOUNT, text, "EUR 1.25")])
+    review = hand_made(text, [fee], lists)
+    cap = review.hide_text("EUR 125", AMOUNT)
+    assert cap.placeholder == "[AMOUNT_2]" and [f.text for f in cap.findings] == ["EUR 125"]
+    assert review.hide_text("1,25 EUR", AMOUNT).placeholder == "[AMOUNT_1]"
+    assert placeholders(review) == ["[AMOUNT_1]", "[AMOUNT_2]"]
+    assert [f.text for f in review.groups[0].findings] == ["EUR 1.25", "1,25 EUR"]
+
+
 def test_hide_text_makes_a_new_group_numbered_next_for_its_type(review):
     g = review.hide_text("starts now", C)
     assert g is review.groups[-1] and g.placeholder == "[COMPANY_4]"
@@ -214,6 +227,58 @@ def test_the_owner_can_hide_a_bare_name_the_sweep_left_visible(lists):
     assert g.id == smith.id and g.placeholder == "[PERSON_1]" and len(review.groups) == 1
     assert [(f.text, f.source) for f in g.findings] == [("John Smith", "model"), ("Smith", "user")]
     assert g.findings[1].start == text.index("The Smith") + 4
+
+
+def test_hide_text_switches_a_place_switched_off_back_on(lists):
+    # F-12: the owner unticks the second place, then selects that very text and clicks Hide.
+    text = "Acme Supplies Ltd sells. Acme Supplies Ltd buys. Acme delivers."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [
+            spot(C, text, "Acme Supplies Ltd", source="rule"),
+            spot(C, text, "Acme Supplies Ltd", 1, source="sweep"),
+            spot(C, text, "Acme", 2, source="sweep"),
+        ],
+        ["Acme"],
+    )
+    review = hand_made(text, [acme], lists)
+    review.set_occurrence_enabled(acme.id, 1, False)
+    assert review.hide_text("Acme Supplies Ltd", C).placeholder == "[COMPANY_1]"
+    assert review.groups[0].disabled == set()
+    assert [(r.start, r.end) for r in review.mask_plan().replacements] == [
+        (0, 17),
+        (25, 42),
+        (49, 53),
+    ]
+
+
+def test_always_hide_after_a_never_hide_of_the_short_form_hides_it_again(lists):
+    # F-12: the owner never-hides "Acme", then changes their mind in the same review.
+    text = "Acme Supplies Ltd sells. Acme Supplies Ltd buys. Acme delivers."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [
+            spot(C, text, "Acme Supplies Ltd", source="rule"),
+            spot(C, text, "Acme Supplies Ltd", 1, source="sweep"),
+            spot(C, text, "Acme", 2, source="sweep"),
+        ],
+        ["Acme"],
+    )
+    review = hand_made(text, [acme], lists)
+    review.add_never_hide("Acme")
+    assert review.groups[0].disabled == {2}
+    review.add_always_hide("Acme")
+    assert review.groups[0].disabled == set() and "Acme" in review.groups[0].variants
+    assert [(r.start, r.end) for r in review.mask_plan().replacements] == [
+        (0, 17),
+        (25, 42),
+        (49, 53),
+    ]
+    assert placeholders(review) == ["[COMPANY_1]"]  # it joined the group that has the form
 
 
 def test_hide_text_switches_a_group_back_on(review):
@@ -581,6 +646,83 @@ def test_a_group_the_case_key_holds_is_not_taken_over_by_a_longer_hidden_text(li
     assert placeholders(kept) == ["[CUSTOM_1]", "[CUSTOM_2]"]
     assert [f.text for f in kept.groups[0].findings] == ["Falcon"]
     assert [f.start for f in new.findings] == [text.rindex("Project Falcon")]
+
+
+def test_two_groups_the_case_key_holds_cannot_be_merged(lists):
+    # Ruling R107: two stored parties can never be one placeholder in the new file without a
+    # silent wrong value in the restore (the reviewer's reproduction).
+    text = "Acme Supplies Ltd and Zeta Holdings B.V. sign this annex."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    zeta = group(
+        C,
+        "[COMPANY_3]",
+        "Zeta Holdings B.V.",
+        [spot(C, text, "Zeta Holdings B.V.", source="sweep")],
+        ["Zeta"],
+    )
+    review = hand_made(text, [acme, zeta], lists, reserved=["[COMPANY_1]", "[COMPANY_3]"])
+    with pytest.raises(ValueError) as refused:
+        review.merge([acme.id, zeta.id])
+    assert str(refused.value) == (
+        "[COMPANY_1] and [COMPANY_3] are both in the case's key and cannot be merged; leave them"
+        " as two values."
+    )
+    assert placeholders(review) == ["[COMPANY_1]", "[COMPANY_3]"]
+    assert [g.canonical for g in review.groups] == ["Acme Supplies Ltd", "Zeta Holdings B.V."]
+
+
+def test_a_group_the_case_key_holds_survives_a_merge_with_its_form(lists):
+    # Ruling R107: the stored group survives whatever its number and keeps its canonical form,
+    # the value the key will keep; the other group's forms join its variants.
+    text = "Acme Supplies Ltd signs. Acme Supplies Limited pays. ACME delivers."
+    stored = group(
+        C,
+        "[COMPANY_3]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    fuller = group(
+        C,
+        "[COMPANY_2]",
+        "Acme Supplies Limited",
+        [spot(C, text, "Acme Supplies Limited")],
+        ["ACME"],
+    )
+    review = hand_made(text, [stored, fuller], lists, reserved=["[COMPANY_3]"])
+    merged = review.merge([fuller.id, stored.id])
+    assert (merged.placeholder, merged.canonical) == ("[COMPANY_3]", "Acme Supplies Ltd")
+    assert merged.variants >= {"Acme Supplies Ltd", "Acme Supplies Limited", "Acme", "ACME"}
+    assert placeholders(review) == ["[COMPANY_3]"]
+    assert [f.text for f in merged.findings] == [
+        "Acme Supplies Ltd",
+        "Acme Supplies Limited",
+        "ACME",
+    ]
+    assert [r.placeholder for r in review.mask_plan().replacements] == ["[COMPANY_3]"] * 3
+
+
+def test_splitting_a_group_the_case_key_holds_leaves_its_canonical(lists):
+    text = "Acme signs. Acme Supplies Ltd pays."
+    stored = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [spot(C, text, "Acme", source="sweep"), spot(C, text, "Acme Supplies Ltd", source="sweep")],
+        ["Acme"],
+    )
+    review = hand_made(text, [stored], lists, reserved=["[COMPANY_1]"])
+    new = review.split(stored.id, [1])  # the full name moves out; the stored form stays the same
+    kept = review.groups[0]
+    assert (kept.placeholder, kept.canonical) == ("[COMPANY_1]", "Acme Supplies Ltd")
+    assert "Acme Supplies Ltd" in kept.variants and [f.text for f in kept.findings] == ["Acme"]
+    assert (new.placeholder, new.canonical) == ("[COMPANY_2]", "Acme Supplies Ltd")
 
 
 def test_a_merge_does_not_take_over_a_group_the_case_key_holds(lists):

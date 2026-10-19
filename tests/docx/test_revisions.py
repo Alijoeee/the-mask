@@ -539,6 +539,51 @@ def test_a_paragraph_change_keeps_the_mark_and_the_section_break(make_docx: Make
     assert lines(accepted) == lines(rejected) == ["Section one", "Section two", "Header"]
 
 
+W14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+
+
+def test_co_authoring_conflict_marks_are_resolved_like_insertions_and_deletions(
+    make_docx: MakeDocx,
+) -> None:
+    # Ruling R110: a file saved mid conflict holds w14:conflictIns and w14:conflictDel, which
+    # Word reads as a change; the text inside is what the session put in or took out.
+    body = (
+        f'<w:p xmlns:w14="{W14}"><w:r><w:t xml:space="preserve">Price: </w:t></w:r>'
+        f"<w14:conflictIns {A}><w:r><w:t>EUR 9,999</w:t></w:r></w14:conflictIns>"
+        f"<w14:conflictDel {B}><w:r><w:delText>EUR 1,111</w:delText></w:r></w14:conflictDel>"
+        "</w:p>"
+    )
+    path = make_docx(body)
+    pkg = DocxPackage.open(path)
+    assert has_revisions(pkg)
+    assert extract_text(pkg, "accepted").text == "Price: EUR 9,999"
+    assert extract_text(pkg, "rejected").text == "Price: EUR 1,111"
+    accepted = resolved(path, accept_all)
+    assert lines(accepted) == ["Price: EUR 9,999"] and not has_revisions(accepted)
+    rejected = resolved(path, reject_all)
+    assert lines(rejected) == ["Price: EUR 1,111"] and not has_revisions(rejected)
+    for pkg in (accepted, rejected):
+        document = pkg.raw("word/document.xml")
+        assert b"conflict" not in document and b'w:author="' not in document
+
+
+def test_a_change_record_out_of_its_place_only_goes(make_docx: MakeDocx) -> None:
+    # Word never writes a w:sectPrChange straight in the body; a damaged file might. Rejecting
+    # it emptied the body (F-11): now the record goes and the body stays as it was.
+    body = (
+        para(run("Clause 1. The Buyer pays."))
+        + para(run("Clause 2. The Seller delivers."))
+        + f"<w:sectPrChange {A}><w:sectPr/></w:sectPrChange>"
+        + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>'
+    )
+    path = make_docx(body)
+    for resolve in (reject_all, accept_all):
+        pkg = resolved(path, resolve)
+        assert lines(pkg) == ["Clause 1. The Buyer pays.", "Clause 2. The Seller delivers."]
+        assert leftovers(pkg) == []
+        assert pkg.xml("word/document.xml").find(".//w:pgSz", NS) is not None
+
+
 def test_a_change_record_without_old_properties(make_docx: MakeDocx) -> None:
     # No old properties means none before: the element goes, unless the file needs it (a
     # table's properties) or it still holds what the record does not cover (the mark).

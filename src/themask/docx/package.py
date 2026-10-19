@@ -2,10 +2,13 @@
 
 A .docx is a zip of parts, most of them XML (the Open Packaging Conventions). ``DocxPackage.open``
 reads every entry into memory and is done with the file, so the original is never touched again;
-``save`` always writes a new one. A part's XML is parsed the first time it is asked for and kept,
-and what ``raw`` and ``save`` give for it is that tree as it is now, changes included. A file that
-is not a Word file, or that Word has encrypted with a password, is refused with a message the
-owner can act on.
+``save`` always writes a new one. Before it reads, it checks what the zip's directory declares
+(ruling R104): at most ``MAX_ENTRIES`` entries, none over ``MAX_PART_SIZE`` once expanded and at
+most ``MAX_TOTAL_SIZE`` in all, so that a zip bomb never takes the app down; a file over a limit
+is refused as not a Word file. No Word file comes near them. A part's XML is parsed the first
+time it is asked for and kept, and what ``raw`` and ``save`` give for it is that tree as it is
+now, changes included. A file that is not a Word file, or that Word has encrypted with a
+password, is refused with a message the owner can act on.
 """
 
 from __future__ import annotations
@@ -94,6 +97,12 @@ _UNREADABLE_ZIP = (
 
 _ZIP_TIME = (1980, 1, 1, 0, 0, 0)  # the date Word itself gives every entry of a .docx
 
+# What a zip may declare before it is read (ruling R104): entries, bytes of one entry expanded,
+# bytes of all of them.
+MAX_ENTRIES = 10_000
+MAX_PART_SIZE = 256 * 1024 * 1024
+MAX_TOTAL_SIZE = 1024 * 1024 * 1024
+
 
 class DocxPackage:
     """A Word file in memory: every part by its name in the zip, in the zip's order."""
@@ -110,9 +119,10 @@ class DocxPackage:
 
         Raises ProtectedFileError for a file Word has encrypted with a password, and
         UnsupportedFileError for anything else that is not a .docx: an old .doc, a damaged or
-        non-zip file, a zip without word/document.xml or without [Content_Types].xml (which
-        tells the text parts apart), or one whose main document is not a Word document: a
-        "Strict Open XML" document, whose text this package cannot see, or one with a DOCTYPE.
+        non-zip file, a zip over the limits above or whose directory lies about an entry's
+        size, a zip without word/document.xml or without [Content_Types].xml (which tells the
+        text parts apart), or one whose main document is not a Word document: a "Strict Open
+        XML" document, whose text this package cannot see, or one with a DOCTYPE.
         """
         data = path.read_bytes()
         if data.startswith(_COMPOUND_FILE):
@@ -121,7 +131,10 @@ class DocxPackage:
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                parts = {i.filename: archive.read(i) for i in archive.infolist() if not i.is_dir()}
+                infos = [i for i in archive.infolist() if not i.is_dir()]
+                if not _within_limits(infos):
+                    raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
+                parts = {i.filename: _read_entry(archive, i) for i in infos}
         except _UNREADABLE_ZIP as error:
             raise UnsupportedFileError(NOT_A_DOCX_MESSAGE) from error
         if CONTENT_TYPES not in parts or DOCUMENT not in parts:
@@ -314,6 +327,25 @@ class DocxPackage:
             if found is not None:
                 types[name] = found.strip().casefold()
         return types
+
+
+def _within_limits(infos: list[zipfile.ZipInfo]) -> bool:
+    """Whether what the zip's directory declares is within the limits (ruling R104)."""
+    return (
+        len(infos) <= MAX_ENTRIES
+        and all(info.file_size <= MAX_PART_SIZE for info in infos)
+        and sum(info.file_size for info in infos) <= MAX_TOTAL_SIZE
+    )
+
+
+def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    """The bytes of one entry, read through a stream that stops at the declared size (and raises
+    on a wrong checksum); an entry that gives any other number of bytes is refused."""
+    with archive.open(info) as entry:
+        data = entry.read(info.file_size)
+        if len(data) != info.file_size or entry.read(1):
+            raise UnsupportedFileError(NOT_A_DOCX_MESSAGE)
+    return data
 
 
 def _parse(data: bytes) -> etree._Element:

@@ -10,13 +10,17 @@ until then it must not keep text that the side kept does not have. Afterwards
 
 What each kind of revision becomes, accepting / rejecting:
 
-- content put in (``w:ins``, ``w:moveTo``): kept without its wrapper / removed. Content taken out
-  (``w:del``, ``w:moveFrom``): removed / kept, its ``w:delText`` and ``w:delInstrText`` becoming
-  ``w:t`` and ``w:instrText``. Deleted text outside any deletion, as a damaged file may hold it,
-  is removed / kept as text, the way the reader's two views read it. A move's range markers go.
+- content put in (``w:ins``, ``w:moveTo``, and ``w14:conflictIns``, a co-authoring conflict's
+  insertion: ruling R110): kept without its wrapper / removed. Content taken out (``w:del``,
+  ``w:moveFrom``, ``w14:conflictDel``): removed / kept, its ``w:delText`` and
+  ``w:delInstrText`` becoming ``w:t`` and ``w:instrText``. Deleted text outside any deletion,
+  as a damaged file may hold it, is removed / kept as text, the way the reader's two views read
+  it. A move's range markers go.
 - a change of properties (``w:rPrChange`` and the other ``*Change`` records): the record goes and
   the current properties stay / the properties go back to the old ones the record holds (see
-  ``_restore``). A numbering change only goes: it holds no old properties.
+  ``_restore``). A numbering change only goes: it holds no old properties, and so does a record
+  that is not in the element it is a change of (``w:sectPrChange`` straight in the body, which
+  only a damaged file holds).
 - a paragraph mark put in (``w:pPr/w:rPr/w:ins``, ``w:moveTo``): the mark stays / the paragraph is
   joined with the next one; a mark taken out (``w:del``, ``w:moveFrom``): the other way round.
   Joining puts the paragraph's content in front of the next paragraph's, whose properties win, as
@@ -46,6 +50,10 @@ def _w(name: str) -> str:
     return f"{{{NS['w']}}}{name}"
 
 
+def _w14(name: str) -> str:
+    return f"{{{NS['w14']}}}{name}"
+
+
 _P = _w("p")
 _PPR = _w("pPr")
 _RPR = _w("rPr")
@@ -61,25 +69,19 @@ _DEL_TEXT = _w("delText")
 _DEL_INSTR_TEXT = _w("delInstrText")
 
 _INS, _DEL, _MOVE_FROM, _MOVE_TO = (_w(n) for n in ("ins", "del", "moveFrom", "moveTo"))
+_CONFLICT_INS, _CONFLICT_DEL = _w14("conflictIns"), _w14("conflictDel")
 # What a change put in or took out: content, or the mark of a paragraph or a row.
-_TRACKED = frozenset({_INS, _DEL, _MOVE_FROM, _MOVE_TO})
+_TRACKED = frozenset({_INS, _DEL, _MOVE_FROM, _MOVE_TO, _CONFLICT_INS, _CONFLICT_DEL})
 _CELL_INS, _CELL_DEL, _CELL_MERGE = (_w(n) for n in ("cellIns", "cellDel", "cellMerge"))
 _CELL_MARKS = frozenset({_CELL_INS, _CELL_DEL, _CELL_MERGE})
 _NUMBERING_CHANGE = _w("numberingChange")
 # A change of properties holds the old properties in an element named like the one it sits in:
 # a w:rPrChange in a w:rPr holds the old w:rPr.
-_PROPERTY_CHANGES = frozenset(
-    _w(name)
-    for name in (
-        "rPrChange",
-        "pPrChange",
-        "sectPrChange",
-        "tblPrChange",
-        "tblPrExChange",
-        "trPrChange",
-        "tcPrChange",
-    )
-)
+_OWNERS = {
+    _w(f"{name}Change"): _w(name)
+    for name in ("rPr", "pPr", "sectPr", "tblPr", "tblPrEx", "trPr", "tcPr")
+}
+_PROPERTY_CHANGES = frozenset(_OWNERS)
 _REVISIONS = _TRACKED | _CELL_MARKS | _PROPERTY_CHANGES | {_NUMBERING_CHANGE}
 _MOVE_RANGES = frozenset(
     _w(name)
@@ -127,8 +129,8 @@ class _Side:
     gone_cell: str  # the mark of a cell that goes
 
 
-_ACCEPT = _Side(accept=True, gone=frozenset({_DEL, _MOVE_FROM}), gone_cell=_CELL_DEL)
-_REJECT = _Side(accept=False, gone=frozenset({_INS, _MOVE_TO}), gone_cell=_CELL_INS)
+_ACCEPT = _Side(True, gone=frozenset({_DEL, _MOVE_FROM, _CONFLICT_DEL}), gone_cell=_CELL_DEL)
+_REJECT = _Side(False, gone=frozenset({_INS, _MOVE_TO, _CONFLICT_INS}), gone_cell=_CELL_INS)
 
 
 def accept_all(pkg: DocxPackage) -> int:
@@ -285,10 +287,14 @@ def _restore(record: etree._Element) -> None:
 
     What the old properties cannot hold stays where it is (``_KEPT_FIRST``, ``_KEPT_LAST``). A
     record without old properties means there were none: the element goes, unless the file needs
-    it (a table's w:tblPr, a section's w:sectPr) or something stayed in it.
+    it (a table's w:tblPr, a section's w:sectPr) or something stayed in it. A record that is not
+    in the element it is a change of only goes (F-11).
     """
     current = record.getparent()
     if current is None:
+        return
+    if current.tag != _OWNERS[record.tag]:
+        _remove(record)
         return
     old = record.find(current.tag)
     first = [c for c in current if c.tag in _KEPT_FIRST.get(current.tag, ())]

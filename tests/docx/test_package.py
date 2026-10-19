@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import zipfile
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from tests.fixtures.docx import (
     content_types,
     relationships,
 )
+from themask.docx import package
 from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import extract_text
 from themask.errors import MaskError, ProtectedFileError, UnsupportedFileError
@@ -134,6 +136,73 @@ def test_strict_open_xml_is_refused(make_docx: MakeDocx) -> None:
 
 
 # ---- parts -----------------------------------------------------------------------------------
+
+
+# ---- the limits of a zip (ruling R104) -------------------------------------------------------
+
+
+def with_entries(make_docx: MakeDocx, count: int) -> Path:
+    """A Word file with ``count`` more entries, each a byte."""
+    path = make_docx("<w:p/>")
+    with zipfile.ZipFile(path, "a", zipfile.ZIP_STORED) as archive:
+        for number in range(count):
+            archive.writestr(f"word/media/x{number}.bin", b"x")
+    return path
+
+
+def test_an_entry_declared_too_big_is_refused_before_it_is_read(
+    make_docx: MakeDocx,
+) -> None:
+    # 257 MiB of zeros, 260 KB on disk: reading it would take seconds and the memory of a
+    # whole app; the central directory already says how big it is.
+    path = make_docx("<w:p/>")
+    chunk = bytes(1024 * 1024)
+    with (
+        zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as archive,
+        archive.open("word/media/image1.png", "w") as entry,
+    ):
+        for _ in range(257):
+            entry.write(chunk)
+    started = time.perf_counter()
+    with pytest.raises(UnsupportedFileError) as e:
+        DocxPackage.open(path)
+    assert time.perf_counter() - started < 2.0  # not the seconds a read would take
+    assert e.value.user_message == NOT_A_DOCX
+
+
+def test_too_many_entries_are_refused_and_many_are_fine(make_docx: MakeDocx) -> None:
+    with pytest.raises(UnsupportedFileError):
+        DocxPackage.open(with_entries(make_docx, 10_001 - 4))  # the file has four of its own
+    assert len(DocxPackage.open(with_entries(make_docx, 9_999 - 4)).names()) == 9_999
+
+
+def test_entries_too_big_together_are_refused(
+    make_docx: MakeDocx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Five entries of a fifth of the total each, declared, with the limits brought down so that
+    # no test writes a gigabyte: the sum counts, not any one entry.
+    monkeypatch.setattr(package, "MAX_PART_SIZE", 4 * 1024 * 1024)
+    monkeypatch.setattr(package, "MAX_TOTAL_SIZE", 16 * 1024 * 1024)
+    path = make_docx("<w:p/>")
+    with zipfile.ZipFile(path, "a", zipfile.ZIP_DEFLATED) as archive:
+        for number in range(5):
+            archive.writestr(f"word/media/x{number}.bin", bytes(4 * 1024 * 1024))
+    with pytest.raises(UnsupportedFileError):
+        DocxPackage.open(path)
+
+
+def test_an_entry_whose_header_lies_about_its_size_is_refused(make_docx: MakeDocx) -> None:
+    path = make_docx("<w:p/>")
+    with zipfile.ZipFile(path, "a", zipfile.ZIP_STORED) as archive:
+        archive.writestr("word/media/x.bin", b"twelve bytes")
+    data = bytearray(path.read_bytes())
+    # The central directory's declared size of the last entry is cut down to four bytes.
+    at = data.rindex(b"word/media/x.bin") - 46  # the central directory header before the name
+    assert data[at : at + 4] == b"PK\x01\x02"
+    data[at + 24 : at + 28] = (4).to_bytes(4, "little")
+    path.write_bytes(bytes(data))
+    with pytest.raises(UnsupportedFileError):
+        DocxPackage.open(path)
 
 
 def test_names_raw_and_xml(corpus: Path) -> None:

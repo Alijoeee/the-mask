@@ -24,7 +24,9 @@ compared depends on its type; a variant is compared as its entry's type:
   is not found in "11250", "EUR 1,250" not in "EUR 12,500", "1 250" not in "1 250 000"; "1,250"
   is in "In 2025 1,250 units"). A tab, a line break or any other mark parts two numbers
   ("Instalment 2<tab>125,000"), and so does a footnote mark; cents after it ("125,000.00") are
-  no other number.
+  no other number. A decimal part ends a number ("EUR 1,250.00 100 units" holds EUR 1,250.00),
+  and a number written with commas or dots goes on across no plain space ("EUR 1,250 100
+  units" holds EUR 1,250, "No. 100 1,250.00" holds 1,250.00).
 
 It searches:
 
@@ -32,14 +34,21 @@ It searches:
   value Word split across runs is found whole and a tab or a line break parts two words; every
   other text of its elements, its XML comments and processing instructions; and every attribute
   value on its own (ruling R19). Relationship targets and field instructions are searched
-  %-decoded as well (ruling R26). A word of a field instruction that is exactly a field's name or
-  the format keyword after a format switch (PAGE, \\* MERGEFORMAT) is no hit for a value spelt
-  like it; anything else in an instruction is, a value of several words or a path led by a
-  backslash too (ruling R31);
+  %-decoded as well (ruling R26). Every namespace an element declares is searched too, its
+  address and its prefix, and so is the name of every element and attribute outside the file
+  format's own vocabularies, with a camel-cased name read as its words (ruling R102): a
+  document-assembly schema may be named after a party. A word of a field instruction that is
+  exactly a field's name or the format keyword after a format switch (PAGE, \\* MERGEFORMAT) is no
+  hit for a value spelt like it; anything else in an instruction is, a value of several words
+  or a path led by a backslash too (ruling R31);
 * every other part (pictures, embedded files, a part that is not valid XML): its bytes read as
-  UTF-8 and as UTF-16, for the values of at least six letters and digits that are not all digits,
-  which stray bytes do not spell by chance (ruling R14 b);
+  UTF-8 and as UTF-16, for the values of at least six letters and digits that are not all digits
+  ("EUR 10.00" has seven), which stray bytes do not spell by chance (ruling R14 b);
 * the file's own name and the name of every part.
+
+``media_left`` is the gate's other half (ruling R101): the leak check cannot read pixels, so every
+picture or media part still in the file, and every relationship to one, is reported as a hit of
+its own, whatever points at it.
 
 What is the file format's own vocabulary and never the document's content is not searched (rulings
 R64, R66, R67): the namespace and schema addresses (values starting with "http://schemas.",
@@ -67,7 +76,9 @@ A hit says where it is and shows about forty characters round it, with every str
 normalises to a value, a variant or a surname of the key (wherever it stands, glued to other
 letters or not: ruling R69) replaced by its placeholder, so that no hit ever shows what it found;
 a part whose name holds a value is shown with the value hidden too. A hit counts the places in its
-part that read the same (``LeakHit.count``), and ``hits_by_placeholder`` totals them.
+part that read the same (``LeakHit.count``), and ``hits_by_placeholder`` totals them. Where two
+entries fold alike ("EUR 1,250.00" and "EUR 1,250"; an id and a phone number of the same digits),
+a place is a hit for each of them.
 ``rescan_detection`` runs the detection again on the masked file and lists what it finds that the
 owner never marked. Nothing here writes to the log.
 """
@@ -91,8 +102,9 @@ from lxml import etree
 from themask.detect.grouping import PersonName
 from themask.detect.pipeline import CombinedText, analyze
 from themask.detect.sweep import crosses_a_line, is_searchable, stands_as_a_name
+from themask.docx.cleaner import MEDIA_RELATIONSHIPS, MEDIA_TYPES
 from themask.docx.masker import FIELD_NAMES, FORMAT_SWITCHES, INSTRUCTION_WORD, percent_decoded
-from themask.docx.package import NS, RELS_NS, TYPES_NS, DocxPackage
+from themask.docx.package import CONTENT_TYPES, NS, RELS_NS, TYPES_NS, DocxPackage
 from themask.docx.reader import extract_text
 from themask.model import Group, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
@@ -113,6 +125,9 @@ FILE_NAME = "<file name>"
 PART_NAME = "<part name>"
 # What a hit in the bytes of a part shows when the bytes round it are not plain text.
 BINARY_PART = "<binary part>"
+# The placeholder and the context of a hit that is a picture or media file left in the file.
+MEDIA_PLACEHOLDER = "(picture)"
+MEDIA_LEFT = "a picture or media file the cleaner could not remove is still in the file"
 
 # The types whose values are names, compared by their words (ruling R63); the others are numbers
 # and codes, compared by their letters and digits alone.
@@ -207,6 +222,70 @@ def scan_package(path: Path, entries: list[KeyEntry]) -> list[LeakHit]:
     for rest in by_surname.values():
         hits += rest
     return _counted(hits)
+
+
+def media_left(path: Path) -> list[LeakHit]:
+    """Every picture or media file still in the Word file at ``path``, as hits (ruling R101).
+
+    One hit for each part under ``word/media/`` and for each part whose content type is an image,
+    a sound, a video or a 3D model, and one for each relationships part that holds a relationship
+    of such a type, in the order of the zip; each with ``MEDIA_PLACEHOLDER`` for its placeholder
+    and ``MEDIA_LEFT`` for its context, so the dialog lists it with the leftovers. A relationships
+    part or a content types part that cannot be read counts as a hit too: what cannot be checked
+    is not passed. Raises what reading the zip raises.
+    """
+    with zipfile.ZipFile(path) as archive:
+        parts = {info.filename: archive.read(info) for info in archive.infolist()}
+    types = _content_types_of(parts)
+    hits = []
+    if types is None:  # the content types cannot be read: no part's type can be told
+        hits.append(LeakHit(CONTENT_TYPES, MEDIA_PLACEHOLDER, MEDIA_LEFT))
+        types = {}
+    for name, data in parts.items():
+        media = name.casefold().startswith("word/media/") or types.get(name, "").startswith(
+            MEDIA_TYPES
+        )
+        if media or (_is_rels_part(name) and _relates_to_media(data)):
+            hits.append(LeakHit(name, MEDIA_PLACEHOLDER, MEDIA_LEFT))
+    return hits
+
+
+def _content_types_of(parts: dict[str, bytes]) -> dict[str, str] | None:
+    """The content type of each part, in lower case, from the package's content types part:
+    its Override, else the Default for its extension; None when that part cannot be read."""
+    root = _parsed(parts[CONTENT_TYPES]) if CONTENT_TYPES in parts else None
+    if root is None:
+        return None
+    overrides = {
+        _unquoted(o.get("PartName", "")).lstrip("/").casefold(): o.get("ContentType", "")
+        for o in root.iterchildren(_OVERRIDE)
+    }
+    defaults = {
+        d.get("Extension", "").casefold(): d.get("ContentType", "")
+        for d in root.iterchildren(_DEFAULT)
+    }
+    types = {}
+    for name in parts:
+        found = overrides.get(_unquoted(name).casefold())
+        if found is None:
+            file = posixpath.basename(name)
+            found = defaults.get(file.rpartition(".")[2].casefold()) if "." in file else None
+        if found is not None:
+            types[name] = found.strip().casefold()
+    return types
+
+
+def _is_rels_part(name: str) -> bool:
+    return name.endswith(".rels") and posixpath.basename(posixpath.dirname(name)) == "_rels"
+
+
+def _relates_to_media(data: bytes) -> bool:
+    """Whether a relationships part holds a relationship to a picture or media file, or cannot
+    be read."""
+    root = _parsed(data)
+    return root is None or any(
+        r.get("Type", "").casefold().endswith(MEDIA_RELATIONSHIPS) for r in root.iter(_RELATIONSHIP)
+    )
 
 
 def unverifiable(entries: list[KeyEntry]) -> list[str]:
@@ -359,6 +438,15 @@ def _folds(text: str) -> tuple[str, str, str]:
     marked = _marked(text)
     numbers = pre if marked == text else _prefolded(marked)
     return words, tight, _NOT_A_LETTER_OR_DIGIT.sub("", numbers)
+
+
+def number_fold(text: str) -> str:
+    """``text`` folded as a number is compared (rulings R14, R71, R72): its letters and digits
+    alone, each decimal point the mark and the zeros that end a decimal part dropped, so that
+    "1,250.00", "1.250,00" and "1 250" are all "1250" and "1,250.50" is "1250x5". The identity of
+    an amount, a percentage or a quantity is built on it (``detect.identity``, ruling R100): one
+    set of rules says what is one number, here and in the grouping."""
+    return _folds(text)[_COMPACT]
 
 
 def _marked(text: str) -> str:
@@ -533,28 +621,36 @@ class _Match:
 _WORD_EDGES = frozenset({"", " ", "\x00"})
 
 
+# The placeholders of the entries whose forms fold to one needle, in the order of the key.
+Placeholders = tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class _Needles:
     """The key as the scan looks for it: each name folded both ways by its words (rulings R63,
-    R68) and each number as a number (rulings R14, R71), with its entry's placeholder; and every
-    form by its letters and digits alone (``plain``), the names among them in ``plain_names``,
-    for what a hit's context hides. A form shorter than ``MIN_LENGTH`` letters and digits is
-    left out; one that two entries share keeps the first one's placeholder.
+    R68) and each number as a number (rulings R14, R71), with the placeholders of the entries
+    that fold to it; and every form by its letters and digits alone (``plain``), the names among
+    them in ``plain_names``, for what a hit's context hides. A form shorter than ``MIN_LENGTH``
+    letters and digits is left out. ``raw`` names the needles (by view and key) that some form of
+    at least ``MIN_RAW_LENGTH`` letters and digits, not all digits, folds to: those are looked
+    for in bytes (ruling R14 b).
     """
 
-    names: dict[str, str]
-    tight: dict[str, str]
-    numbers: dict[str, str]
+    names: dict[str, Placeholders]
+    tight: dict[str, Placeholders]
+    numbers: dict[str, Placeholders]
     plain: dict[str, str] = field(default_factory=dict)
     plain_names: frozenset[str] = frozenset()
+    raw: frozenset[tuple[int, str]] = frozenset()
 
     @classmethod
     def of(cls, entries: Iterable[KeyEntry]) -> _Needles:
-        names: dict[str, str] = {}
-        tight: dict[str, str] = {}
-        numbers: dict[str, str] = {}
+        names: dict[str, Placeholders] = {}
+        tight: dict[str, Placeholders] = {}
+        numbers: dict[str, Placeholders] = {}
         plain: dict[str, str] = {}
         plain_names: set[str] = set()
+        raw: set[tuple[int, str]] = set()
         for entry in entries:
             for form in (entry.value, *entry.variants):
                 words, glued, number = _folds(form)
@@ -562,13 +658,18 @@ class _Needles:
                 if len(letters) < MIN_LENGTH:
                     continue
                 plain.setdefault(letters, entry.placeholder)
+                in_bytes = len(letters) >= MIN_RAW_LENGTH and not letters.isdigit()
+                found: list[tuple[int, str, dict[str, Placeholders]]]
                 if entry.type in NAME_TYPES:
-                    names.setdefault(words, entry.placeholder)
-                    tight.setdefault(glued, entry.placeholder)
+                    found = [(_WORDS, words, names), (_TIGHT, glued, tight)]
                     plain_names.add(letters)
                 else:
-                    numbers.setdefault(number, entry.placeholder)
-        return cls(names, tight, numbers, plain, frozenset(plain_names))
+                    found = [(_COMPACT, number, numbers)]
+                for view, key, needles in found:
+                    _add(needles, key, entry.placeholder)
+                    if in_bytes:
+                        raw.add((view, key))
+        return cls(names, tight, numbers, plain, frozenset(plain_names), frozenset(raw))
 
     def __bool__(self) -> bool:
         return bool(self.names or self.numbers)
@@ -578,38 +679,41 @@ class _Needles:
         return max(map(len, [*self.names, *self.numbers]), default=0)
 
     def for_bytes(self) -> _Needles:
-        """The needles looked for in bytes: at least ``MIN_RAW_LENGTH`` letters and digits long
-        and not all digits (ruling R14 b)."""
-
-        def wanted(key: str) -> bool:
-            compact = key.replace(" ", "")
-            letters = _DECIMAL_POINT_IN_KEY.sub("", compact)
-            return len(letters) >= MIN_RAW_LENGTH and _NUMERIC.fullmatch(compact) is None
-
+        """The needles looked for in bytes: those some form of at least ``MIN_RAW_LENGTH``
+        letters and digits, not all digits, folds to (ruling R14 b)."""
         return _Needles(
-            {key: ph for key, ph in self.names.items() if wanted(key)},
-            {key: ph for key, ph in self.tight.items() if wanted(key)},
-            {key: ph for key, ph in self.numbers.items() if wanted(key)},
+            {key: ph for key, ph in self.names.items() if (_WORDS, key) in self.raw},
+            {key: ph for key, ph in self.tight.items() if (_TIGHT, key) in self.raw},
+            {key: ph for key, ph in self.numbers.items() if (_COMPACT, key) in self.raw},
         )
 
     def find(self, folded: tuple[str, ...]) -> Iterator[_Match]:
         """Every place where a needle stands in a text folded the three ways: a name on the edges
-        of words, a number anywhere (``_located`` judges the digits round it)."""
+        of words, a number anywhere (``_located`` judges the digits round it); one match for each
+        entry that folds to the needle."""
         for view, needles in ((_WORDS, self.names), (_TIGHT, self.tight)):
             text = folded[view]
-            for key, placeholder in needles.items():
+            for key, placeholders in needles.items():
                 at = text.find(key)
                 while at >= 0:
                     end = at + len(key)
                     if text[at - 1 : at] in _WORD_EDGES and text[end : end + 1] in _WORD_EDGES:
-                        yield _Match(at, end, key, placeholder, view)
+                        for placeholder in placeholders:
+                            yield _Match(at, end, key, placeholder, view)
                     at = text.find(key, at + 1)
         compact = folded[_COMPACT]
-        for key, placeholder in self.numbers.items():
+        for key, placeholders in self.numbers.items():
             at = compact.find(key)
             while at >= 0:
-                yield _Match(at, at + len(key), key, placeholder, _COMPACT)
+                for placeholder in placeholders:
+                    yield _Match(at, at + len(key), key, placeholder, _COMPACT)
                 at = compact.find(key, at + 1)
+
+
+def _add(needles: dict[str, Placeholders], key: str, placeholder: str) -> None:
+    held = needles.get(key, ())
+    if placeholder not in held:
+        needles[key] = (*held, placeholder)
 
 
 # A decimal point in a folded number (ruling R71).
@@ -621,19 +725,28 @@ _NUMBER_SEPARATORS = frozenset(_GROUP_SEPARATORS)
 _CENTS = re.compile(r"[.,][0-9]{2}(?![0-9])")
 
 
-def _touched(text: str, start: int, end: int, key: str) -> bool:
+_GROUPED = re.compile(r"\d[.,]\d")
+
+
+def _touched(text: str, start: int, end: int, key: str, *, closed: bool = False) -> bool:
     """Whether another digit touches the number found at ``text[start:end]`` on a side where its
     needle ``key`` starts or ends with a digit (rulings R65, R70, R72): right beside it, beyond a
     single full stop, comma, apostrophe or space that only groups thousands, or beyond a plain
     space where the digits beyond it are a thousands group. A tab, a line break, any other mark
-    or the end of the text parts them, and so do cents after it."""
-    if key[:1].isdecimal() and _digit_at(text, start - 1, -1):
+    or the end of the text parts them, and so do cents after it. With ``closed`` the number
+    ends with its decimal part, which nothing goes on from; and a number written with a comma or
+    a full stop between its digits goes on across no plain space on either side."""
+    grouped = _GROUPED.search(text, start, end) is not None
+    if key[:1].isdecimal() and _digit_at(text, start - 1, -1, grouped):
         return True
-    return key[-1:].isdecimal() and not _CENTS.match(text, end) and _digit_at(text, end, 1)
+    if closed or not key[-1:].isdecimal() or _CENTS.match(text, end):
+        return False
+    return _digit_at(text, end, 1, grouped)
 
 
-def _digit_at(text: str, at: int, step: int) -> bool:
-    """Whether ``text[at]`` is a digit, or a number's separator with a digit beyond it."""
+def _digit_at(text: str, at: int, step: int, grouped: bool = False) -> bool:
+    """Whether ``text[at]`` is a digit, or a number's separator with a digit beyond it; a plain
+    space is none for a number that is ``grouped`` with commas or full stops."""
     if not 0 <= at < len(text):
         return False
     if text[at].isdecimal():
@@ -642,7 +755,7 @@ def _digit_at(text: str, at: int, step: int) -> bool:
     if not (0 <= beyond < len(text) and text[beyond].isdecimal()):
         return False
     if text[at] == " ":
-        return _thousands_group(text, beyond, step)
+        return not grouped and _thousands_group(text, beyond, step)
     return text[at] in _NUMBER_SEPARATORS
 
 
@@ -666,7 +779,8 @@ def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Loca
     letters and digits ("10.00%" is the number 10, and counts as "10.00" but not as the 10 of
     "Clause 10": rulings R14 c, R72); and of two matches one of which holds the other only the
     outer one ("Northwind Trading B.V." left in a file is one place, not one for each of its
-    variants). A match that cannot be placed stands at -1."""
+    variants), but a place is kept for each entry that folds to it. A match that cannot be
+    placed stands at -1."""
     placed = []
     folded_away: set[int] | None = None
     for match in matches:
@@ -680,17 +794,25 @@ def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Loca
             start, end = source
             while end in folded_away:  # what folds away at its end is its own (ruling R72)
                 end += 1
+            # A decimal part, the needle's own or one folded away, ends the number.
+            closed = end != source[1] or _DECIMAL_POINT_IN_KEY.search(match.key) is not None
             source = (start, end)
             if len(normalize(text[start:end])) < MIN_LENGTH:
                 continue
-        if match.name or not _touched(text, *source, match.key):
-            placed.append((source, match))
+            if _touched(text, start, end, match.key, closed=closed):
+                continue
+        placed.append((source, match))
     kept: Located = []
     reach = -2
+    last = (-2, -2)
+    seen: set[tuple[int, int, str]] = set()  # the placeholders kept at the last place
     for (start, end), match in sorted(placed, key=lambda p: (p[0][0], -p[0][1], p[1].key)):
-        if start < 0 or end > reach:
+        again = (start, end) == last and (start, end, match.placeholder) not in seen
+        if start < 0 or end > reach or again:
             kept.append((start, end, match))
             reach = max(reach, end)
+            last = (start, end)
+            seen.add((start, end, match.placeholder))
     return kept
 
 
@@ -1117,8 +1239,16 @@ _SHOWN_CHARACTERS = {
 _INSTRUCTION = f"{{{_W}}}instr"
 _RELATIONSHIP = f"{{{RELS_NS}}}Relationship"
 
-# The file format's own vocabulary (ruling R64). Addresses of namespaces and schemas:
-_FORMAT_ADDRESSES = ("http://schemas.", "http://www.w3.org", "urn:schemas-microsoft-com")
+# The file format's own vocabulary (ruling R64). Addresses of namespaces and schemas, and so the
+# namespaces whose element and attribute names are the format's own (ruling R102):
+_FORMAT_ADDRESSES = (
+    "http://schemas.",
+    "http://www.w3.org",
+    "urn:schemas-microsoft-com",
+    "http://purl.org/dc/",
+)
+# Where a camel-cased name parts into words: "NorthwindTradingBV" is "Northwind Trading BV".
+_CAMEL_JOINT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 # The fonts a file names: every attribute of w:rFonts (the theme's fonts and the hint by keyword,
 # the rest by name), and these attributes of these elements.
 _RUN_FONTS = f"{{{_W}}}rFonts"
@@ -1243,7 +1373,14 @@ class _Reader:
             paragraph = _Paragraph()
             self._paragraphs.append((len(self.blocks), paragraph))
             self.blocks.append(_Block(""))
+        self._declarations(element)
+        foreign = not _is_format_namespace(tag)
+        if foreign:
+            self._name(tag, "element name")
         for name, value in element.attrib.items():
+            namespaced = name.startswith("{")
+            if (namespaced and not _is_format_namespace(name)) or (foreign and not namespaced):
+                self._name(name, "attribute name")
             self._attribute(element, name, value)
         if paragraph is not None and tag in _SHOWN_CHARACTERS:
             paragraph.add(_SHOWN_CHARACTERS[tag], False)
@@ -1259,6 +1396,25 @@ class _Reader:
                 self._loose(child)
             if child.tail:
                 self._text(child.tail, shown_in, instruction, bearing)
+
+    def _declarations(self, element: etree._Element) -> None:
+        """The namespaces ``element`` declares itself (ruling R102): each address that is not
+        the file format's own, and each prefix, is a text of its own, searched for names only."""
+        parent = element.getparent()
+        for prefix, address in element.nsmap.items():
+            if parent is not None and parent.nsmap.get(prefix) == address:
+                continue
+            label = f"xmlns:{prefix or ''}"
+            if not _is_format_address(address):
+                self.blocks.append(_Block(address, label, no_digits=True))
+            if prefix:
+                self.blocks.append(_Block(prefix, label, no_digits=True))
+
+    def _name(self, qualified: str, label: str) -> None:
+        """The local name of an element or attribute outside the format's vocabularies, as its
+        words (ruling R102), searched for names only."""
+        local = qualified.rpartition("}")[2]
+        self.blocks.append(_Block(_CAMEL_JOINT.sub(" ", local), label, no_digits=True))
 
     def _attribute(self, element: etree._Element, name: str, value: str) -> None:
         tag = element.tag
@@ -1336,12 +1492,23 @@ class _Reader:
             self.blocks.append(_Block(text))
 
 
+def _is_format_address(value: str) -> bool:
+    """Whether ``value`` is an address of a namespace or schema of the file format's own."""
+    return value[:32].casefold().startswith(_FORMAT_ADDRESSES)
+
+
+def _is_format_namespace(qualified: str) -> bool:
+    """Whether the namespace of a Clark-form tag or attribute name is one of the file format's
+    own (ruling R102); a name in no namespace is not."""
+    return qualified.startswith("{") and _is_format_address(qualified[1:].partition("}")[0])
+
+
 def _is_format_vocabulary(tag: str, name: str, value: str) -> bool:
     """Whether an attribute holds the file format's own vocabulary, searched for nothing: an
     address of a namespace or schema, the type of a relationship (ruling R64), a font that ships
     with Office, Windows or macOS, or one of Word's own theme and scheme names (ruling R66)."""
     return (
-        value[:32].casefold().startswith(_FORMAT_ADDRESSES)
+        _is_format_address(value)
         or (tag == _RELATIONSHIP and name == "Type")
         or (tag == _RUN_FONTS and (name in _FONT_KEYWORDS or _is_office_font(value)))
         or (_FONT_NAMES.get(tag) == name and _is_office_font(value))

@@ -34,9 +34,11 @@ other way round. A "company" without a legal form that has an honorific or an in
 person that is nobody's surname or first name joins the company it fits, and a single word found
 as a company that fits no company joins the one person whose surname it is.
 
-Every other type: the findings with the same value, however it is spelt (``normalize``), are one
-group. A phone number is the same value with its country code and in its national form ("+31 30
-360 7352" and "030 360 7352"), unless two numbers found have that national form.
+Every other type: the findings with the same value, however it is spelt, are one group: what is
+one value is the type's own identity (``identity.value_key``, ruling R100), so "EUR 1,250" and
+"1.250,00 EUR" are one amount and "EUR 1.25" and "EUR 125" are two. A phone number is the same
+value with its country code and in its national form ("+31 30 360 7352" and "030 360 7352"),
+unless two numbers found have that national form.
 
 The variants of a group are the forms it was seen in and the forms ``variants_of`` derives from
 them ("J. Smith" of John Smith, "Northwind" of Northwind Trading B.V.); for a name of three words
@@ -68,6 +70,7 @@ from dataclasses import dataclass, field, replace
 
 import phonenumbers
 
+from themask.detect.identity import value_key
 from themask.detect.lists import is_default_term
 from themask.detect.sweep import (
     Spans,
@@ -252,8 +255,8 @@ class _Bucket:
 
     @classmethod
     def of_seed(cls, seed: Group) -> _Bucket:
-        bucket = cls(seed.type, seed=seed, names={normalize(v) for v in seed.variants})
-        bucket.names.add(normalize(seed.canonical))
+        bucket = cls(seed.type, seed=seed, names={value_key(seed.type, v) for v in seed.variants})
+        bucket.names.add(value_key(seed.type, seed.canonical))
         if seed.type is PERSON and PersonName.of(seed.canonical).is_full:
             bucket.person = PersonName.of(seed.canonical)
         if seed.type is COMPANY:
@@ -267,7 +270,7 @@ class _Bucket:
 
     def own(self) -> set[str]:
         """The keys of the forms that are this group's alone: its name and the forms seen."""
-        return self.names | {normalize(f.text) for f in self.findings}
+        return self.names | {value_key(self.type, f.text) for f in self.findings}
 
     def first_seen(self) -> int:
         return min((f.start for f in self.findings), default=sys.maxsize)
@@ -333,7 +336,7 @@ def group_findings(
     pending: dict[PlaceholderType, list[Finding]] = defaultdict(list)
     named = _companies_by_their_name([_as_named(f) for f in findings], seed_buckets)
     for finding in sorted(named, key=lambda f: (f.start, f.end)):
-        seed = by_seed_key.get(normalize(finding.text))
+        seed = by_seed_key.get(value_key(finding.type, finding.text))
         if seed is not None and _may_join(finding.type, seed.type):
             seed.add(finding)
         else:
@@ -391,13 +394,13 @@ def _may_join(finding_type: PlaceholderType, group_type: PlaceholderType) -> boo
 
 
 def _by_value(kind: PlaceholderType, findings: list[Finding]) -> list[_Bucket]:
-    """One group for each value, however it is spelt; a phone number written with its country
-    code and in its national form is one value (``_phone_keys``).
+    """One group for each value, however it is spelt (``value_key``, ruling R100); a phone number
+    written with its country code and in its national form is one value (``_phone_keys``).
     """
     same = _phone_keys(findings) if kind is PlaceholderType.PHONE else {}
     buckets: dict[str, _Bucket] = {}
     for finding in findings:
-        key = normalize(finding.text)
+        key = value_key(kind, finding.text)
         key = same.get(key, key)
         bucket = buckets.setdefault(key, _Bucket(kind, names={key}))
         bucket.add(finding)
@@ -727,7 +730,7 @@ def _settle_variants(
             candidates = {form for text_seen in seen for form in _derived(text_seen, bucket.type)}
             for form in candidates | aliases.get(bucket, set()):
                 if keep(form) and is_searchable(form):
-                    forms[normalize(form)].add(form)
+                    forms[value_key(bucket.type, form)].add(form)
         for key, spellings in bare.get(bucket, {}).items():
             forms[key] |= spellings
         derived[bucket] = forms

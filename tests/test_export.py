@@ -44,7 +44,7 @@ from themask.export import (
     load_sources,
 )
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
-from themask.leakcheck import LeakHit
+from themask.leakcheck import MEDIA_LEFT, MEDIA_PLACEHOLDER, LeakHit
 from themask.model import Case, Finding, Group, KeyEntry, MaskedFile, PlaceholderType
 from themask.review import ReviewState
 from themask.textnorm import normalize
@@ -355,15 +355,18 @@ def test_several_files_with_a_redline_are_numbered(
     assert res.case.source_files == ["supply-03.docx", "supply-01.docx"]
 
 
-def test_a_value_marked_in_one_file_leaves_the_links_of_the_others(
+def test_a_value_marked_in_one_file_leaves_the_names_and_links_of_the_others(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
-    # The annex never names the company where it is read, but links to its sales address
-    # (ruling R82): the key's values leave every file's links, not only the file they were in.
+    # The annex never names the company where it is read, but a bookmark is named after it and
+    # a link leads to its sales address (ruling R82): the key's values leave every file's names
+    # and links, not only the file they were in. (Since ruling R112 the cleaner takes every
+    # link to the outside out anyway; the bookmark is the masker's to rename.)
     contract = make_docx(para(SUPPLY) + para("Orders go to sales@northwind.example."))
     link = (
-        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
-        "</w:hyperlink></w:p>"
+        '<w:p><w:bookmarkStart w:id="0" w:name="Northwind_Trading_BV_orders"/>'
+        '<w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        '</w:hyperlink><w:bookmarkEnd w:id="0"/></w:p>'
     )
     rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
     annex = make_docx(para("Annex 1: the price list.") + link, raw=rels)
@@ -375,9 +378,23 @@ def test_a_value_marked_in_one_file_leaves_the_links_of_the_others(
         sources, review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
     )
     assert not res.blocked and res.leak_hits == [] and len(res.outputs) == 2
-    targets = DocxPackage.open(res.outputs[1]).raw("word/_rels/document.xml.rels")
-    assert b"northwind" not in targets.lower()
+    masked = DocxPackage.open(res.outputs[1])
+    assert b"northwind" not in masked.raw("word/document.xml").lower()
+    assert "word/_rels/document.xml.rels" not in masked.names()  # the link went with its target
     assert "Write to the sales desk." in body_text(res.outputs[1])
+
+
+@pytest.mark.parametrize("name", ["services-01", "nda-01", "dpa-01"])
+def test_the_corpus_files_with_links_export_without_their_links(
+    name: str, corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R112: the masked copy keeps the link text and loses every address behind it.
+    srcs, review = reviewed([corpus / f"{name}.docx"], engine, lists)
+    res = export_case(srcs, review, ExportOptions(tmp_path), engine, lists, lambda c: None)
+    assert not res.blocked and res.leak_hits == [], res.leak_hits
+    with zipfile.ZipFile(res.outputs[0]) as archive:
+        everything = b"\n".join(archive.read(entry) for entry in archive.namelist())
+    assert b"mailto:" not in everything and b"relationships/hyperlink" not in everything
 
 
 def test_a_pdf_is_masked_like_a_word_file(
@@ -496,6 +513,43 @@ def test_a_group_switched_off_in_a_file_added_leaves_no_room_for_a_leftover(
     assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
 
 
+def test_places_split_off_and_switched_off_whole_are_left_visible_not_leftovers(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R114: the owner moves two "Acme" places into a group of their own and switches it
+    # off: "show Acme there". The twin replaces the places of every group, keyed or not, so the
+    # gate sees no leftover and the two places are listed as left visible on purpose.
+    (source,) = load_sources(
+        [make_docx(para("Acme Supplies Ltd sells. Acme buys. Acme delivers. Acme ships."))], False
+    )
+    text = combined_text([source]).text
+    full = Finding(COMPANY, 0, 17, "Acme Supplies Ltd", 1.0, "user")
+    shorts = [
+        Finding(COMPANY, m.start(), m.end(), "Acme", 1.0, "sweep")
+        for m in re.finditer(r"Acme(?! Supplies)", text)
+    ]
+    acme = Group(
+        uuid.uuid4().hex,
+        COMPANY,
+        "Acme Supplies Ltd",
+        {"Acme Supplies Ltd", "Acme"},
+        [full, *shorts],
+        "[COMPANY_1]",
+    )
+    review = ReviewState(text, [acme], [], lists, CaseLists([], [], set()))
+    shown = review.split(acme.id, [2, 3])
+    review.set_group_enabled(shown.id, False)
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert not res.blocked and res.leak_hits == [] and len(res.outputs) == 1
+    assert {hit.placeholder for hit in res.allowed_hits} == {"[COMPANY_1]"}
+    assert sum(hit.count for hit in res.allowed_hits) == 2
+    assert body_text(res.outputs[0]).strip() == (
+        "[COMPANY_1] sells. [COMPANY_1] buys. Acme delivers. Acme ships."
+    )
+
+
 def test_a_place_switched_off_in_an_instruction_leaves_no_room_for_a_leftover(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
@@ -521,6 +575,41 @@ def test_a_place_switched_off_in_an_instruction_leaves_no_room_for_a_leftover(
     assert res.blocked
     leftovers = [(hit.part, hit.placeholder, hit.count) for hit in res.leak_hits]
     assert leftovers == [("word/document.xml", "[COMPANY_1]", 1)]
+
+
+def test_a_picture_the_cleaner_could_not_remove_blocks_the_export(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # Ruling R101: the leak check cannot read pixels, so a media part or an image relationship
+    # still in a masked file is a leftover, whatever points at it. Planted after the cleaning.
+    (source,) = load_sources([make_docx(para(SUPPLY))], False)
+    source.pkg_after.set_raw("word/media/planted.png", b"PNG of a signature")
+    review = by_hand(source, lists, ("Northwind Trading B.V.", COMPANY))
+    out = tmp_path / "out"
+    res = export_case([source], review, ExportOptions(out), engine, lists, lambda c: None)
+    assert res.blocked and res.outputs == [] and not out.exists()
+    assert [(hit.part, hit.placeholder, hit.context) for hit in res.leak_hits] == [
+        ("word/media/planted.png", MEDIA_PLACEHOLDER, MEDIA_LEFT)
+    ]
+    assert res.allowed_hits == []
+
+
+def test_an_image_relationship_left_behind_blocks_the_export(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    (source,) = load_sources([make_docx(para(SUPPLY))], False)
+    image = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    row = f'<Relationship Id="rId9" Type="{image}" Target="media/gone.png"/>'
+    rels = f'<Relationships xmlns="{PACKAGE_RELS}">{row}</Relationships>'
+    source.pkg_after.set_raw("word/_rels/document.xml.rels", rels.encode())
+    review = by_hand(source, lists, ("Northwind Trading B.V.", COMPANY))
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert res.blocked
+    assert [(hit.part, hit.placeholder) for hit in res.leak_hits] == [
+        ("word/_rels/document.xml.rels", MEDIA_PLACEHOLDER)
+    ]
 
 
 def test_what_nobody_marked_is_listed_once(
@@ -698,6 +787,47 @@ def test_a_file_added_to_a_case_merges_the_key(
     assert len(case.masked_files) == 1 and case.source_files == ["Supply Agreement.docx"]
 
 
+def test_a_stored_entry_takes_no_bare_surname_and_nothing_too_short_from_an_added_review(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    # F-14: the stored person's entry takes the added review's forms the way a key entry lists
+    # them (ruling R52: never a bare surname, nothing too short to search for); "Smith" in the
+    # key would block every "Smith" of a later file.
+    case = Case(
+        "TEST",
+        datetime(2026, 10, 1, tzinfo=UTC),
+        ["a.docx"],
+        [MaskedFile("MASKED-TEST.docx", "0" * 64)],
+        [KeyEntry("[PERSON_1]", PERSON, "John Smith", [])],
+    )
+    annex = make_docx(para("Mr John Smith signs. Smith countersigns."))
+    (source,) = load_sources([annex], False)
+    text = combined_text([source]).text
+    john = group_of(text, "[PERSON_1]", PERSON, "John Smith")
+    at = text.rindex("Smith")  # the bare surname, swept as the analysis sweeps it (ruling R50)
+    john.findings.append(Finding(PERSON, at, at + 5, "Smith", 1.0, "sweep"))
+    john.variants |= {"Mr John Smith", "Smith", "J. Smith", "J"}
+    reserved = [entry.placeholder for entry in case.entries]
+    review = ReviewState(text, [john], [], lists, CaseLists([], [], set()), reserved)
+    saved: list[Case] = []
+    options = ExportOptions(tmp_path / "out", existing_case=case)
+    res = export_case([source], review, options, engine, lists, saved.append)
+    assert not res.blocked, res.leak_hits
+    (entry,) = saved[0].entries
+    assert (entry.placeholder, entry.value) == ("[PERSON_1]", "John Smith")
+    assert entry.variants == ["J. Smith", "John Smith", "Mr John Smith"]
+
+
+def test_the_merged_key_lists_forms_the_way_a_key_entry_does() -> None:
+    # F-14, on the merge itself: whatever an added review hands over, the stored entry takes
+    # the forms worth searching for and never the person's bare surname (ruling R52).
+    stored = KeyEntry("[PERSON_1]", PERSON, "Jan van der Berg", ["J. van der Berg"])
+    added = KeyEntry("[PERSON_1]", PERSON, "Berg", ["van der Berg", "Berg", "Mr Berg", "J", ""])
+    (merged,) = export._merged([stored], [added])
+    assert merged.value == "Jan van der Berg"
+    assert merged.variants == ["J. van der Berg", "Mr Berg"]
+
+
 @pytest.mark.parametrize(
     ("masked", "redline", "expected"),
     [
@@ -758,8 +888,9 @@ def test_a_merge_in_a_file_added_never_rewrites_a_value_of_the_case(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
     # Ruling R86: in the added file's review the owner merges the case's company with another
-    # name, whose fuller form becomes the group's. The case's first file still restores to the
-    # stored value; the new form joins the entry's variants.
+    # name. The case's first file still restores to the stored value; the new form joins the
+    # entry's variants. (Ruling R107: the stored group keeps its canonical form in the review
+    # too, so the review shows the value the key will keep.)
     case = Case(
         "TEST",
         datetime(2026, 10, 1, tzinfo=UTC),
@@ -777,10 +908,8 @@ def test_a_merge_in_a_file_added_never_rewrites_a_value_of_the_case(
     review = ReviewState(text, [seeded], [], lists, CaseLists([], [], set()), reserved)
     other = review.hide_text("Northwind Holdings International Limited", COMPANY)
     merged = review.merge([seeded.id, other.id])
-    assert (merged.placeholder, merged.canonical) == (
-        "[COMPANY_1]",
-        "Northwind Holdings International Limited",
-    )
+    assert (merged.placeholder, merged.canonical) == ("[COMPANY_1]", "Northwind Trading B.V.")
+    assert "Northwind Holdings International Limited" in merged.variants
     saved: list[Case] = []
     options = ExportOptions(tmp_path / "out", existing_case=case)
     export_case([source], review, options, engine, lists, saved.append)
@@ -806,12 +935,14 @@ def northwind_case() -> Case:
 def test_a_value_of_the_case_leaves_a_file_added_that_never_shows_it(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
-    # Ruling R83: the annex shows neither value of the case, so its review finds neither, but it
-    # links to the case's sales address.
+    # Ruling R83: the annex shows neither value of the case, so its review finds neither, but a
+    # bookmark is named after the case's sales address and a link leads to it. (Since ruling
+    # R112 the cleaner takes the link out anyway; the bookmark is the masker's to rename.)
     case = northwind_case()
     link = (
-        '<w:p><w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
-        "</w:hyperlink></w:p>"
+        '<w:p><w:bookmarkStart w:id="0" w:name="sales_northwind_example"/>'
+        '<w:hyperlink r:id="rId1"><w:r><w:t>Write to the sales desk.</w:t></w:r>'
+        '</w:hyperlink><w:bookmarkEnd w:id="0"/></w:p>'
     )
     rels = {"word/_rels/document.xml.rels": link_to("mailto:sales@northwind.example")}
     annex = make_docx(para("Burren Logistics Limited carries the goods.") + link, raw=rels)
@@ -823,8 +954,9 @@ def test_a_value_of_the_case_leaves_a_file_added_that_never_shows_it(
     res = export_case([source], review, options, engine, lists, saved.append)
     assert not res.blocked and res.leak_hits == []
     assert res.outputs == [tmp_path / "out" / "MASKED-TEST-2.docx"]
-    targets = DocxPackage.open(res.outputs[0]).raw("word/_rels/document.xml.rels")
-    assert b"northwind" not in targets.lower()
+    masked = DocxPackage.open(res.outputs[0])
+    assert b"northwind" not in masked.raw("word/document.xml").lower()
+    assert "word/_rels/document.xml.rels" not in masked.names()
     assert "Write to the sales desk." in body_text(res.outputs[0])
     assert [e.placeholder for e in saved[0].entries] == ["[COMPANY_1]", "[EMAIL_1]", "[COMPANY_2]"]
 

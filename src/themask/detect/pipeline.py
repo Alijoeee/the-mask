@@ -9,7 +9,10 @@ back to its file. ``analyze`` runs the whole analysis on it:
    case's lists. The owner's always-hide entries are found wherever they stand.
 2. A finding's edges that belong to the sentence (spaces, quotes, an ellipsis, a lone bracket) are
    trimmed, and a finding that runs over a line break is cut there: a replacement must lie within
-   one paragraph. Nothing is found inside a placeholder the text holds already.
+   one paragraph. The notes the cleaner leaves for a picture, an object, an equation or an
+   embedded document cut a finding the same way (ruling R113): the model reads "Acme Supplies
+   Ltd[image removed]" as one name, which it is not. Nothing is found inside a placeholder the
+   text holds already.
 3. A finding that is a never-hide term is dropped; a finding longer than the term is not. The
    names in the text beat its defined terms: in a text that defines ``"Acme" means Acme
    Supplies Ltd``, every "Acme" is still hidden. The owner's never-hide lists and the defaults
@@ -50,6 +53,7 @@ from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
 from themask.detect.grouping import PersonName, SurnamePolicy, group_findings
+from themask.detect.identity import value_key
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -69,6 +73,7 @@ from themask.detect.sweep import (
     stands_as_a_name,
     sweep,
 )
+from themask.instruction import NOTES
 from themask.model import Analysis, Finding, Group, KeyEntry, PlaceholderType
 from themask.placeholders import PLACEHOLDER_RE, PlaceholderMatch, format_placeholder
 from themask.textnorm import COMMON_WORDS, has_legal_form, normalize, strip_legal_form, variants_of
@@ -124,6 +129,8 @@ _BRACKETS = {"(": ")", "[": "]", "{": "}", "<": ">"}
 _CLOSING = {closing: opening for opening, closing in _BRACKETS.items()}
 # The word after a finding, on its line.
 _NEXT_WORD = re.compile(r"[ \t]+([^\W\d_][\w\-']*)")
+# The cleaner's notes, which part a finding like a line break (ruling R113).
+_NOTE = re.compile("|".join(re.escape(note) for note in NOTES))
 
 
 @dataclass
@@ -243,6 +250,7 @@ def _detected(combined: CombinedText, engine: Engine, case: CaseLists) -> list[F
     at line breaks; each file's defined terms go into ``case``.
     """
     found: list[Finding] = []
+    notes = Spans(match.span() for match in _NOTE.finditer(combined.text))
     for _, start, end in combined.parts:
         part = combined.text[start:end]
         if not part.strip():
@@ -250,7 +258,7 @@ def _detected(combined: CombinedText, engine: Engine, case: CaseLists) -> list[F
         case.defined_terms |= find_defined_terms(part)
         for finding in engine.analyze(part):
             moved = replace(finding, start=finding.start + start, end=finding.end + start)
-            found += _cleaned(combined.text, moved)
+            found += _cleaned(combined.text, moved, notes)
     return found
 
 
@@ -265,14 +273,18 @@ def _listed(text: str, user: UserLists, case: CaseLists) -> list[Finding]:
     return found
 
 
-def _cleaned(text: str, finding: Finding) -> list[Finding]:
-    """``finding`` without the marks at its edges, cut into one piece per line; a piece with no
-    letter or digit is dropped.
+def _cleaned(text: str, finding: Finding, notes: Spans | None = None) -> list[Finding]:
+    """``finding`` without the marks at its edges, cut into one piece per line and at each of the
+    cleaner's ``notes`` (ruling R113); a piece with no letter or digit is dropped.
     """
     pieces = []
     start = finding.start
     for position in range(finding.start, finding.end + 1):
-        if position == finding.end or text[position] in LINE_BREAKS:
+        if (
+            position == finding.end
+            or text[position] in LINE_BREAKS
+            or (notes is not None and notes.overlaps(position, position + 1))
+        ):
             piece_start, piece_end = _trimmed(text, start, position)
             if any(character.isalnum() for character in text[piece_start:piece_end]):
                 piece = text[piece_start:piece_end]
@@ -457,10 +469,10 @@ def _keep_shared_variants_out(seeds: list[Group]) -> None:
     """Take a variant two seeds share away from both: it cannot tell which of them is meant."""
     holders: dict[str, int] = {}
     for seed in seeds:
-        for key in {normalize(v) for v in seed.variants}:
+        for key in {value_key(seed.type, v) for v in seed.variants}:
             holders[key] = holders.get(key, 0) + 1
     for seed in seeds:
-        seed.variants = {v for v in seed.variants if holders[normalize(v)] == 1}
+        seed.variants = {v for v in seed.variants if holders[value_key(seed.type, v)] == 1}
 
 
 def _seed_matches(

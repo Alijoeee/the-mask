@@ -28,10 +28,21 @@ Then each text part (the document, the headers, the footers, the notes), in read
    tooltips, descriptions of tables and the hidden copy of a VML text box.
 6. Hidden text: every run with ``w:vanish`` or ``w:specVanish``, and the hyperlink or simple field
    it leaves without a run (its target or instruction would stay behind).
+6a. Links to the outside (ruling R112): the AI reads text, not links, and an address behind
+   "click here" reaches no review. Every ``w:hyperlink`` with a target outside the file is
+   unwrapped (its text stays; a link to a place in the file stays whole), the links on shapes
+   (``a:hlinkClick`` and its kin, a VML shape's ``href``) go, and so do the editing permissions
+   (``w:permStart``, ``w:permEnd``, whose editor is an address), every ``w:fldData`` (field data
+   Word regenerates) and, last, every ``w:author``, ``w:ed`` and ``w:edGrp`` attribute left in
+   the part. The HYPERLINK, INCLUDE, INCLUDEPICTURE, INCLUDETEXT, IMPORT and LINK fields are
+   flattened with step 4: their result stays, their address or path goes.
 7. Pictures, charts (Word 2016's too), diagrams, ink and embedded objects become a note and their
    parts go. A drawing that holds a text box as well (ruling R28: a group of a picture and a text
    box, a text box filled with a picture) loses only the picture and the note stands beside it.
-   Equations (ruling R17) and embedded documents (``w:altChunk``) become a note too. Then the
+   Equations (ruling R17) and embedded documents (``w:altChunk``) become a note too. A note is a
+   run of its own, with a space before it where the text before it does not end in one and a
+   space after it where the text after it does not start with one (ruling R113): "Acme Supplies
+   Ltd [image removed]", never "Acme Supplies Ltd[image removed]", which reads as one name. Then the
    drawings that are left lose their descriptions and titles, in a group's shapes and in VML
    shapes too, and get the names Shape1, Shape2 ... (ruling R19), numbered after the pictures so
    that a picture, which is gone, takes no number. What binds a control to custom XML and what
@@ -46,23 +57,32 @@ And last, the package:
    link, mail merge, ``w:rsids`` and ``w:trackRevisions``; and the names of the theme and its
    colour, font and format schemes go back to the ones Word gives its own ("Office Theme",
    "Office"), as a template may name them after its company (ruling R66).
-10. What is left of the folders of pictures, charts, diagrams and embedded files.
+10. The pictures the text does not show (ruling R101): the page background, picture bullets, the
+    theme's images, VML picture fills and any image left in a shape, in every XML part that
+    relates to one; then every picture and media part (``word/media/``, any part whose content
+    type is an image, a sound, a video or a 3D model) with every relationship to it, whatever
+    still points at it. The leak check cannot read pixels, and a logo is the company's name:
+    the export refuses a file in which a picture is left (``leakcheck.media_left``).
+11. The namespace declarations nothing in a part uses (ruling R102): a document-assembly schema
+    may be named after a party. Every prefix ``mc:Ignorable``, ``mc:MustUnderstand`` or
+    ``mc:ProcessContent`` names stays declared, used or not, as Word refuses the file otherwise,
+    and so does every prefix of the package's own.
+12. What is left of the folders of charts, diagrams and embedded files.
 
 A part that goes takes everything that only it used: the relationships that point at it, its own,
 its Override, and the parts it relates to. A relationship goes when nothing in its part refers to
 it any more. A part that the XML of some part still names by relationship id is never removed
-by its folder or its relationship type: the file must stay whole. The result is a package that
-python-docx and ``DocxPackage.open`` read as before.
+by its folder or its relationship type, a picture or media part aside: the file must stay whole.
+The result is a package that python-docx and ``DocxPackage.open`` read as before.
 
 Not touched, because the plan does not name them and each is rarely there: text hidden by a
-style (only the run's own properties are read), pictures that are not in the text (a page
-background, a picture bullet, a theme, a VML fill), ActiveX controls, embedded fonts and the
-document protection in the settings. A picture of those kinds that something still uses stays
-with its link; one that nothing uses goes.
+style (only the run's own properties are read), ActiveX controls, embedded fonts and the
+document protection in the settings.
 """
 
 from __future__ import annotations
 
+import copy
 import itertools
 import posixpath
 import re
@@ -75,12 +95,9 @@ from lxml import etree
 
 from themask.docx.package import CONTENT_TYPES, DOCUMENT, NS, RELS_NS, TYPES_NS, DocxPackage
 from themask.errors import UnsupportedFileError
-from themask.instruction import IMAGE_NOTE, OBJECT_NOTE
+from themask.instruction import ALTCHUNK_NOTE, EQUATION_NOTE, IMAGE_NOTE, OBJECT_NOTE
 
-# What stands in for an equation and for an embedded document: the reader does not read the
-# first (``m:t``) and cannot read the second, so neither can be masked, and both are removed.
-EQUATION_NOTE = "[equation removed]"
-ALTCHUNK_NOTE = "[embedded content removed]"
+__all__ = ["ALTCHUNK_NOTE", "EQUATION_NOTE", "CleanReport", "clean", "comment_parts"]
 
 # The prefixes used in find() and xpath(), with the two the package leaves out.
 _NAMESPACES = {
@@ -89,6 +106,7 @@ _NAMESPACES = {
     "o": "urn:schemas-microsoft-com:office:office",
     "cx": "http://schemas.microsoft.com/office/drawing/2014/chartex",
     "w15": "http://schemas.microsoft.com/office/word/2012/wordml",
+    "am3d": "http://schemas.microsoft.com/office/drawing/2017/model3d",
 }
 
 
@@ -98,6 +116,16 @@ def _q(prefix: str, name: str) -> str:
 
 # WordprocessingML.
 _P, _R, _T, _RPR = _q("w", "p"), _q("w", "r"), _q("w", "t"), _q("w", "rPr")
+_XML_SPACE = _q("xml", "space")
+# What a paragraph shows, for the spacing of a note: its texts, and these characters.
+_SHOWN_TEXTS = frozenset({_T, _q("w", "instrText")})
+_SHOWN_CHARACTERS = {
+    _q("w", "tab"): "\t",
+    _q("w", "ptab"): "\t",
+    _q("w", "br"): "\n",
+    _q("w", "cr"): "\n",
+    _q("w", "noBreakHyphen"): "\N{NON-BREAKING HYPHEN}",
+}
 _ID, _VAL = _q("w", "id"), _q("w", "val")
 _VANISH, _SPEC_VANISH = _q("w", "vanish"), _q("w", "specVanish")
 _COMMENT, _COMMENT_REFERENCE = _q("w", "comment"), _q("w", "commentReference")
@@ -111,6 +139,10 @@ _CUSTOM_XML, _CUSTOM_XML_PR = _q("w", "customXml"), _q("w", "customXmlPr")
 _COMBO_BOX, _DROP_DOWN_LIST = _q("w", "comboBox"), _q("w", "dropDownList")
 _LAST_VALUE, _FF_DATA = _q("w", "lastValue"), _q("w", "ffData")
 _HYPERLINK, _TOOLTIP = _q("w", "hyperlink"), _q("w", "tooltip")
+_PERM_START, _PERM_END = _q("w", "permStart"), _q("w", "permEnd")
+_AUTHOR, _ED, _ED_GRP = _q("w", "author"), _q("w", "ed"), _q("w", "edGrp")
+_SHAPE_LINKS = tuple(_q("a", name) for name in ("hlinkClick", "hlinkHover", "hlinkMouseOver"))
+_VML_LINKS = ("href", _q("o", "href"), _q("o", "hrlabel"))
 _TBL_CAPTION, _TBL_DESCRIPTION = _q("w", "tblCaption"), _q("w", "tblDescription")
 _DATA_BINDING, _W15_DATA_BINDING = _q("w", "dataBinding"), _q("w15", "dataBinding")
 _PRINTER_SETTINGS = _q("w", "printerSettings")
@@ -123,10 +155,10 @@ _RSID_PREFIX = _q("w", "rsid")  # w:rsidR, w:rsidRPr, w:rsidP, ...: every attrib
 _DOC_PR, _BLIP = _q("wp", "docPr"), _q("a", "blip")
 _PIC, _BLIP_FILL, _NO_FILL = _q("pic", "pic"), _q("a", "blipFill"), _q("a", "noFill")
 _CHART, _DIAGRAM_IDS = _q("c", "chart"), _q("dgm", "relIds")
-_CHART_EX, _INK = _q("cx", "chart"), _q("w14", "contentPart")
+_CHART_EX, _INK, _MODEL3D = _q("cx", "chart"), _q("w14", "contentPart"), _q("am3d", "model3d")
 # What makes a drawing a picture: a picture or a picture fill, a chart (Word 2016's too), a
-# diagram, a stroke of ink.
-_DRAWING_PIECES = (_BLIP, _CHART, _CHART_EX, _DIAGRAM_IDS, _INK)
+# diagram, a stroke of ink, a 3D model.
+_DRAWING_PIECES = (_BLIP, _CHART, _CHART_EX, _DIAGRAM_IDS, _INK, _MODEL3D)
 _IMAGE_DATA, _TEXT_PATH, _SHAPE_TYPE = (
     _q("v", "imagedata"),
     _q("v", "textpath"),
@@ -145,7 +177,9 @@ _GFX_DATA = _q("o", "gfxdata")
 # R22: the fields that show who or where the file is from (author, user, file name, template) and
 # those that read a property or a document variable the cleaner removes. Updating one in the
 # masked file would put an error or nothing where the masked result stands, so each becomes the
-# plain text of its result. Word ignores case in a field's name.
+# plain text of its result. And the fields whose instruction is an address or a path outside
+# the file (ruling R112): their result stays, the address goes. Word ignores case in a field's
+# name.
 _FLATTENED_FIELDS = frozenset(
     {
         "AUTHOR",
@@ -162,6 +196,12 @@ _FLATTENED_FIELDS = frozenset(
         "KEYWORDS",
         "COMMENTS",
         "DOCVARIABLE",
+        "HYPERLINK",
+        "INCLUDEPICTURE",
+        "INCLUDETEXT",
+        "INCLUDE",
+        "IMPORT",
+        "LINK",
     }
 )
 _FIELD_NAME = re.compile(r"\s*([A-Za-z]+)\b")
@@ -194,10 +234,9 @@ _COMMENT_TYPES = tuple(f".{kind.casefold()}+xml" for kind in _COMMENT_KINDS)
 _COMMENT_RELATIONSHIPS = tuple(f"/{kind.casefold()}" for kind in _COMMENT_KINDS)
 _COMMENT_NAMES = frozenset(f"word/{kind.casefold()}.xml" for kind in _COMMENT_KINDS)
 
-# Folders whose parts only the pictures, charts, diagrams and objects in the text use, so what
-# no replaced element needs any more goes. Not a part the XML still refers to, though (the file
-# must stay whole), and media only if no relationship leads to it: a picture bullet or a theme may
-# still use one.
+# Folders whose parts only the charts, diagrams and objects in the text use, so what no replaced
+# element needs any more goes. Not a part the XML still refers to, though (the file must stay
+# whole). The pictures go whatever refers to them (ruling R101).
 _ALWAYS_GONE = ("word/charts/", "word/diagrams/", "word/embeddings/")
 _MEDIA = "word/media/"
 
@@ -206,12 +245,16 @@ _MEDIA = "word/media/"
 class CleanReport:
     """What ``clean`` found and took out.
 
-    ``comments`` is the number of comments, ``images`` the pictures, charts and diagrams that
-    became a note, ``objects`` the embedded objects, ``hidden_runs`` the runs of hidden text.
+    ``comments`` is the number of comments, ``images`` the pictures, charts, diagrams and 3D
+    models that became a note and the pictures taken out where the text does not show them (the
+    page background, picture bullets, the theme's images, VML picture fills; ruling R101),
+    ``objects`` the embedded objects, ``hidden_runs`` the runs of hidden text.
     ``properties_cleared`` names the file properties that held something, as ``dc:creator``,
     ``Company`` or ``custom:<name>``, and ``parts_removed`` the parts taken out of the package, in
     the order of the zip. ``fields_flattened`` counts the fields turned into plain text,
-    ``fallbacks_removed`` the second copies of drawings, ``equations_removed`` and
+    ``links_removed`` the links to the outside taken out, a link round text, a link on a shape
+    or a VML shape's link (ruling R112), ``fallbacks_removed`` the second copies of drawings,
+    ``equations_removed`` and
     ``altchunks_removed`` the notes put in place of equations and embedded documents, and
     ``attributes_cleared`` the pieces of text kept in attributes that were removed: a tooltip, a
     description, a title, the name of a shape, a text watermark, a smart tag, the items of a
@@ -228,6 +271,7 @@ class CleanReport:
     properties_cleared: list[str] = field(default_factory=list)
     parts_removed: list[str] = field(default_factory=list)
     fields_flattened: int = 0
+    links_removed: int = 0
     fallbacks_removed: int = 0
     equations_removed: int = 0
     altchunks_removed: int = 0
@@ -258,6 +302,8 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
         report.fields_flattened += _flatten_fields(root)
         report.attributes_cleared += _clear_attribute_text(root)
         report.hidden_runs += _remove_hidden_runs(root)
+        report.links_removed += _remove_external_links(root)
+        report.attributes_cleared += _remove_editing_marks(root)
         _replace_pictures(root, report)
         _replace_equations(root, report)
         _replace_embedded_documents(root, report)
@@ -271,6 +317,8 @@ def clean(pkg: DocxPackage, now: datetime | None = None) -> CleanReport:
     _remove_hidden_parts(pkg, main)
     _clean_settings(pkg, main)
     report.attributes_cleared += _reset_theme_names(pkg, main)
+    _remove_media(pkg, main, texts, report)
+    _strip_unused_namespaces(pkg)
     _sweep(pkg)
     remaining = set(pkg.names())
     report.parts_removed = [n for n in names_before if n not in remaining]
@@ -548,6 +596,57 @@ def _is_on(toggle: etree._Element) -> bool:
     return toggle.get(_VAL, "true").casefold() not in {"0", "false", "off"}
 
 
+# ---- links to the outside (ruling R112) ----------------------------------------------------------
+
+
+def _remove_external_links(root: etree._Element) -> int:
+    """Takes out every link to the outside; returns how many. The text of a link stays.
+
+    A ``w:hyperlink`` with a relationship (a web page, an e-mail address, a file) is unwrapped;
+    one that only leads to a place in the file (``w:anchor``) stays as it is. The links on
+    drawings (``a:hlinkClick``, ``a:hlinkHover``, ``a:hlinkMouseOver``) go, and a VML shape
+    loses its ``href`` and its label. The relationships they named are released afterwards,
+    once nothing in the part refers to them.
+    """
+    count = 0
+    for link in _live(root, _HYPERLINK):
+        if _R_ID in link.attrib:
+            _unwrap(link)
+            count += 1
+    for shape_link in _live(root, *_SHAPE_LINKS):
+        _remove(shape_link)
+        count += 1
+    linked = root.xpath("//v:*[@href or @o:href or @o:hrlabel]", namespaces=_NAMESPACES)
+    for shape in _only_live(root, linked):
+        for attribute in _VML_LINKS:
+            shape.attrib.pop(attribute, None)
+        count += 1
+    return count
+
+
+def _remove_editing_marks(root: etree._Element) -> int:
+    """Takes out the editing permissions, the field data and every author left in the part;
+    returns how many pieces of text kept in attributes went.
+
+    A permission range (``w:permStart``/``w:permEnd``, Word's "Restrict Editing") names its
+    editor, an e-mail address; ``w:fldData`` is field data in base64, which Word regenerates;
+    and a ``w:author``, ``w:ed`` or ``w:edGrp`` attribute on anything left names a person: the
+    tracked changes are resolved by now, so one left is a co-authoring mark or something Word
+    adds next year.
+    """
+    count = 0
+    for mark in _live(root, _PERM_START, _PERM_END):
+        count += mark.get(_ED) is not None
+        _remove(mark)
+    for data in _live(root, _FLD_DATA):
+        _remove(data)
+    marked = root.xpath("//*[@w:author or @w:ed or @w:edGrp]", namespaces=_NAMESPACES)
+    for element in _only_live(root, marked):
+        for attribute in (_AUTHOR, _ED, _ED_GRP):
+            count += element.attrib.pop(attribute, None) is not None
+    return count
+
+
 # ---- pictures, objects, equations and embedded documents (ruling R17) ----------------------------
 
 
@@ -636,36 +735,109 @@ def _replace_embedded_documents(root: etree._Element, report: CleanReport) -> No
 
 
 def _replace_with_note(element: etree._Element, text: str, *, paragraph: bool = False) -> None:
-    """Puts a note where ``element`` was: a ``w:t`` in the run it is in, else a new run."""
-    element.getparent().replace(element, _note(element, text, paragraph))
+    """Puts a note where ``element`` was: a run of its own (a paragraph of its own if asked)."""
+    if paragraph:
+        wrapper = element.makeelement(_P, {})
+        wrapper.append(_note(element, text))
+        element.getparent().replace(element, wrapper)
+        return
+    _put_note(element, _note(element, text), keep=False)
 
 
 def _add_note_after(element: etree._Element, text: str) -> None:
     """Puts a note beside ``element``, which stays."""
-    element.addnext(_note(element, text, False))
+    _put_note(element, _note(element, text), keep=True)
 
 
-def _note(element: etree._Element, text: str, paragraph: bool) -> etree._Element:
-    """A ``w:t`` with ``text`` to put where ``element`` is: in a run, in a paragraph if asked."""
-    note = element.makeelement(_T, {})
-    note.text = text
-    if paragraph or not _in_run(element):
-        run = element.makeelement(_R, {})
-        run.append(note)
-        note = run
-    if paragraph:
-        wrapper = element.makeelement(_P, {})
-        wrapper.append(note)
-        note = wrapper
-    return note
+def _note(element: etree._Element, text: str) -> etree._Element:
+    """A run holding the note ``text``, with a space before it where the paragraph's text before
+    ``element`` does not end in one and a space after it where the text after ``element`` does
+    not start with one (ruling R113)."""
+    before, after = _text_around(element)
+    run = element.makeelement(_R, {})
+    if before and not before[-1].isspace():
+        _add_text(run, " ")
+    _add_text(run, text)
+    if after and not after[0].isspace():
+        _add_text(run, " ")
+    return run
 
 
-def _in_run(element: etree._Element) -> bool:
-    """Whether ``element`` is content of a run, possibly through an ``mc:AlternateContent``."""
+def _add_text(run: etree._Element, text: str) -> None:
+    node = etree.SubElement(run, _T)
+    node.text = text
+    if text != text.strip():
+        node.set(_XML_SPACE, "preserve")
+
+
+def _put_note(element: etree._Element, note: etree._Element, *, keep: bool) -> None:
+    """Puts the run ``note`` right after ``element``'s place, as a run of its own, and takes
+    ``element`` out unless ``keep``.
+
+    When ``element`` is content of a run (through an ``mc:AlternateContent`` or not), the run is
+    cut there: what follows ``element`` in it goes into a run of its own with the same
+    properties, and a run left with nothing but its properties goes. An ``mc:AlternateContent``
+    stays for ``_remove_fallbacks``, which counts its second copy.
+    """
+    run = _run_of(element)
+    if run is None:
+        if keep:
+            element.addnext(note)
+        else:
+            element.getparent().replace(element, note)
+        return
+    top = element
+    while top.getparent() is not run:
+        top = top.getparent()
+    following = [child for child in run if run.index(child) > run.index(top)]
+    run.addnext(note)
+    if following:
+        tail = run.makeelement(_R, {})
+        properties = run.find(_RPR)
+        if properties is not None:
+            tail.append(copy.deepcopy(properties))
+        tail.extend(following)
+        note.addnext(tail)
+    if not keep:
+        element.getparent().remove(element)
+        if _is_empty_run(run):
+            _remove(run)
+
+
+def _run_of(element: etree._Element) -> etree._Element | None:
+    """The run ``element`` is content of, possibly through an ``mc:AlternateContent``."""
     parent = element.getparent()
     while parent is not None and parent.tag in _MC_WRAPPERS:
         parent = parent.getparent()
-    return parent is not None and parent.tag == _R
+    return parent if parent is not None and parent.tag == _R else None
+
+
+def _text_around(element: etree._Element) -> tuple[str, str]:
+    """The text of ``element``'s paragraph before it and after it, as the reader shows it;
+    nothing on either side when it is in no paragraph."""
+    paragraph = next(element.iterancestors(_P), None)
+    if paragraph is None:
+        return "", ""
+    before: list[str] = []
+    after: list[str] = []
+    pieces = before
+    for node in paragraph.iter():
+        if node is element:
+            pieces = after
+            continue
+        if node.tag not in _SHOWN_TEXTS and node.tag not in _SHOWN_CHARACTERS:
+            continue
+        ancestors = list(node.iterancestors())
+        # What is inside the element goes with it; a fallback copy and the paragraphs of a text
+        # box are not this paragraph's text, as the reader reads it.
+        if (pieces is after and element in ancestors) or any(
+            a.tag == _FALLBACK or (a.tag == _P and a is not paragraph) for a in ancestors
+        ):
+            continue
+        pieces.append(
+            (node.text or "") if node.tag in _SHOWN_TEXTS else _SHOWN_CHARACTERS[node.tag]
+        )
+    return "".join(before), "".join(after)
 
 
 # ---- the second copy of each drawing (ruling R16) ------------------------------------------------
@@ -811,18 +983,145 @@ def _reset_theme_names(pkg: DocxPackage, main: str) -> int:
 
 
 def _sweep(pkg: DocxPackage) -> None:
-    """Takes out what is left of the folders of pictures, charts, diagrams and embedded files."""
+    """Takes out what is left of the folders of charts, diagrams and embedded files, and of the
+    pictures' folder (``_remove_media`` emptied it already)."""
     named = _xml_references(pkg)
     for name in pkg.names():
         key = name.casefold()
         if name not in pkg.names() or _is_rels(name):  # a dependent that went already
             continue
         swept = key.startswith(_ALWAYS_GONE) and not _named_by_xml(pkg, name, named)
-        if swept or (key.startswith(_MEDIA) and not _referenced(pkg, name)):
+        if swept or key.startswith(_MEDIA):
             _discard(pkg, name)
     for name in pkg.names():  # relationships parts that nothing is left in
         if _is_rels(name) and name != "_rels/.rels" and _is_empty_rels(pkg, name):
             pkg.remove_part(name)
+
+
+# ---- pictures that are not in the text (ruling R101) ---------------------------------------------
+
+# The relationship types and the content types of pictures and media, compared without case: what
+# the leak check cannot read, so none may be left in a masked copy.
+MEDIA_RELATIONSHIPS = ("/image", "/audio", "/video", "/media", "/model", "/model3d")
+MEDIA_TYPES = ("image/", "audio/", "video/", "model/")
+_BACKGROUND = _q("w", "background")
+_NUM_PIC_BULLET, _LVL_PIC_BULLET_ID = _q("w", "numPicBullet"), _q("w", "lvlPicBulletId")
+_V_FILL, _R_ID = _q("v", "fill"), _q("r", "id")
+_SOLID_FILL, _SCHEME_CLR = _q("a", "solidFill"), _q("a", "schemeClr")
+
+
+def _remove_media(pkg: DocxPackage, main: str, texts: list[str], report: CleanReport) -> None:
+    """Takes the pictures the text does not show out of the XML, then every picture and media
+    part out of the package, with every relationship to it, whatever still points at it.
+
+    The pictures in the text became notes already. Here every XML part that relates to a
+    picture (and the text parts, the numbering and the theme in any case) loses the page
+    background, its picture bullets, the theme's images, its VML picture fills and any image
+    left in a shape; what those referred to is released, so that no reference dangles. Then the
+    parts go: the parts under ``word/media/`` and every part whose content type is an image, a
+    sound, a video or a 3D model.
+    """
+    types = _content_types(pkg)
+    always = [
+        *texts,
+        _find_part(pkg, main, "/numbering", "word/numbering.xml"),
+        _find_part(pkg, main, "/theme", "word/theme/theme1.xml"),
+    ]
+    for name in pkg.names():
+        if not _is_xml_part(name) or not (name in always or _relates_to_media(pkg, name)):
+            continue
+        root = pkg.xml(name)
+        used = _references(root)
+        report.images += _strip_pictures(root, in_theme=root.tag == _THEME)
+        _release(pkg, name, used - _references(root))
+    for name in pkg.names():
+        if name.casefold().startswith(_MEDIA) or types.get(name, "").startswith(MEDIA_TYPES):
+            _discard(pkg, name)
+
+
+def _is_xml_part(name: str) -> bool:
+    return name.casefold().endswith(".xml") and name != CONTENT_TYPES
+
+
+def _relates_to_media(pkg: DocxPackage, name: str) -> bool:
+    """Whether part ``name`` has a relationship to a picture or a media file."""
+    return any(
+        rel.type.casefold().endswith(MEDIA_RELATIONSHIPS) for rel in _relationships(pkg, name)
+    )
+
+
+def _strip_pictures(root: etree._Element, *, in_theme: bool) -> int:
+    """Takes out of ``root`` what shows a picture outside the text; returns how many pictures.
+
+    The page background goes whole (a picture or a colour, it is the page's, not the text's);
+    a picture bullet goes with the levels that use it; a VML fill loses its picture and is a
+    plain fill; an image left in a VML shape goes with the shape (with the image alone when the
+    shape is a text box); a picture fill becomes no fill, or in the theme a solid fill in the
+    placeholder colour, which the theme's fill style lists need three of.
+    """
+    count = 0
+    for background in list(root.iter(_BACKGROUND)):
+        count += bool(_references(background))
+        _remove(background)
+    for bullet in list(root.iter(_NUM_PIC_BULLET)):
+        _remove(bullet)
+        count += 1
+    for level in list(root.iter(_LVL_PIC_BULLET_ID)):
+        _remove(level)
+    for fill in root.iter(_V_FILL):
+        count += fill.attrib.pop(_R_ID, None) is not None
+    for data in list(root.iter(_IMAGE_DATA)):
+        shape = data.getparent()
+        _remove(data if shape.find(_TEXTBOX) is not None else shape)
+        count += 1
+    for blip in list(root.iter(_BLIP)):
+        holder = blip.getparent()
+        if holder.tag.endswith("}blipFill"):
+            picture = holder.getparent()
+            if picture.tag == _PIC:
+                _remove(picture)
+            else:
+                picture.replace(holder, _plain_fill(holder, in_theme))
+        else:  # a:buBlip, the picture of a DrawingML bullet
+            _remove(holder)
+        count += 1
+    return count
+
+
+def _plain_fill(fill: etree._Element, in_theme: bool) -> etree._Element:
+    if not in_theme:
+        return fill.makeelement(_NO_FILL, {})
+    solid = fill.makeelement(_SOLID_FILL, {})
+    etree.SubElement(solid, _SCHEME_CLR, {"val": "phClr"})
+    return solid
+
+
+# ---- namespace declarations (ruling R102) --------------------------------------------------------
+
+# The markup-compatibility attributes that name prefixes, which must stay declared.
+_MC_PREFIX_LISTS = tuple(
+    _q("mc", name) for name in ("Ignorable", "MustUnderstand", "ProcessContent")
+)
+
+
+def _strip_unused_namespaces(pkg: DocxPackage) -> None:
+    """Takes the namespace declarations nothing uses out of every XML part.
+
+    Kept whether used or not: the prefixes any ``mc:Ignorable``, ``mc:MustUnderstand`` or
+    ``mc:ProcessContent`` attribute of the part names (Word and python-docx write
+    ``mc:Ignorable="w14 wp14"``, and Word refuses a file whose ignorable prefix is undeclared),
+    and the prefixes of the package's own namespaces.
+    """
+    for name in pkg.names():
+        if not _is_xml_part(name) or _is_rels(name):
+            continue
+        root = pkg.xml(name)
+        keep = set(NS)
+        for element in root.iter(etree.Element):
+            for attribute in _MC_PREFIX_LISTS:
+                for item in element.get(attribute, "").split():
+                    keep.add(item.partition(":")[0])
+        etree.cleanup_namespaces(root, keep_ns_prefixes=sorted(keep))
 
 
 # ---- the package: relationships and parts --------------------------------------------------------

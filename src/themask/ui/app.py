@@ -2,11 +2,15 @@
 
 ``main`` is what ``python -m themask`` runs: the network guard first, then the log, then the
 window. The detection engine is not made here; the window loads it in a thread while it shows
-"Loading…" (``AppContext.engine`` is None until then).
+"Loading…" (``AppContext.engine`` is None until then). While the window lives, Python's garbage
+collector runs from the GUI thread on a timer (``GarbageCollector``, ruling R111), never from a
+worker thread.
 """
 
 from __future__ import annotations
 
+import gc
+import itertools
 import json
 import os
 import sys
@@ -15,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication
 
 from themask.about import APP_NAME, VERSION
@@ -136,6 +141,43 @@ def build_context() -> AppContext:
     )
 
 
+class GarbageCollector(QObject):
+    """Runs Python's garbage collector from the GUI thread, on a timer (ruling R111).
+
+    Left to itself, the collector runs in whichever thread allocates when its counts run out, a
+    worker thread of the app among them. PySide6 takes the C++ side of a widget apart without
+    holding the interpreter lock, so a collection in a worker thread that walks a wrapper half
+    gone ends the process. While the window lives the automatic collector is switched off and
+    this timer collects every ``INTERVAL_MS`` from the GUI thread, the generations in turn: 0,
+    0, 1, 0, 0, 2 (Spyder's pattern).
+    """
+
+    INTERVAL_MS = 2000
+    GENERATIONS = (0, 0, 1, 0, 0, 2)
+
+    def __init__(self, parent: QObject | None = None, interval_ms: int = INTERVAL_MS) -> None:
+        super().__init__(parent)
+        self.setObjectName("garbage-collector")
+        self._generations = itertools.cycle(self.GENERATIONS)
+        self.timer = QTimer(self)
+        self.timer.setInterval(interval_ms)
+        self.timer.timeout.connect(self.collect)
+
+    def start(self) -> None:
+        """Switches the automatic collector off and starts collecting on the timer."""
+        gc.disable()
+        self.timer.start()
+
+    def stop(self) -> None:
+        """Stops the timer and switches the automatic collector back on."""
+        self.timer.stop()
+        gc.enable()
+
+    def collect(self) -> None:
+        """Collects the next generation in turn."""
+        gc.collect(next(self._generations))
+
+
 def main() -> int:
     """Run the app: the network guard, the log, the window; returns the exit status."""
     install_network_guard()
@@ -155,6 +197,9 @@ def main() -> int:
         return 1
     window = MainWindow(ctx)
     window.show()
+    collector = GarbageCollector(application)
+    collector.start()
     status = application.exec()
     window.wait_for_workers()  # no thread may outlive the application
+    collector.stop()
     return status

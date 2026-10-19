@@ -211,6 +211,30 @@ def test_seed_entries_reuse_placeholders(engine, lists):
     assert by["Baltic Fasteners GmbH"].placeholder == "[COMPANY_3]"
 
 
+def test_a_case_entry_never_takes_a_value_that_differs_only_in_a_point(lists):
+    # Ruling R100: the key's "EUR 1.25" is not the annex's "EUR 125".
+    seed = [KeyEntry("[AMOUNT_1]", PlaceholderType.AMOUNT, "EUR 1.25", [])]
+    fake = FakeEngine((PlaceholderType.AMOUNT, "EUR 125", 0.85, "pattern"))
+    a = analyze(one("The fee is EUR 125 per item."), fake, lists, seed_entries=seed)
+    assert [(g.placeholder, g.canonical) for g in a.groups] == [("[AMOUNT_2]", "EUR 125")]
+
+
+def test_values_that_differ_in_a_point_a_symbol_or_a_dot_get_their_own_placeholders(engine, lists):
+    # Ruling R100, the reviewer's reproduction: six values, six placeholders.
+    t = (
+        "The unit fee is EUR 1.25 per item and the annual cap is EUR 125 per customer. "
+        "The deposit is $100 and the refund is \N{EURO SIGN}100. "
+        "Questions to a.b@example.com or to ab@example.com."
+    )
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == (
+        "The unit fee is [AMOUNT_1] per item and the annual cap is [AMOUNT_2] per customer. "
+        "The deposit is [AMOUNT_3] and the refund is [AMOUNT_4]. "
+        "Questions to [EMAIL_1] or to [EMAIL_2]."
+    )
+    assert all(len(g.variants) == 1 for g in a.groups)
+
+
 # --- Several files in one case -------------------------------------------------------------------
 
 
@@ -246,6 +270,31 @@ def test_no_finding_runs_from_one_line_into_the_next(lists):
     a = analyze(one("To Acme\nSupplies Ltd from Jane\n\nDoe."), fake, lists)
     assert sorted(f.text for f in all_findings(a)) == ["Acme", "Doe", "Jane", "Supplies Ltd"]
     assert_one_replacement_each(a)
+
+
+def test_a_finding_is_cut_at_a_note_as_at_a_line_break(lists):
+    # Ruling R113: the model read the company and the note that follows it as one name.
+    t = "Acme Supplies Ltd[image removed] sells. [embedded object removed]Northwind buys."
+    fake = FakeEngine(
+        (P, "Acme Supplies Ltd[image", 0.85, "model"),
+        (C, "removed]Northwind", 0.7, "model"),
+        (C, "Acme Supplies Ltd", 0.95, "rule"),
+    )
+    a = analyze(one(t), fake, lists)
+    assert [(g.type, g.canonical) for g in a.groups] == [(C, "Acme Supplies Ltd"), (C, "Northwind")]
+    assert_one_replacement_each(a)
+    assert (
+        masked(a) == "[COMPANY_1][image removed] sells. [embedded object removed][COMPANY_2] buys."
+    )
+
+
+def test_the_real_engine_reads_a_name_beside_a_note_as_the_name(engine, lists):
+    a = analyze(
+        one("Acme Supplies Ltd[image removed] sells to Brightwater Foods Ltd."), engine, lists
+    )
+    assert all("[" not in g.canonical and "[" not in f.text for g in a.groups for f in g.findings)
+    (acme,) = [g for g in a.groups if g.canonical == "Acme Supplies Ltd"]
+    assert acme.type is C and acme.placeholder == "[COMPANY_1]"
 
 
 def test_edges_that_belong_to_the_sentence_are_trimmed(lists):

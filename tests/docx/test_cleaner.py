@@ -10,6 +10,7 @@ to a part, each reference in the XML to a relationship, each Override to a part)
 
 from __future__ import annotations
 
+import copy
 import json
 import posixpath
 import zipfile
@@ -136,6 +137,14 @@ def saved_bytes(pkg: DocxPackage, tmp_path: Path) -> bytes:
 
 def document(pkg: DocxPackage, name: str = "word/document.xml") -> bytes:
     return etree.tostring(pkg.xml(name))
+
+
+def content(pkg: DocxPackage, name: str = "word/document.xml") -> bytes:
+    """The part as it is, but for the namespace declarations nothing in it uses, which the
+    cleaner drops (ruling R102), and the package's own prefixes, which it keeps."""
+    root = copy.deepcopy(pkg.xml(name))
+    etree.cleanup_namespaces(root, keep_ns_prefixes=list(NS))
+    return etree.tostring(root)
 
 
 def text_of(pkg: DocxPackage) -> str:
@@ -397,7 +406,8 @@ def test_every_corpus_file_is_cleaned_and_keeps_its_visible_text(
         assert DocxPackage.open(tmp_path / file).TEXT_PARTS == text_parts, file
 
 
-STRUCTURE = ("w:p", "w:tbl", "w:tr", "w:tc", "w:numPr", "w:sectPr", "w:hyperlink")
+# (Not w:hyperlink: the links to the outside go since ruling R112, their text stays.)
+STRUCTURE = ("w:p", "w:tbl", "w:tr", "w:tc", "w:numPr", "w:sectPr")
 STRUCTURE += ("w:footnoteReference", "w:bookmarkStart", "w:tblGrid")
 
 
@@ -593,6 +603,56 @@ def test_rsids_are_stripped_from_every_part() -> None:
     assert pkg.xml("word/styles.xml").find(".//w:style", NS).get(f"{{{NS['w']}}}styleId") == "A"
 
 
+# ---- namespace declarations (ruling R102) --------------------------------------------------------
+
+
+def test_a_declaration_nothing_uses_goes_and_one_in_use_stays(tmp_path: Path) -> None:
+    document = (
+        f"<w:document {DECLARATIONS}"
+        ' xmlns:ns0="urn:northwind-trading-bv:contract-schema"'
+        ' xmlns:nw="http://northwind-trading.example/2026/templates"><w:body>'
+        "<w:p><w:r><w:t>Signed for the Supplier.</w:t><nw:NorthwindTradingBV/></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    header = (
+        f'<w:hdr {DECLARATIONS} xmlns:acme="http://acme-supplies.example/letterhead" '
+        'mc:Ignorable="w14 wp14" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing">'
+        "<w:p><w:r><w:t>Page</w:t></w:r></w:p></w:hdr>"
+    )
+    pkg = package(
+        rels=[(HEADER, "header1.xml")],
+        parts={
+            "word/document.xml": ('<?xml version="1.0" encoding="UTF-8"?>\n' + document).encode(),
+            "word/header1.xml": ('<?xml version="1.0" encoding="UTF-8"?>\n' + header).encode(),
+        },
+        types={"word/header1.xml": HEADER_TYPE},
+    )
+    clean(pkg)
+    saved = saved_bytes(pkg, tmp_path)
+    assert b"northwind-trading-bv" not in saved and b"acme-supplies" not in saved
+    # The one in use stays, for the leak check to find.
+    assert b'xmlns:nw="http://northwind-trading.example/2026/templates"' in saved
+    assert b"<nw:NorthwindTradingBV/>" in saved
+    # The prefixes mc:Ignorable names stay declared, used or not: Word refuses the file otherwise.
+    header_part = pkg.raw("word/header1.xml")
+    assert b'xmlns:w14="' in header_part and b'xmlns:wp14="' in header_part
+    assert b'mc:Ignorable="w14 wp14"' in header_part and b'xmlns:mc="' in header_part
+    opened = docx.Document(str(tmp_path / "saved.docx"))
+    assert opened.paragraphs[0].text == "Signed for the Supplier."
+
+
+def test_every_corpus_file_keeps_its_ignorable_prefixes(corpus: Path, tmp_path: Path) -> None:
+    # The corpus files declare mc:Ignorable="w14 wp14" on w:document, as Word and python-docx do.
+    pkg = DocxPackage.open(corpus / "supply-01.docx")
+    assert b'mc:Ignorable="w14 wp14"' in pkg.raw("word/document.xml")
+    clean(pkg)
+    document = pkg.raw("word/document.xml")
+    assert b'xmlns:w14="' in document and b'xmlns:wp14="' in document
+    saved = tmp_path / "supply-01-cleaned.docx"
+    pkg.save(saved)
+    assert docx.Document(str(saved)).paragraphs
+
+
 def test_the_main_document_is_cleaned_wherever_the_package_keeps_it() -> None:
     # The package may name another part as its main document; its text and rsids are cleaned too.
     body = f'<w:body><w:p w:rsidR="00AB12CD">{HIDDEN}{run("kept")}</w:p></w:body>'
@@ -766,14 +826,135 @@ def test_a_link_in_a_field_goes_when_nothing_visible_is_left_in_either() -> None
     assert b"bookmarkStart" in document(pkg)  # what else was in the link stays where it was
 
 
-def test_a_link_that_also_holds_visible_text_keeps_its_target() -> None:
+def test_a_link_that_also_holds_visible_text_keeps_the_text_and_loses_its_target() -> None:
+    # Ruling R112: every link to the outside goes, with or without hidden text in it.
     mixed = (
         '<w:hyperlink r:id="rId1"><w:r><w:rPr><w:vanish/></w:rPr><w:t>note</w:t></w:r>'
         f"{run('portal')}</w:hyperlink>"
     )
     pkg = package(para(mixed), rels=[(HYPERLINK, "https://portal.example/", "External")])
-    assert clean(pkg).hidden_runs == 1
-    assert text_of(pkg) == "portal" and b"portal.example" in everywhere(pkg)
+    rep = clean(pkg)
+    assert rep.hidden_runs == 1 and rep.links_removed == 1
+    assert text_of(pkg) == "portal" and b"portal.example" not in everywhere(pkg)
+    assert_consistent(pkg)
+
+
+# ---- links to the outside, permissions and field data (ruling R112) ------------------------------
+
+LINKED = "pieter.de.vries@pdv-advocaten.example"
+FIELD_ADDRESS = "legal.desk@lexpoint.example"
+EDITOR = "jane.doe@brightwater-foods.example"
+
+
+def contact_in_links() -> DocxPackage:
+    """The reviewer's file: an address behind "click here", one in a HYPERLINK simple field, one
+    as the editor of a permission range, and a name in the text."""
+    body = (
+        para(
+            run("Notices to the Supplier: "),
+            '<w:hyperlink r:id="rId1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr>'
+            "<w:t>click here</w:t></w:r></w:hyperlink>",
+            run(" or "),
+            f'<w:fldSimple w:instr=" HYPERLINK &quot;mailto:{FIELD_ADDRESS}&quot; ">'
+            "<w:r><w:t>this address</w:t></w:r></w:fldSimple>",
+            run("."),
+        )
+        + para(
+            f'<w:permStart w:id="100" w:edGrp="everyone" w:ed="{EDITOR}"/>',
+            run("The Buyer may edit this clause."),
+            '<w:permEnd w:id="100"/>',
+        )
+        + para(run("Signed by John Carter for the Buyer."))
+    )
+    return package(body, rels=[(HYPERLINK, f"mailto:{LINKED}", "External")])
+
+
+def test_contact_data_that_stands_only_in_links_and_marks_goes(tmp_path: Path) -> None:
+    pkg = contact_in_links()
+    rep = clean(pkg)
+    saved = saved_bytes(pkg, tmp_path)
+    for address in (LINKED, FIELD_ADDRESS, EDITOR):
+        assert address.encode() not in saved, address
+    assert b"relationships/hyperlink" not in saved and b"permStart" not in saved
+    assert b"permEnd" not in saved and b"w:ed=" not in saved and b"edGrp" not in saved
+    assert text_of(pkg) == (
+        "Notices to the Supplier: click here or this address.\nThe Buyer may edit this clause.\n"
+        "Signed by John Carter for the Buyer."
+    )
+    assert rep.links_removed == 1 and rep.fields_flattened == 1
+    assert "word/_rels/document.xml.rels" not in pkg.names()
+    assert_consistent(pkg)
+
+
+def test_an_internal_link_stays_and_a_hyperlink_field_becomes_its_text() -> None:
+    body = para(
+        '<w:hyperlink w:anchor="_Toc1" w:history="1">',
+        run("Definitions"),
+        "</w:hyperlink>",
+        run(" and "),
+        field(' HYPERLINK "https://portal.example/login" ', run("the portal")),
+    )
+    pkg = package(body)
+    rep = clean(pkg)
+    assert b'w:anchor="_Toc1"' in document(pkg) and text_of(pkg) == "Definitions and the portal"
+    assert b"portal.example" not in everywhere(pkg) and b"fldChar" not in document(pkg)
+    assert rep.links_removed == 0 and rep.fields_flattened == 1
+
+
+@pytest.mark.parametrize("name", ["INCLUDEPICTURE", "INCLUDETEXT", "INCLUDE", "IMPORT", "LINK"])
+def test_a_field_that_reads_a_file_or_an_address_becomes_its_result(name: str) -> None:
+    instruction = f' {name} "C:\\\\Clients\\\\Acme\\\\terms.docx" '
+    pkg = package(para(field(instruction, run("the terms"))))
+    rep = clean(pkg)
+    assert text_of(pkg) == "the terms" and b"Acme" not in everywhere(pkg)
+    assert rep.fields_flattened == 1
+
+
+def test_links_on_shapes_go_and_the_shapes_stay() -> None:
+    box = (
+        '<w:drawing><wp:anchor><wp:docPr id="2" name="Text Box 2">'
+        '<a:hlinkClick r:id="rId1" tooltip="Acme portal"/><a:hlinkHover r:id="rId1"/></wp:docPr>'
+        '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
+        f"<wps:wsp><wps:txbx><w:txbxContent>{para(run('Boxed'))}</w:txbxContent></wps:txbx></wps:wsp>"
+        "</a:graphicData></a:graphic></wp:anchor></w:drawing>"
+    )
+    vml = (
+        '<w:pict><v:rect id="_x0000_s1026" href="https://acme.example/terms" '
+        'o:href="https://acme.example/terms" o:hrlabel="Acme terms" style="width:100pt">'
+        f"<v:textbox><w:txbxContent>{para(run('VML box'))}</w:txbxContent></v:textbox></v:rect>"
+        "</w:pict>"
+    )
+    pkg = package(
+        para(f"<w:r>{box}</w:r><w:r>{vml}</w:r>"),
+        rels=[(HYPERLINK, "https://acme.example/portal", "External")],
+    )
+    rep = clean(pkg)
+    assert b"acme.example" not in everywhere(pkg) and b"Acme" not in everywhere(pkg)
+    assert b"hlink" not in document(pkg) and b"href" not in document(pkg)
+    assert text_of(pkg).splitlines()[1:] == ["Boxed", "VML box"]
+    assert rep.links_removed == 3  # two on the drawing, the VML shape's
+    assert_consistent(pkg)
+
+
+def test_field_data_and_editing_marks_go_and_the_rest_stays() -> None:
+    page = (
+        '<w:r><w:fldChar w:fldCharType="begin"><w:fldData>QWNtZSBTdXBwbGllcw==</w:fldData>'
+        '</w:fldChar></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>'
+        f'<w:r><w:fldChar w:fldCharType="separate"/></w:r>{run("7")}'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+    )
+    marked = (
+        '<w:p w:author="Jane Doe"><w:r w:ed="jane.doe@brightwater-foods.example">'
+        '<w:t>Reviewed</w:t></w:r><w:permStart w:id="1" w:edGrp="everyone"/><w:permEnd w:id="1"/>'
+        "</w:p>"
+    )
+    pkg = package(para(page) + marked)
+    rep = clean(pkg)
+    assert b"fldData" not in document(pkg) and b"QWNt" not in everywhere(pkg)
+    assert b"Jane Doe" not in everywhere(pkg) and b"jane.doe" not in everywhere(pkg)
+    assert b"w:author" not in document(pkg) and b"w:ed" not in document(pkg)
+    assert b" PAGE " in document(pkg) and text_of(pkg) == " PAGE 7\nReviewed"
+    assert rep.links_removed == 0 and rep.attributes_cleared == 2
     assert_consistent(pkg)
 
 
@@ -952,9 +1133,9 @@ def test_a_contents_page_is_left_as_it_is() -> None:
     pkg = package(
         contents + para('<w:bookmarkStart w:id="1" w:name="_Toc1"/>', run("1. Definitions"))
     )
-    before = document(pkg)
+    before = content(pkg)
     rep = clean(pkg)
-    assert rep == CleanReport() and document(pkg) == before
+    assert rep == CleanReport() and content(pkg) == before
 
 
 def test_a_field_that_starts_in_one_paragraph_and_ends_in_the_next() -> None:
@@ -993,16 +1174,17 @@ def test_a_field_in_the_instruction_of_a_flattened_field_goes_with_it(nested: st
 
 
 def test_other_fields_are_left_alone() -> None:
+    # (A HYPERLINK field is flattened since ruling R112: its address is a link to the outside.)
     body = para(
         run("Page "),
         '<w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple>',
-        field(r' HYPERLINK "https://example.test/x" ', run("link")),
+        field(r" REF _Ref1 \h ", run("clause 2")),
         field(" NUMPAGES ", run("9")),
     )
     pkg = package(body)
-    before = document(pkg)
+    before = content(pkg)
     rep = clean(pkg)
-    assert rep.fields_flattened == 0 and document(pkg) == before
+    assert rep.fields_flattened == 0 and content(pkg) == before
 
 
 def test_a_personal_field_in_the_result_of_another_is_flattened() -> None:
@@ -1024,8 +1206,8 @@ def test_a_personal_field_in_the_instruction_of_another_is_left_alone() -> None:
         + '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
     )
     pkg = package(para(outer))
-    before = document(pkg)
-    assert clean(pkg).fields_flattened == 0 and document(pkg) == before
+    before = content(pkg)
+    assert clean(pkg).fields_flattened == 0 and content(pkg) == before
 
 
 def test_a_field_that_is_never_closed_does_no_harm() -> None:
@@ -1209,15 +1391,17 @@ def test_form_field_data_goes_and_the_field_stays() -> None:
     assert document(pkg).count(b"w:fldChar ") == 3 and text_of(pkg) == " FORMTEXT Acme Holdings"
 
 
-def test_a_link_keeps_its_target_and_loses_its_tooltip() -> None:
+def test_a_link_loses_its_tooltip_and_its_target_and_keeps_its_text() -> None:
+    # Ruling R112: the target goes with the tooltip; the AI reads text, not links.
     link = (
         '<w:hyperlink r:id="rId1" w:tooltip="Open the Acme portal" w:history="1">'
         f"{run('portal')}</w:hyperlink>"
     )
     pkg = package(para(link), rels=[(HYPERLINK, "https://portal.example/login", "External")])
-    assert clean(pkg).attributes_cleared == 1
+    rep = clean(pkg)
+    assert rep.attributes_cleared == 1 and rep.links_removed == 1
     assert b"tooltip" not in everywhere(pkg) and b"Acme portal" not in everywhere(pkg)
-    assert text_of(pkg) == "portal" and b"portal.example" in everywhere(pkg)  # the masker's to do
+    assert text_of(pkg) == "portal" and b"portal.example" not in everywhere(pkg)
     assert_consistent(pkg)
 
 
@@ -1340,6 +1524,72 @@ def test_pictures_in_headers_and_footers_count_too() -> None:
     assert_consistent(pkg)
 
 
+def test_a_note_stands_apart_from_the_text_beside_it() -> None:
+    # Ruling R113: the model read "Acme Supplies Ltd[image removed]" as one name. The note is a
+    # run of its own, with a space before it or after it where the text does not end or start
+    # with one; its wording stays.
+    header = para(run("Acme Supplies Ltd"), f"<w:r>{picture('rId1')}</w:r>")
+    pkg = package(
+        para(run("Body")),
+        rels=[(HEADER, "header1.xml")],
+        parts={
+            **in_header(header),
+            "word/_rels/header1.xml.rels": rels_xml([(IMAGE, "media/logo.png")]),
+            "word/media/logo.png": b"PNG",
+        },
+        types={"word/header1.xml": HEADER_TYPE},
+    )
+    clean(pkg)
+    assert text_of(pkg) == f"Body\nAcme Supplies Ltd {IMAGE_NOTE}"
+    runs = pkg.xml("word/header1.xml").findall(".//w:r", NS)
+    assert [[t.text for t in r.findall("w:t", NS)] for r in runs] == [
+        ["Acme Supplies Ltd"],
+        [" ", IMAGE_NOTE],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        ("Logo:", "Acme", f"Logo: {IMAGE_NOTE} Acme"),  # a space on either side
+        ("See ", " above", f"See {IMAGE_NOTE} above"),  # none where the text has one
+        ("", "Acme", f"{IMAGE_NOTE} Acme"),  # none at the paragraph's start
+        ("Acme\t", "", f"Acme\t{IMAGE_NOTE}"),  # a tab is whitespace
+    ],
+)
+def test_a_note_is_spaced_by_what_stands_beside_it(before: str, after: str, expected: str) -> None:
+    text_before = (
+        "<w:t>Acme</w:t><w:tab/>"
+        if before == "Acme\t"
+        else f'<w:t xml:space="preserve">{before}</w:t>'
+    )
+    pkg = package(
+        para(f'<w:r>{text_before}{picture("rId1")}<w:t xml:space="preserve">{after}</w:t></w:r>'),
+        rels=[(IMAGE, "media/a.png")],
+        parts={"word/media/a.png": b"PNG"},
+    )
+    clean(pkg)
+    assert text_of(pkg) == expected
+    note = next(
+        t for t in pkg.xml("word/document.xml").iter(f"{{{NS['w']}}}t") if t.text == IMAGE_NOTE
+    )
+    assert all(t.text in (" ", IMAGE_NOTE) for t in note.getparent().findall("w:t", NS))
+
+
+def test_every_kind_of_note_is_spaced_the_same_way() -> None:
+    equation = "<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>"
+    embedded = '<w:object><v:shape><v:imagedata r:id="rId1"/></v:shape><o:OLEObject r:id="rId2"/></w:object>'
+    pkg = package(
+        para(
+            run("Fee:"), f"<w:r>{embedded}</w:r>", run("per"), f"<w:r>{equation}</w:r>", run("unit")
+        ),
+        rels=[(IMAGE, "media/a.wmf"), (OLE, "embeddings/o.bin")],
+        parts={"word/media/a.wmf": b"WMF", "word/embeddings/o.bin": b"OLE"},
+    )
+    clean(pkg)
+    assert text_of(pkg) == f"Fee: {OBJECT_NOTE} per {EQUATION_NOTE} unit"
+
+
 def test_a_picture_amid_text_leaves_the_text_around_it() -> None:
     pkg = package(
         para(f"<w:r><w:t>See </w:t>{picture('rId1')}<w:t> above</w:t></w:r>"),
@@ -1455,8 +1705,10 @@ def test_a_link_on_a_picture_goes_with_it() -> None:
         ],
         parts={"word/media/a.png": b"PNG"},
     )
-    clean(pkg)
-    assert b"secret.example" not in everywhere(pkg) and b"kept.example" in everywhere(pkg)
+    rep = clean(pkg)
+    # Ruling R112: the link on the text goes as well, its text stays.
+    assert b"secret.example" not in everywhere(pkg) and b"kept.example" not in everywhere(pkg)
+    assert text_of(pkg).endswith("visible") and rep.links_removed == 2  # the picture's, the text's
     assert_consistent(pkg)
 
 
@@ -2008,8 +2260,9 @@ BULLET = (
 )
 
 
-def test_media_that_something_else_still_uses_stays() -> None:
-    # The image of a picture bullet is kept with its link; a picture nothing uses is not.
+def test_the_image_of_a_picture_bullet_goes_with_the_bullet() -> None:
+    # Ruling R101: every media part goes, the one a picture bullet uses and the one nobody uses
+    # alike; the bullet itself goes with its image, so nothing is left dangling.
     pkg = package(
         para(f"<w:r>{picture('rId1')}</w:r>"),
         rels=[(IMAGE, "media/a.png"), (f"{REL}/numbering", "numbering.xml")],
@@ -2021,12 +2274,15 @@ def test_media_that_something_else_still_uses_stays() -> None:
             "word/media/orphan.png": b"PNG nobody uses",
         },
     )
-    clean(pkg)
-    assert [n for n in pkg.names() if "media" in n] == ["word/media/bullet.png"]
+    rep = clean(pkg)
+    assert [n for n in pkg.names() if "media" in n] == []
+    assert b"numPicBullet" not in everywhere(pkg) and rep.images == 2
+    assert "word/numbering.xml" in pkg.names()
     assert_consistent(pkg)
 
 
-def test_a_picture_that_something_else_still_uses_stays_with_its_link() -> None:
+def test_a_picture_that_something_else_still_uses_goes_as_well() -> None:
+    # Ruling R101: a picture bullet's image is a picture like any other.
     pkg = package(
         para(f"<w:r>{picture('rId1')}</w:r>"),
         rels=[(IMAGE, "media/shared.png"), (f"{REL}/numbering", "numbering.xml")],
@@ -2037,8 +2293,9 @@ def test_a_picture_that_something_else_still_uses_stays_with_its_link() -> None:
         },
     )
     rep = clean(pkg)
-    assert rep.images == 1 and "word/media/shared.png" in pkg.names()
-    assert_consistent(pkg)  # the bullet still finds its image
+    assert rep.images == 2 and "word/media/shared.png" not in pkg.names()
+    assert "word/_rels/numbering.xml.rels" not in pkg.names()
+    assert_consistent(pkg)
 
 
 def test_a_part_takes_the_parts_only_it_used_and_leaves_the_shared_ones() -> None:
@@ -2058,7 +2315,147 @@ def test_a_part_takes_the_parts_only_it_used_and_leaves_the_shared_ones() -> Non
     )
     rep = clean(pkg)
     assert {"word/chunk/afchunk.html", "word/chunk/logo.png"} <= set(rep.parts_removed)
-    assert "word/chunk/shared.png" in pkg.names()
+    # Ruling R101: the picture the bullets share is a picture, and goes with the bullet.
+    assert "word/chunk/shared.png" not in pkg.names()
+    assert_consistent(pkg)
+
+
+# ---- pictures that are not in the text (ruling R101) ---------------------------------------------
+
+THEME_WITH_IMAGE = (
+    '<a:theme name="Acme Corporate"><a:themeElements><a:clrScheme name="Office"/>'
+    '<a:fontScheme name="Office"/><a:fmtScheme name="Office"><a:fillStyleLst>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+    '<a:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>'
+    '<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill>'
+    '<a:blipFill><a:blip r:embed="rId1"/></a:blipFill>'
+    '<a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>'
+    "</a:fmtScheme></a:themeElements></a:theme>"
+)
+PICTURE_BULLETS = (
+    BULLET + '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>'
+    '<w:numFmt w:val="bullet"/><w:lvlPicBulletId w:val="0"/><w:lvlText w:val=""/>'
+    '<w:lvlJc w:val="left"/></w:lvl></w:abstractNum>'
+    '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+)
+MODEL3D_NS = "http://schemas.microsoft.com/office/drawing/2017/model3d"
+MODEL3D = (
+    '<w:drawing><wp:inline><wp:docPr id="7" name="3D Model 7"/><a:graphic>'
+    f'<a:graphicData uri="{MODEL3D_NS}"><am3d:model3d xmlns:am3d="{MODEL3D_NS}" r:embed="rId1">'
+    "<am3d:spPr/></am3d:model3d></a:graphicData></a:graphic></wp:inline></w:drawing>"
+)
+
+
+def media_everywhere() -> DocxPackage:
+    """The reviewer's file: a picture in the page background, a picture bullet, an image in the
+    theme, a VML shape with a picture fill, an orphan image relationship and a header picture."""
+    background = (
+        '<w:background w:color="FFFFFF"><v:background id="_x0000_s1025" o:bwmode="white">'
+        '<v:fill r:id="rId3" o:title="letterhead" recolor="t" type="frame"/></v:background>'
+        "</w:background>"
+    )
+    body = (
+        para(run("Acme Supplies Ltd (the Supplier) and Brightwater Foods Ltd (the Buyer) agree."))
+        + '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+        + run("A bulleted item with a picture bullet.")
+        + "</w:p>"
+        + para(
+            '<w:r><w:pict><v:rect id="_x0000_s1026" style="width:100pt;height:50pt">'
+            '<v:fill r:id="rId4" type="frame"/></v:rect></w:pict></w:r>',
+            run("Contact: John Carter, Director."),
+        )
+        + '<w:sectPr><w:headerReference w:type="default" r:id="rId5"/></w:sectPr>'
+    )
+    header = para(
+        run("Acme Supplies Ltd"),
+        '<w:r><w:pict><v:shape style="width:60pt;height:20pt"><v:imagedata r:id="rId1" o:title="logo"/>'
+        "</v:shape></w:pict></w:r>",
+    )
+    pkg = package(
+        body,
+        rels=[
+            (f"{REL}/numbering", "numbering.xml"),
+            (THEME_REL, "theme/theme1.xml"),
+            (IMAGE, "media/background.png"),
+            (IMAGE, "media/fill.png"),
+            (HEADER, "header1.xml"),
+            (IMAGE, "media/orphan.png"),
+        ],
+        parts={
+            "word/numbering.xml": part("w:numbering", PICTURE_BULLETS),
+            "word/_rels/numbering.xml.rels": rels_xml([(IMAGE, "media/bullet.png")]),
+            "word/theme/theme1.xml": (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+                + THEME_WITH_IMAGE.replace("<a:theme ", f"<a:theme {DECLARATIONS} ", 1)
+            ).encode(),
+            "word/theme/_rels/theme1.xml.rels": rels_xml([(IMAGE, "../media/themeimage.png")]),
+            **in_header(header),
+            "word/_rels/header1.xml.rels": rels_xml([(IMAGE, "media/logo.png")]),
+            **{
+                f"word/media/{name}.png": b"PNG " + name.encode()
+                for name in ("bullet", "themeimage", "logo", "background", "fill", "orphan")
+            },
+        },
+        types={
+            "word/numbering.xml": f"{WML}.numbering+xml",
+            "word/theme/theme1.xml": "application/vnd.openxmlformats-officedocument.theme+xml",
+            "word/header1.xml": HEADER_TYPE,
+        },
+    )
+    # The document's root holds the background before the body, as Word writes it.
+    root = pkg.xml("word/document.xml")
+    root.insert(0, etree.fromstring(f"<w:root {DECLARATIONS}>{background}</w:root>")[0])
+    return pkg
+
+
+def test_every_picture_goes_wherever_it_is_reached_from(tmp_path: Path) -> None:
+    # Ruling R101: pixels are what is marked (a logo is the company, a signature the person).
+    pkg = media_everywhere()
+    rep = clean(pkg)
+    assert not [n for n in pkg.names() if n.startswith("word/media/")]
+    assert all(f"{IMAGE}" not in pkg.raw(n).decode() for n in pkg.names() if n.endswith(".rels"))
+    document = pkg.raw("word/document.xml")
+    assert b"background" not in document and b'r:id="rId4"' not in document
+    assert b"<v:fill" in document  # a fill without its picture is a plain fill
+    numbering = pkg.raw("word/numbering.xml")
+    assert b"numPicBullet" not in numbering and b"lvlPicBulletId" not in numbering
+    theme = pkg.xml("word/theme/theme1.xml")
+    assert b"blip" not in pkg.raw("word/theme/theme1.xml")
+    for fills in theme.iter(f"{{{THEME_NS}}}fillStyleLst", f"{{{THEME_NS}}}bgFillStyleLst"):
+        assert len(fills) == 3 and all(f.tag == f"{{{THEME_NS}}}solidFill" for f in fills)
+    header_text = text_of(pkg).splitlines()[-1]
+    assert header_text.startswith("Acme Supplies Ltd") and header_text.endswith(IMAGE_NOTE)
+    # The header picture, the background, the bullet, the theme's two images and the VML fill.
+    assert rep.images == 6
+    assert set(rep.parts_removed) >= {f"word/media/{n}.png" for n in ("bullet", "orphan", "logo")}
+    assert_consistent(pkg)
+    saved = tmp_path / "cleaned.docx"
+    pkg.save(saved)
+    assert docx.Document(str(saved)).paragraphs[0].text.startswith("Acme Supplies Ltd")
+
+
+def test_a_3d_model_is_a_picture_with_its_part() -> None:
+    pkg = package(
+        para(run("See "), f"<w:r>{MODEL3D}</w:r>"),
+        rels=[(f"{REL}/model3d", "media/model1.glb")],
+        parts={"word/media/model1.glb": b"glTF"},
+        types={"word/media/model1.glb": "model/gltf-binary"},
+    )
+    rep = clean(pkg)
+    assert rep.images == 1 and text_of(pkg) == f"See {IMAGE_NOTE}"
+    assert pkg.names() == ["[Content_Types].xml", "_rels/.rels", "word/document.xml"]
+    assert_consistent(pkg)
+
+
+def test_a_media_part_goes_by_its_content_type_wherever_it_is() -> None:
+    # An audio clip the document plays, under a folder of its own and an Override type.
+    pkg = package(
+        parts={"word/clips/intro.wav": b"RIFF", "word/stills/frame.bin": b"PNG"},
+        types={"word/clips/intro.wav": "audio/wav", "word/stills/frame.bin": "image/png"},
+    )
+    rep = clean(pkg)
+    assert set(rep.parts_removed) == {"word/clips/intro.wav", "word/stills/frame.bin"}
     assert_consistent(pkg)
 
 
