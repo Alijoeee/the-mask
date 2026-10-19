@@ -235,6 +235,98 @@ def test_quantity_in_more_forms(engine, text, needle):
     assert QUANTITY in types_at(engine, text, needle)
 
 
+# The volume of personal data a data processing agreement covers is a quantity too.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("The processing concerns up to 350,000 records about", "350,000 records"),
+        ("up to 400.000 records", "400.000 records"),
+        (f"up to 90{NBSP}000 records", f"90{NBSP}000 records"),
+    ],
+)
+def test_records_are_a_quantity(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the Article 30 records of processing activities",
+        "under clause 12 records shall be kept",
+        "keep 1 record of each order",
+        "the records of the Supplier",
+        # Ruling R95 (I1): a year before "records" is the records' year.
+        "The Supplier shall keep the 2025 records for audit.",
+        "the 2026 and 2027 records are retained",
+        # Ruling R97 (c): after "the" or a possessive.
+        "Acme's 2025 records are kept.",
+        "the Supplier\N{RIGHT SINGLE QUOTATION MARK}s 2025 records",
+        "the Suppliers' 2025 records",
+        "The Processor keeps its 2025 records.",
+        "the 2024, 2025 and 2026 records",
+        "THE 2025 RECORDS ARE KEPT",
+        # Ruling R97 (a): any unit after a reference word of the contract.
+        "Section 5 pallets",
+        "Annex 2 Units of Measure",
+        "Schedule 3 Pallets",
+        "under Clause 4 cartons are listed",
+        "Part 2 Units",
+        "PART 2 UNITS OF MEASURE",
+        "Exhibit 4 boxes are attached",
+        "Appendix 3 Items and Prices",
+        "as paragraph 2 units are counted",
+        "\N{SECTION SIGN} 5 pallets",
+        # "art", "para" and "sec" written as abbreviations, with their full stop.
+        "the Art. 30 records of processing activities",
+        "ART. 30 RECORDS",
+        "under Sec. 5 pallets are listed",
+        "as Para. 2 units are counted",
+    ],
+)
+def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
+    assert found_by(QuantityRecognizer(), text) == {}
+
+
+# Ruling R97 (a): "parts", "art", "para" and "sec" are no reference words, nor is "part" in lower
+# case: spare parts are counted.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("The Supplier keeps spare parts 500 units in stock.", "500 units"),
+        ("and replacement parts 2,000 pieces", "2,000 pieces"),
+        ("up to 2,000 records", "2,000 records"),
+        ("the spare part 5 units", "5 units"),  # a part in lower case is no reference
+        ("the art 12 pieces", "12 pieces"),
+        # Ruling R97 (c): a number in a year's range is a count after these words.
+        ("up to 2000 records", "2000 records"),
+        ("about 2025 records", "2025 records"),
+        ("approximately 1999 records", "1999 records"),
+        ("no more than 2050 records", "2050 records"),
+        ("a total of 2000 records", "2000 records"),
+        # ... and wherever neither "the" nor a possessive stands right before it.
+        ("the first 2000 records", "2000 records"),
+        ("The Processor holds 2000 records.", "2000 records"),
+    ],
+)
+def test_a_quantity_after_a_word_like_parts_is_still_found(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
+
+
+# A figure after a reference word that goes on with a group of digits after a space may be the
+# reference and a count with its comma left out ("Schedule 3 500 pallets" for "Schedule 3, 500
+# pallets"): when unsure, hide, the reference with the count.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("as set out in Schedule 3 500 pallets shall be delivered", "3 500 pallets"),
+        (f"under Clause 4{NBSP}250 units", f"4{NBSP}250 units"),
+        ("the Article 30 500 records", "30 500 records"),
+    ],
+)
+def test_a_count_after_a_reference_without_its_comma_is_still_found(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -319,6 +411,11 @@ def test_bic_needs_a_real_one(text):
     assert found_by(BicRecognizer(), text) == {}
 
 
+def test_a_bic_after_its_label_and_a_tab(engine):
+    # Forms in Word put a tab between a label and its value.
+    assert found_by(BicRecognizer(), "BIC:\tDEUTDEBB") == {"DEUTDEBB": 0.9}
+
+
 @pytest.mark.parametrize(
     "text,needle",
     [
@@ -350,6 +447,32 @@ def test_account_numbers(engine, text, needle):
 )
 def test_account_number_needs_its_label(text):
     assert found_by(AccountNumberRecognizer(), text) == {}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Account number:\t12345678", "12345678"),
+        ("The account number is 12345678.", "12345678"),
+        ("Sort code is 12-34-56", "12-34-56"),
+        ("Account number: 1234-56-78", "1234-56-78"),  # no date: there is no 56th month
+    ],
+)
+def test_account_numbers_in_more_forms(text, needle):
+    assert found_by(AccountNumberRecognizer(), text) == {needle: 0.7}
+
+
+def test_a_mistyped_iban_after_its_label_is_an_id_to_check(engine):
+    # A wrong check digit: Presidio's IBAN recognizer turns it down, but it is the party's number.
+    text = "IBAN: NL91 ABNA 0417 1643 01"
+    assert found_by(AccountNumberRecognizer(), text) == {"NL91 ABNA 0417 1643 01": 0.6}
+    assert ID in types_at(engine, text, "NL91 ABNA 0417 1643 01")
+    # A valid one is Presidio's, found as an IBAN.
+    assert found_by(AccountNumberRecognizer(), "IBAN: NL91 ABNA 0417 1643 00") == {}
+
+
+def test_a_labelled_number_shaped_like_a_date_is_still_an_id(engine):
+    assert ID in types_at(engine, "Company No. 12/2024", "12/2024")
 
 
 # --- VAT, registration and identity numbers ------------------------------------------------------
@@ -399,6 +522,55 @@ def test_registration(engine):
     assert PlaceholderType.ID in types_at(
         engine, "registered in England and Wales under number 01234567", "01234567"
     )
+
+
+# What the label before a number calls it beats what else its digits could be: Presidio's phone
+# recognizer takes "number" for its own context word, and its NHS recognizer reads the 3-3-4 shape
+# of many national phone numbers.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("registered in England and Wales under number 08846969, whose office", "08846969"),
+        ("Account number: 08846969", "08846969"),
+    ],
+)
+def test_a_number_its_label_calls_an_id_is_no_phone_number(engine, text, needle):
+    types = types_at(engine, text, needle)
+    assert ID in types and PlaceholderType.PHONE not in types
+
+
+# Ruling R95 (M1): the registration label reaches "number" up to 40 characters after "company" or
+# "registered"; a telephone or fax label right before the digits says what they are.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Company telephone number: 020 7946 0958",
+        "Company fax number: 020 7946 0958",
+        "Registered office telephone number: 020 7946 0958",
+        "Company contact number: 020 7946 0958",
+        "company switchboard number 020 7946 0958",
+    ],
+)
+def test_a_number_its_label_calls_a_telephone_number_is_no_id(engine, text):
+    types = types_at(engine, text, "020 7946 0958")
+    assert PlaceholderType.PHONE in types and ID not in types
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the account manager is Ms Smith (telephone 013 625 5086), who shall",
+        "Tel: 013 625 5086",
+        "Phone: 013 625 5086",
+    ],
+)
+def test_a_number_its_label_calls_a_telephone_number_is_no_nhs_number(engine, text):
+    types = types_at(engine, text, "013 625 5086")
+    assert PlaceholderType.PHONE in types and ID not in types
+
+
+def test_an_nhs_number_without_a_telephone_label_is_still_an_id(engine):
+    assert ID in types_at(engine, "NHS number 943 476 5919", "943 476 5919")
 
 
 @pytest.mark.parametrize(
@@ -466,6 +638,21 @@ def test_bare_number_in_price_context_is_low_confidence_amount(engine):
 
 
 @pytest.mark.parametrize(
+    "text,score",
+    [
+        ("We assume 48,000 in all.", 0.4),  # "sum" inside "assume" is no price word
+        ("It shall discharge 48,000 in all.", 0.4),  # nor "charge" inside "discharge"
+        ("the sum of 48,000 in all", 0.75),
+        ("the charges of 48,000 in all", 0.75),
+        ("Subtotal: 48,000 in all", 0.75),  # the subtotal is a price word of its own
+    ],
+)
+def test_a_context_word_counts_only_as_a_whole_word(engine, text, score):
+    (f,) = [f for f in engine.analyze(text) if f.type == AMOUNT]
+    assert f.score == pytest.approx(score)
+
+
+@pytest.mark.parametrize(
     "text,needle,score",
     [
         ("Total price: 48,000", "48,000", 0.75),
@@ -503,10 +690,66 @@ def test_bare_numbers(engine, text, needle, score):
         "twenty",
         "five hundred",
         "one thousand days",
+        # A year with a footnote mark glued to it, as a PDF's text gives it.
+        "agreed on 21 July 2026.3 This Agreement",
+        "agreed on July 21, 2026.3",
+        # References to a law and to a standard.
+        "Regulation (EU) No 1169/2011",
+        "certified to ISO 9001",
+        "to EN 1090 and ISO/IEC 27001",
+        # A duration with its figure in brackets, and a time of day.
+        "for ten thousand (10,000) days",
+        "by 1700 CET each day",
+        "after 1730 hours",
+        # A clause number at the start of a line, before its heading or its first sentence.
+        "1.100 The Supplier shall deliver.",
+        "Terms\n  12.250 Delivery",
     ],
 )
 def test_bare_number_exclusions(text):
     assert found_by(BareNumberRecognizer(), text) == {}
+
+
+# Ruling R95 (C1): at the start of a line only a clause number's shape (one point, then three
+# digits) stays visible; an amount there, before the words saying what it pays for, is hidden.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Fees\n48,000\tAnnual licence fee", "48,000"),
+        ("Fees\n12,500\tSupport fee", "12,500"),
+        ("27,500 Implementation fee", "27,500"),
+        ("Price list\n1,250,000 Base price for the first year", "1,250,000"),
+        ("Preise\n1.250.000 Gesamtpreis", "1.250.000"),
+    ],
+)
+def test_an_amount_at_the_start_of_a_line_is_still_found(text, needle):
+    assert needle in found_by(BareNumberRecognizer(), text)
+
+
+def test_an_amount_before_what_it_pays_for_in_a_word_file_is_hidden(engine, lists, tmp_path):
+    # Through the app's own reading: a paragraph with a tab, and a table of one cell.
+    import docx
+
+    from themask.detect.pipeline import analyze
+    from themask.export import combined_text, load_sources
+
+    document = docx.Document()
+    document.add_paragraph("SCHEDULE 2 - CHARGES")
+    document.add_paragraph("48,000\tAnnual licence fee")
+    document.add_table(rows=1, cols=1).cell(0, 0).text = "27,500 Implementation fee"
+    path = tmp_path / "prices.docx"
+    document.save(str(path))
+    analysis = analyze(combined_text(load_sources([path], False)), engine, lists)
+    hidden = {f.text for g in analysis.groups for f in g.findings}
+    assert {"48,000", "27,500"} <= hidden
+
+
+def test_a_very_long_run_of_digits_is_read_without_error():
+    # Python refuses to turn more than 4,300 digits into a number; the check never needs to.
+    digits = "1" * 5000
+    assert found_by(BareNumberRecognizer(), f"Total: {digits}") == {digits: 0.4}
+    zeros = "0" * 5000 + "12"
+    assert found_by(BareNumberRecognizer(), f"Total: {zeros}") == {}
 
 
 # --- E-mail, phone, web addresses ----------------------------------------------------------------
@@ -553,6 +796,34 @@ def test_email_addresses(text, needle):
 )
 def test_web_addresses(engine, text, needle):
     assert texts_of(engine, text, PlaceholderType.URL) == {needle}
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Website: acme.me", "acme.me"),
+        ("Web: www-shop.acme.tv/contact", "www-shop.acme.tv/contact"),
+        ("Website:\tnorthwind.xyz", "northwind.xyz"),
+    ],
+)
+def test_a_web_address_after_its_label_needs_no_known_top_level_domain(engine, text, needle):
+    assert texts_of(engine, text, PlaceholderType.URL) == {needle}
+
+
+# Ruling R95 (I4): the label needs its colon or tab, and the address a top-level domain of two
+# letters or more: "e.g." and "i.e." after "web" or "URL" are no web addresses.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The Supplier publishes its terms on the web e.g. on its portal.",
+        "Notices are sent through the internet i.e. by e-mail.",
+        "The URL i.e. the link is sent.",
+        "The Supplier shall maintain a web site.Customers can order online.",
+        "Website: e.g. the portal",
+    ],
+)
+def test_a_word_after_a_web_label_is_no_web_address(engine, text):
+    assert texts_of(engine, text, PlaceholderType.URL) == set()
 
 
 @pytest.mark.parametrize(
@@ -675,10 +946,27 @@ def test_dates_stay_visible(engine):
         "on March 1, 2026",
         "This Agreement commences on 2026-03-01 and ends on 01.09.2027.",
         "taking into account the 01-03-2026 forecast",
+        # A bracket before the date, and the forms Presidio's date recognizer does not know.
+        "signed (01.03.2026) by both",
+        "on 2026.03.01",  # yyyy.mm.dd
+        "on 01-03-26",  # dd-mm-yy
+        "on 01 03 2026",  # dd mm yyyy
+        "on 2026/03/01",
     ],
 )
 def test_dates_are_not_findings(engine, text):
     assert engine.analyze(text) == []
+
+
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("Tel: (030) 360 7352", "(030) 360 7352"),
+        ("Telephone: 01 03 2026 99", "01 03 2026 99"),
+    ],
+)
+def test_a_phone_number_that_starts_like_a_date_is_still_found(engine, text, needle):
+    assert texts_of(engine, text, PlaceholderType.PHONE) == {needle}
 
 
 def test_a_phone_number_next_to_a_date_is_still_found(engine):

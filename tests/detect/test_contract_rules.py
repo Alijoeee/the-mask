@@ -5,6 +5,7 @@ The tests that take the ``engine`` fixture go through ``Engine.analyze``; the ot
 directly, which need no language model.
 """
 
+import re
 import time
 
 import pytest
@@ -384,6 +385,8 @@ def test_recitals_after_the_last_party_are_no_parties():
         "Acme, Inc.",
         "Smith & Co.",
         "Müller & Söhne GmbH & Co. KG",
+        "Schmidt Logistik KG",
+        "Acme Corporation Limited",
         "Marmara Tekstil Ltd. Şti.",
         "Marmara Tekstil Ltd. Sti.",
         "Anadolu Gıda A.Ş.",
@@ -431,6 +434,20 @@ def test_legal_form_company_boundaries(text, names):
     assert texts(find_legal_form_companies(text), text) == names
 
 
+# Review of the Task 24 tuning (ruling R95): only a term in capitals goes on after a legal form
+# written as a word ("Corporation Tax"); a company's warranty or guarantee in lower case does not.
+@pytest.mark.parametrize(
+    "text,name",
+    [
+        ("Acme Corporation warranty claims are excluded.", "Acme Corporation"),
+        ("The Acme Holdings Limited guarantee remains in force.", "Acme Holdings Limited"),
+        ("Northwind Corporation taxes are paid in Delaware.", "Northwind Corporation"),
+    ],
+)
+def test_a_legal_form_before_a_word_in_lower_case_ends_the_company(text, name):
+    assert texts(find_legal_form_companies(text), text) == {name}
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -446,6 +463,15 @@ def test_legal_form_company_boundaries(text, names):
         "Limited Warranty",
         "LIMITATION OF LIABILITY",
         "Nabisco Biscuits are sold.",
+        # A weight in kilograms, as a packing table heads its columns.
+        "NET WEIGHT KG",
+        "GROSS WEIGHT KG\tNET WEIGHT KG",
+        "Max Load KG",
+        # A legal form written as a word, in a term that goes on.
+        "The UK Corporation Tax rate applies.",
+        "under the Corporation Tax Act 2010",
+        "The Product Limited Warranty covers defects.",
+        "It advises on UK Corporation Tax.",  # the term ends the sentence
     ],
 )
 def test_no_legal_form_company(text):
@@ -582,6 +608,11 @@ def test_names_are_not_job_titles(name):
         "APPENDIX 1",
         "ANNEX II",
         "Schedule 3 Prices",
+        # The titles of the corpus's contracts, as their running headers write them.
+        "Supply Agreement",
+        "Logistics Services Agreement",
+        "Non-Disclosure Agreement",
+        "Data Processing Agreement",
     ],
 )
 def test_contract_wording(text):
@@ -664,10 +695,71 @@ def test_names_and_bare_references_are_not_contract_wording(text):
             "Keizersgracht 123, 1015 CJ Amsterdam",
         ),
         ("Address:\nKeizersgracht 123, 1015 CJ Amsterdam", "Keizersgracht 123, 1015 CJ Amsterdam"),
+        # A German street name shortened to "str.".
+        ("Deliveries go to Hauptstr. 12, 10115 Berlin.", "Hauptstr. 12, 10115 Berlin"),
+        ("Ship to Bahnhofstr. 5 today.", "Bahnhofstr. 5"),
+        # An address ends with its country: what follows on the line is no part of it.
+        (
+            "Address: Keizersgracht 123, 1015 CJ Amsterdam, the Netherlands, Attention Finance",
+            "Keizersgracht 123, 1015 CJ Amsterdam, the Netherlands",
+        ),
+        (
+            "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary",
+            "10 Downing Street, London SW1A 2AA, United Kingdom",
+        ),
+        # Ruling R95 (I3): a postcode after the country is still part of the address.
+        (
+            "Address: 5 Merrion Square, Dublin 2, Ireland, D02 X285",
+            "5 Merrion Square, Dublin 2, Ireland, D02 X285",
+        ),
+        (
+            "Address: 1 Main Street, London, United Kingdom, SW1A 1AA",
+            "1 Main Street, London, United Kingdom, SW1A 1AA",
+        ),
+        (
+            "Address: 12 High Street, Cardiff, Wales, CF10 1AA, United Kingdom",
+            "12 High Street, Cardiff, Wales, CF10 1AA, United Kingdom",
+        ),
+        (
+            "Registered office: 1 Queen Street, Edinburgh, Scotland, EH2 1JX",
+            "1 Queen Street, Edinburgh, Scotland, EH2 1JX",
+        ),
+        (
+            "Address: Rue de la Loi 200, 1049 Brussels, Belgium, VAT BE0123456789",
+            "Rue de la Loi 200, 1049 Brussels, Belgium",
+        ),
     ],
 )
 def test_addresses(text, address):
     assert texts(find_addresses(text), text) == {address}
+
+
+# Ruling R97 (d): a Dutch postcode with its town after a spaced hyphen, or the en dash Word makes
+# of one, goes on the address before it, as after a comma; what else follows a hyphen does not.
+@pytest.mark.parametrize(
+    "text,address",
+    [
+        ("Ship to: Keizersgracht 123 - 1015 CJ Amsterdam", "Keizersgracht 123 - 1015 CJ Amsterdam"),
+        (
+            "Ship to: Keizersgracht 123 \N{EN DASH} 1015 CJ Amsterdam, the Netherlands",
+            "Keizersgracht 123 \N{EN DASH} 1015 CJ Amsterdam, the Netherlands",
+        ),
+        ("Delivery address: Damrak 1 - 1012 LG Amsterdam", "Damrak 1 - 1012 LG Amsterdam"),
+        ("Ship to: Keizersgracht 123 - Supply Agreement", "Keizersgracht 123"),
+        (
+            "Keizersgracht 123 - 1015 CJ Amsterdam - Supply Agreement",
+            "Keizersgracht 123 - 1015 CJ Amsterdam",
+        ),
+    ],
+)
+def test_a_dutch_postcode_after_a_spaced_hyphen_goes_on_the_address(text, address):
+    assert texts(find_addresses(text), text) == {address}
+
+
+def test_a_spaced_hyphen_starts_no_address_on_its_own():
+    # Only an address the rules are reading goes on over the hyphen: a figure and its unit after a
+    # page reference are not one ("1500 KG" has the shape of a Dutch postcode).
+    assert find_addresses("Page 2 - 1500 KG Steel") == []
 
 
 def test_address_lines_each_give_an_address():
@@ -756,6 +848,9 @@ def test_a_defined_term_after_an_address_label_is_no_address():
             f"1.1 {OPEN}Confidential Information{CLOSE} means all information.",
             {"Confidential Information"},
         ),
+        # A definition in the middle of a line.
+        ('In this Agreement, "Field of Use" means the hotel sector.', {"Field of Use"}),
+        (f"Here {OPEN}Territory{CLOSE} has the meaning given in Schedule 2.", {"Territory"}),
     ],
 )
 def test_defined_terms(text, terms):
@@ -766,6 +861,7 @@ def test_defined_terms(text, terms):
     "text",
     [
         'He said "hello" to the Buyer.',
+        'The word"Goods"means nothing here.',  # no space: not a definition's quote
         '(see "Annex 1")',
         "(company number 01234567)",
         'Acme Supplies Ltd (the "")',
@@ -985,6 +1081,103 @@ def test_model_findings_never_cross_a_tab(engine):
     fs = engine.analyze(t)
     assert not [f for f in fs if "\t" in f.text]
     assert "Title" not in texts(fs, t) and "Smith" in texts(fs, t)
+
+
+def test_model_findings_never_cross_a_running_header_separator(engine):
+    # The model takes a running header for one company: the two parties' short names and the
+    # title. Each name is a finding of its own, and the title stays visible.
+    t = (
+        "Northwind Trading B.V. and Thamesgate Catering plc sign.\n"
+        "Northwind / Thamesgate \N{EM DASH} Supply Agreement\n"
+        "Confidential \N{MIDDLE DOT} Northwind / Thamesgate \N{MIDDLE DOT} Page 1"
+    )
+    header = t.index("Northwind /")
+    fs = [f for f in engine.analyze(t) if f.start >= header]
+    assert [(f.type, f.text) for f in fs if f.start < t.index("Confidential")] == [
+        (COMPANY, "Northwind"),
+        (COMPANY, "Thamesgate"),
+    ]
+    assert not [f for f in fs if {"/", "\N{EM DASH}", "\N{MIDDLE DOT}"} & set(f.text)]
+
+
+def test_a_model_finding_loses_the_label_it_starts_with(engine):
+    t = "City: Amsterdam\nAPPENDIX 1A\nCountry: Netherlands\nName: John Carter"
+    fs = engine.analyze(t)
+    assert not [f for f in fs if ":" in f.text]
+    assert "John Carter" in texts(fs, t)
+
+
+# Ruling R95 (M2): a spaced hyphen between two capitalised words joins a double name; before the
+# contract's own words it still parts a running header from its title.
+def test_a_spaced_hyphen_between_names_is_no_separator(engine):
+    t = "This Agreement is made between Smith - Jones Logistics Ltd and Acme Supplies Ltd."
+    assert "Smith - Jones Logistics Ltd" in texts(of_type(engine.analyze(t), COMPANY), t)
+    t = "Signed by John Carter - Managing Director of Acme Supplies Ltd."
+    assert "Managing" not in texts(engine.analyze(t), t)
+
+
+def test_a_spaced_hyphen_before_a_title_still_parts_a_header(engine):
+    t = "Greystone Logistics Ltd provides the Services.\nGreystone - Brinkhof - Agreement"
+    header = t.index("Greystone -")
+    assert not [f for f in engine.analyze(t) if f.start >= header and "Agreement" in f.text]
+
+
+# Ruling R97 (b): the hyphen still parts a running header when the word on either side of it is
+# the contract's own or a never-hide term ("Confidential", "Page", a country): those are no part
+# of the name between them.
+@pytest.mark.parametrize(
+    "intro,header,name",
+    [
+        (
+            "Acme Supplies Ltd sells.",
+            "Confidential - Acme Supplies Ltd - Page 3",
+            "Acme Supplies Ltd",
+        ),
+        (
+            "Acme Supplies Ltd sells.",
+            "CONFIDENTIAL - Acme Supplies Ltd - Page 3",
+            "Acme Supplies Ltd",
+        ),
+        ("Acme Supplies Ltd sells.", "Draft - Acme Supplies Ltd - Version 2", "Acme Supplies Ltd"),
+        ("Acme Supplies Ltd sells.", "Acme Supplies Ltd - Netherlands", "Acme Supplies Ltd"),
+        ("Greystone Logistics Ltd sells.", "Confidential - Greystone - Page 2", "Greystone"),
+    ],
+)
+def test_a_spaced_hyphen_by_a_never_hide_word_still_parts_a_header(engine, intro, header, name):
+    t = f"{intro}\n{header}"
+    start = t.index(header)
+    found = [f for f in engine.analyze(t) if f.start >= start]
+    assert {f.text for f in found if name in f.text} == {name}
+    assert not [f for f in found if " - " in f.text]
+
+
+def test_the_title_in_a_running_header_stays_visible(engine):
+    t = (
+        "Kanaalzicht Logistics B.V. and Harbourline Retail Ltd sign.\n"
+        "Kanaalzicht / Harbourline \N{EM DASH} Logistics Services Agreement"
+    )
+    header = t.index("Kanaalzicht /")
+    assert texts([f for f in engine.analyze(t) if f.start >= header], t) == {
+        "Kanaalzicht",
+        "Harbourline",
+    }
+
+
+# Ruling R95: the model reads a time with its zone as a person ("17:00 CET").
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Orders received by 17:00 CET are shipped.",
+        "Orders received by 17:00 CET or by 1700 CET are shipped the same day.",
+        "The cut-off time is 17:00 CET; deliveries by 09:00 GMT.",
+        "Support runs from 9.30 am to 5.30 pm.",
+    ],
+)
+def test_a_time_of_day_is_never_a_name(engine, text):
+    times = re.compile(r"\d{1,2}[:.]\d{2}")
+    assert not [
+        f for f in engine.analyze(text) if f.type in (PERSON, COMPANY) and times.search(f.text)
+    ]
 
 
 def test_title_lines_and_job_titles_are_never_findings(engine):

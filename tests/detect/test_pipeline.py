@@ -82,6 +82,90 @@ def test_never_hide_terms_stay(engine, lists):
     assert a.groups == []
 
 
+@pytest.mark.parametrize(
+    "t",
+    [
+        "The Supplier shall maintain ISO 9001 and EN 1090 certification.",
+        "Regulation (EU) No 1169/2011 applies to the labels.",
+        "Prices agreed on 21 July 2026.3 This Agreement is signed.",  # a PDF's footnote mark
+        "Deliveries arrive by 1700 CET.",
+        "The licence runs for ten thousand (10,000) days.",
+    ],
+)
+def test_references_standards_dates_and_times_stay_visible(engine, lists, t):
+    assert analyze(one(t), engine, lists).groups == []
+
+
+@pytest.mark.parametrize(
+    "t",
+    [
+        "NET WEIGHT KG\tGROSS WEIGHT KG",
+        "The UK Corporation Tax rate applies to the Price.",
+        'In this Agreement, "Field of Use" means the hotel sector. The Field of Use is limited.',
+    ],
+)
+def test_units_taxes_and_terms_defined_mid_line_stay_visible(engine, lists, t):
+    assert analyze(one(t), engine, lists).groups == []
+
+
+def test_a_word_that_makes_a_role_with_the_next_stays_visible(engine, lists):
+    # The parties clause reads "Disclosing" after "(1) The" as a party's name; with "Party" after
+    # it, it is a default never-hide term.
+    t = (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The Disclosing Party, Acme Supplies Ltd; and\n"
+        "(2) The Receiving Party, Northwind Trading B.V."
+    )
+    assert masked(analyze(one(t), engine, lists)) == (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The Disclosing Party, [COMPANY_1]; and\n"
+        "(2) The Receiving Party, [COMPANY_2]"
+    )
+
+
+def test_the_first_and_second_party_stay_visible(engine, lists):
+    t = (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The First Party, Acme Supplies Ltd; and\n"
+        "(2) The Second Party, Northwind Trading B.V."
+    )
+    assert masked(analyze(one(t), engine, lists)) == (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The First Party, [COMPANY_1]; and\n"
+        "(2) The Second Party, [COMPANY_2]"
+    )
+
+
+def test_a_salutation_is_no_part_of_a_name(engine, lists):
+    t = "Dear Smith, thank you. John Smith signs."
+    assert masked(analyze(one(t), engine, lists)) == "Dear [PERSON_1], thank you. [PERSON_1] signs."
+
+
+def test_a_label_the_model_takes_with_its_value_stays_visible(engine, lists):
+    t = "City: Amsterdam\nAPPENDIX 1A\nCountry: Netherlands"
+    assert analyze(one(t), engine, lists).groups == []
+
+
+def test_an_address_ends_with_its_country(engine, lists):
+    t = "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary"
+    a = analyze(one(t), engine, lists)
+    assert masked(a) == "Registered office: [ADDRESS_1], Company Secretary"
+
+
+# Ruling R97 (b): a running header with spaced hyphens hides its company, not the words round it.
+def test_a_hyphenated_running_header_hides_only_its_company(engine, lists):
+    t = "Acme Supplies Ltd sells the Goods.\nConfidential - Acme Supplies Ltd - Page 3"
+    assert masked(analyze(one(t), engine, lists)) == (
+        "[COMPANY_1] sells the Goods.\nConfidential - [COMPANY_1] - Page 3"
+    )
+
+
+# Ruling R97 (d): the Dutch postcode and town after a spaced hyphen are hidden with their street.
+def test_a_dutch_postcode_after_a_spaced_hyphen_is_hidden_with_its_street(engine, lists):
+    t = "Ship to: Keizersgracht 123 - 1015 CJ Amsterdam"
+    a = analyze(one(t), engine, lists)
+    assert [(g.type, g.canonical) for g in a.groups] == [
+        (PlaceholderType.ADDRESS, "Keizersgracht 123 - 1015 CJ Amsterdam")
+    ]
+    assert masked(a) == "Ship to: [ADDRESS_1]"
+
+
 def test_always_hide_list(engine, lists):
     lists.add_always("Project Falcon")
     t = "Project Falcon starts in May; PROJECT FALCON ends in June."

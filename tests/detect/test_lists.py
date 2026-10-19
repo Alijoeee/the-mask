@@ -85,6 +85,12 @@ def test_default_never_hide_holds(term):
         "Exhibit A",
         "Article 28(3)",
         "1.2 Clause",
+        # a standard with its number, as a supply contract asks for certification to it
+        "ISO 9001",
+        "ISO 9001:2015",
+        "EN 1090",
+        "ISO/IEC 27001",
+        "BS EN 1176-1",
         # dates in words stay visible, however the model took them
         "June 2026",
         "25 June 2026",
@@ -116,6 +122,8 @@ def test_never_hide_in_every_spelling(text):
         "April Jones",  # a month that is a first name
         "June Smith 2026",
         "Bank of Northwind",
+        "ISO Logistics Ltd",
+        "EN 1090 Steel GmbH",
         "",
         "  ",
     ],

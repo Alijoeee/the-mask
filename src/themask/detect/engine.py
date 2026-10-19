@@ -4,14 +4,19 @@ the contract rules.
 ``Engine.analyze`` turns the analyzer's results into ``Finding`` objects. Presidio's entity names
 become placeholder types, each finding says whether a pattern, the language model or a contract rule
 found it, and findings scored below ``MIN_SCORE`` are dropped. Dates stay visible: so does a number
-that lies within one, such as 01.03.2026 read as an Italian phone number.
+that lies within one, such as 01.03.2026 read as an Italian phone number, or that is a numeric
+date itself ("2026.03.01"), unless its label says it is a registration or account number. The
+label before a number also decides between a phone number and an ID ("registered under number
+...", "telephone ...").
 
 The contract rules (``contract_rules``) check the language model: a place it finds is an address
 only next to an address the rules found ("the laws of the Netherlands" stays visible), unless it is
 a short form of a name in the document, which it then is (ruling R21: the footer's "Greystone" for
 Greystone Logistics Ltd); a company it finds with neither a legal form nor a rule behind it is
-marked for checking; a job title is no name; and a finding never runs from one line into the next,
-nor across a tab into the next field of a form.
+marked for checking; a job title is no name; a finding never runs from one line into the next,
+nor across a tab into the next field of a form, nor across the separators of a running header
+from one party's name to the other's; and it loses a label or a salutation it starts with
+("Country: Netherlands", "Dear Smith").
 Overlapping findings are kept, for the analysis pipeline to decide between, except that a rule's
 finding replaces the model's on the same span.
 
@@ -30,15 +35,22 @@ from pathlib import Path
 
 import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, RecognizerResult
+from presidio_analyzer.context_aware_enhancers import LemmaContextAwareEnhancer
 from presidio_analyzer.nlp_engine import NlpEngine, NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import (
+    NhsRecognizer,
     PhoneRecognizer,
     SpacyRecognizer,
     UkNinoRecognizer,
 )
 
 from themask.detect.contract_rules import apply_rules, is_contract_wording, is_job_title
-from themask.detect.patterns import contract_recognizers
+from themask.detect.lists import is_default_term
+from themask.detect.patterns import (
+    AccountNumberRecognizer,
+    RegistrationNumberRecognizer,
+    contract_recognizers,
+)
 from themask.model import Finding, FindingSource, PlaceholderType
 from themask.textnorm import COMMON_WORDS, has_legal_form, normalize, variants_of
 
@@ -110,9 +122,14 @@ _DROPPED_ENTITIES = frozenset({_DATE, "NRP"})
 
 # The types a numeric date can pass for: "01.03.2026" is a valid phone number in Italy and
 # "2026-03-01" one in Denmark. A finding of one of these types that lies within a date found by
-# Presidio's DateRecognizer is dropped, so that the date stays visible.
+# Presidio's DateRecognizer is dropped, so that the date stays visible, and so is one that is a
+# numeric date in a form that recognizer does not know ("2026.03.01", "01-03-26", "01 03 2026").
 _DATE_SHAPED_TYPES = frozenset(
     {PlaceholderType.PHONE, _ID, PlaceholderType.AMOUNT, PlaceholderType.QUANTITY}
+)
+_NUMERIC_DATE = re.compile(
+    r"(?P<a>\d{1,2})(?P<sep>[./\- ])(?P<b>\d{1,2})(?P=sep)(?P<year>\d{4}|\d{2})"
+    r"|(?P<long_year>\d{4})(?P<sep2>[./\- ])(?P<month>\d{1,2})(?P=sep2)(?P<day>\d{1,2})"
 )
 
 # Presidio's recognizers that ours replace: the e-mail and URL recognizers (patterns.py says why)
@@ -132,20 +149,44 @@ _DROPPED_RECOGNIZERS = (
 # recognizer works with patterns.
 _MODEL_RECOGNIZER = SpacyRecognizer.__name__
 
+# What the label before a number calls it beats what else its digits could be. Our recognizers of a
+# number after its label ("registered under number", "Account number:") beat a phone reading of the
+# same digits: Presidio's phone recognizer takes "number" for its own context word. What they find
+# is kept even in the shape of a date ("Company No. 12/2024"). A telephone label right before the
+# digits beats both, and Presidio's NHS reading, which takes the 3-3-4 shape of many national phone
+# numbers ("telephone 013 625 5086") for an NHS number.
+_LABELLED_NUMBER_RECOGNIZERS = frozenset(
+    {RegistrationNumberRecognizer.__name__, AccountNumberRecognizer.__name__}
+)
+_NHS_RECOGNIZER = NhsRecognizer.__name__
+_TELEPHONE_LABEL = re.compile(
+    r"\b(?i:telephone|tel|phone|mobile|mob|fax|cell|switchboard|contact)\b\.?[ \t]*"
+    r"(?:(?i:number|no)\b\.?[ \t]*)?[:#]?[ \t]*\Z"
+)
+# How far before a number its telephone label may begin.
+_LABEL_WINDOW = 30
+
 # What may end a pattern's match without being part of the value: the end of a sentence, a quote,
 # or a bracket that closes one opened before the value ("(see https://acme.example/terms)").
 _TRAILING_PUNCTUATION = frozenset(
     ".,;:!?'\"\N{RIGHT SINGLE QUOTATION MARK}\N{RIGHT DOUBLE QUOTATION MARK}"
 )
 _CLOSING_BRACKETS = {")": "(", "]": "[", "}": "{"}
+_OPENING_BRACKETS = {opening: closing for closing, opening in _CLOSING_BRACKETS.items()}
 
 # A place the model finds counts as part of an address the rules found when it overlaps it or is
 # at most this many characters away ("Keizersgracht 123" in "Keizersgracht 123, 1015 CJ ...").
 _PLACE_GAP = 2
 # A part of a model finding that stands on a line of its own needs this many visible characters.
 _MIN_PART_CHARACTERS = 2
-# What a model finding is cut at: a line break, or a tab, which parts the fields of a form.
-_PART_BREAK = re.compile("[\n\t]")
+# What a model finding is cut at: a line break; a tab, which parts the fields of a form; and a
+# slash, dash, dot or bar with spaces round it, which parts the names and the title of a running
+# header ("Northwind / Thamesgate \N{EM DASH} Supply Agreement", "Confidential \N{MIDDLE DOT}
+# Northwind / Thamesgate").
+_PART_BREAK = re.compile(
+    "[\n\t]|[ \N{NO-BREAK SPACE}]+[/|\N{EM DASH}\N{EN DASH}\N{MIDDLE DOT}\N{BULLET}-]"
+    "[ \N{NO-BREAK SPACE}]+"
+)
 # A name's first word is one of its short forms when it has this many letters and is not one of
 # COMMON_WORDS ("Greystone" of Greystone Logistics Ltd, not "General" of General Supplies Ltd).
 _MIN_SHORT_FORM_LETTERS = 4
@@ -153,6 +194,17 @@ _COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 _LEADING_THE = re.compile(r"\A(?i:the)\s+")
 # A colon straight after a word: the word labels its line ("Country: Netherlands").
 _LABELS_ITS_LINE = re.compile(r"[ \t]*:")
+# Up to three words and a colon at the start of a model finding, before its value: "Country:
+# Netherlands", "SUPPLIER: Northwind Trading B.V.".
+_LEADING_LABEL = re.compile(r"(?:[^\W\d_][\w\-]*[ \t]+){0,2}[^\W\d_][\w\-]*[ \t]*:[ \t]*(?=\S)")
+# A time of day, maybe with its time zone or "am"/"pm": "17:00 CET", "9.30 am". The model can read
+# one as a person.
+_TIME_OF_DAY = re.compile(
+    r"\d{1,2}[:.]\d{2}(?:[ \t]*(?:(?i:[ap]\.?m\.?|hrs|hours|h)|CET|CEST|GMT|BST|UTC|EET|EEST"
+    r"|WET|WEST))?"
+)
+# A salutation before a name: "Dear Smith".
+_SALUTATION = re.compile(r"(?i:dear)[ \t]+(?=\S)")
 # A label and its value in one part: "BIC: DEUTDEBB".
 _LABEL_AND_VALUE = re.compile(r"[^\W\d_][\w\-]*[ \t]*:[ \t]*(?P<value>\S.*)")
 # What comes before the place of a law or a court: "the laws of", "the courts of", "court in".
@@ -180,7 +232,12 @@ class Engine:
         for recognizer in contract_recognizers():
             registry.add_recognizer(recognizer)
         self._analyzer = AnalyzerEngine(
-            registry=registry, nlp_engine=nlp_engine, supported_languages=["en"]
+            registry=registry,
+            nlp_engine=nlp_engine,
+            supported_languages=["en"],
+            # A context word counts as a whole word only: Presidio's default also finds it inside
+            # another word ("sum" in "assume", "charge" in "discharge", "cc" in "account").
+            context_aware_enhancer=LemmaContextAwareEnhancer(context_matching_mode="whole_word"),
         )
 
     def analyze(self, text: str) -> list[Finding]:
@@ -205,18 +262,26 @@ class Engine:
         return kept
 
     def _presidio_findings(self, text: str) -> list[Finding]:
-        """What Presidio's analyzer finds, as findings; a value found twice is kept once."""
+        """What Presidio's analyzer finds, as findings; a value found twice is kept once, and a
+        reading of a number that its label contradicts goes (``_read_as_labelled``).
+        """
         results = self._analyzer.analyze(text=text, language="en")
         dates = [(r.start, r.end) for r in results if r.entity_type == _DATE]
-        best: dict[tuple[PlaceholderType, int, int], Finding] = {}
+        best: dict[tuple[PlaceholderType, int, int], tuple[Finding, str]] = {}
         for result in results:
             finding = self._finding(text, result)
-            if finding is None or _within_a_date(finding, dates):
+            if finding is None:
+                continue
+            recognizer = str(result.recognition_metadata.get(RecognizerResult.RECOGNIZER_NAME_KEY))
+            # A number after its label is what the label says, even in the shape of a date
+            # ("Company No. 12/2024").
+            labelled = recognizer in _LABELLED_NUMBER_RECOGNIZERS
+            if not labelled and _is_a_date(finding, dates):
                 continue
             key = (finding.type, finding.start, finding.end)
-            if key not in best or finding.score > best[key].score:
-                best[key] = finding
-        return list(best.values())
+            if key not in best or finding.score > best[key][0].score:
+                best[key] = (finding, recognizer)
+        return _read_as_labelled(text, list(best.values()))
 
     def _finding(self, text: str, result: RecognizerResult) -> Finding | None:
         """``result`` as a finding, or None when its entity stays visible."""
@@ -253,7 +318,8 @@ def _checked_by_rules(
     are the document's defined terms.
 
     A model finding is cut into its lines, and a part that names nobody goes. Then a model finding
-    on the same span as a rule's goes (the rule's stands), and so does a job title found as a name.
+    on the same span as a rule's goes (the rule's stands), and so does a job title found as a name,
+    and a time of day ("17:00 CET", ruling R95).
     A place the model finds counts only as part of an address the rules found, or as the name it is
     a short form of (ruling R21), never as a defined term; any other place goes. A company with
     neither a legal form nor a rule's finding over it is marked for checking.
@@ -266,7 +332,11 @@ def _checked_by_rules(
         for part in _lines_of(text, finding)
         if not (
             part.source == "model"
-            and ((part.start, part.end) in rule_spans or _is_job_title_name(part))
+            and (
+                (part.start, part.end) in rule_spans
+                or _is_job_title_name(part)
+                or _TIME_OF_DAY.fullmatch(part.text)
+            )
         )
     ]
     defined = {normalize(term) for term in terms}
@@ -286,25 +356,79 @@ def _checked_by_rules(
 
 
 def _lines_of(text: str, finding: Finding) -> list[Finding]:
-    """A model finding cut at its line breaks and its tabs, keeping each part with at least two
-    visible characters that names somebody: the model can swallow the heading on the next line
-    ("Northwind Trading B.V.\\nCUSTOMER"), the label of the next line ("...\\nAttention:"), the
-    start of a job title ("JANE SMITH\\nManaging") or, across a tab, the next field of a form
-    ("Smith\\tTitle:", ruling R58).
+    """A model finding cut at its line breaks, its tabs and the separators of a running header
+    (``_PART_BREAK``), each part without a label it starts with (``_label_end``), keeping each
+    part with at least two visible characters that names somebody: the model can swallow the
+    heading on the next line ("Northwind Trading B.V.\\nCUSTOMER"), the label of the next line
+    ("...\\nAttention:"), the start of a job title ("JANE SMITH\\nManaging"), across a tab the
+    next field of a form ("Smith\\tTitle:", ruling R58), a running header whole: both parties
+    and the title ("Northwind / Thamesgate - Supply Agreement", with an em dash), a label with its
+    value ("Country: Netherlands") and a salutation with the name ("Dear Smith").
     """
-    if finding.source != "model" or _PART_BREAK.search(finding.text) is None:
+    if finding.source != "model":
+        return [finding]
+    breaks = _part_breaks(finding.text)
+    if not breaks and not _label_end(finding.text):
         return [finding]
     parts = []
-    offset = finding.start
-    for line in _PART_BREAK.split(finding.text):
+    piece_start = 0
+    for piece_end, next_start in [*breaks, (len(finding.text), len(finding.text))]:
+        line = finding.text[piece_start:piece_end]
         stripped = line.strip()
-        start = offset + line.find(stripped)
+        label = _label_end(stripped)
+        start = finding.start + piece_start + line.find(stripped) + label
+        stripped = stripped[label:]
         end = start + len(stripped)
-        offset += len(line) + 1
+        piece_start = next_start
+        if label and _is_a_code(stripped):
+            continue  # a label with its code: "BIC: DEUTDEBB"
         visible = sum(not character.isspace() for character in stripped)
         if visible >= _MIN_PART_CHARACTERS and not _names_nobody(text, start, end):
             parts.append(replace(finding, start=start, end=end, text=stripped))
     return parts
+
+
+def _part_breaks(text: str) -> list[tuple[int, int]]:
+    """Where a model finding's ``text`` is cut (``_PART_BREAK``), but for a spaced hyphen between
+    two capitalised words, which joins a double name ("Smith - Jones Logistics Ltd", "John Carter -
+    Managing"), unless a running header's own word stands on either side of it
+    (``_is_header_word``): its title, or a mark such as "Confidential" or "Page" ("Greystone -
+    Brinkhof - Agreement", "Confidential - Acme Supplies Ltd - Page 3", rulings R95 and R97).
+    """
+    breaks = []
+    for cut in _PART_BREAK.finditer(text):
+        if cut.group().strip() == "-":
+            before = text[: cut.start()].split()
+            after = text[cut.end() :].split()
+            names = bool(before and after) and before[-1][:1].isupper() and after[0][:1].isupper()
+            if names and not (_is_header_word(before[-1]) or _is_header_word(after[0])):
+                continue
+        breaks.append(cut.span())
+    return breaks
+
+
+def _is_header_word(word: str) -> bool:
+    """Whether ``word``, beside a spaced hyphen, is a running header's own and no part of a double
+    name: one of the contract's own words or a default never-hide term ("Agreement", "Confidential",
+    "Page", "Netherlands").
+    """
+    return is_contract_wording(word) or is_default_term(word)
+
+
+def _label_end(text: str) -> int:
+    """Where the label or salutation that ``text`` starts with ends, with the spaces after it, or
+    0 when it starts with none. A label ends in a colon and is made of the contract's own words or
+    is a never-hide term ("Country:", "Name:", "SUPPLIER:"); "John Smith: Director" starts with a
+    name. A salutation is "Dear" ("Dear Smith").
+    """
+    salutation = _SALUTATION.match(text)
+    if salutation is not None:
+        return salutation.end()
+    label = _LEADING_LABEL.match(text)
+    if label is None:
+        return 0
+    words = label.group().strip().rstrip(":").strip()
+    return label.end() if is_contract_wording(words) or is_default_term(words) else 0
 
 
 def _names_nobody(text: str, start: int, end: int) -> bool:
@@ -404,20 +528,79 @@ def _marked_if_unconfirmed(finding: Finding, rules: list[Finding]) -> Finding:
     return replace(finding, score=min(finding.score, UNCONFIRMED_COMPANY_SCORE))
 
 
-def _within_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
-    """Whether ``finding`` is a number that lies within one of the ``dates`` (start, end)."""
-    return finding.type in _DATE_SHAPED_TYPES and any(
-        start <= finding.start and finding.end <= end for start, end in dates
-    )
+def _read_as_labelled(text: str, found: list[tuple[Finding, str]]) -> list[Finding]:
+    """The findings of ``found`` (each with the name of its recognizer) but the readings of a
+    number that the label before it contradicts. Where a telephone label stands right before
+    digits that are a phone number, the phone reading wins over a registration, account or NHS
+    reading of them ("Company telephone number: 020 7946 0958"); otherwise a registration or
+    account number our recognizers read after their label wins over a phone reading of the same
+    digits. The value stays hidden either way; only the type it is hidden as changes.
+    """
+    labelled = {(f.start, f.end) for f, name in found if name in _LABELLED_NUMBER_RECOGNIZERS}
+    phones = {(f.start, f.end) for f, _ in found if f.type is PlaceholderType.PHONE}
+    called_phones = {span for span in phones if _after_a_telephone_label(text, span[0])}
+    kept = []
+    for finding, recognizer in found:
+        span = (finding.start, finding.end)
+        if finding.type is PlaceholderType.PHONE and span in labelled - called_phones:
+            continue
+        if recognizer in _LABELLED_NUMBER_RECOGNIZERS and span in called_phones:
+            continue  # "Company telephone number: 020 7946 0958" (ruling R95)
+        if recognizer == _NHS_RECOGNIZER and span in called_phones:
+            continue
+        kept.append(finding)
+    return kept
+
+
+def _after_a_telephone_label(text: str, start: int) -> bool:
+    """Whether a telephone label stands right before ``start``: "Telephone:", "fax number"."""
+    return _TELEPHONE_LABEL.search(text, max(0, start - _LABEL_WINDOW), start) is not None
+
+
+def _is_a_date(finding: Finding, dates: list[tuple[int, int]]) -> bool:
+    """Whether ``finding`` is a number that is a date: one that lies within one of the ``dates``
+    (start, end), or that is a numeric date itself (``_is_a_numeric_date``).
+    """
+    if finding.type not in _DATE_SHAPED_TYPES:
+        return False
+    within = any(start <= finding.start and finding.end <= end for start, end in dates)
+    return within or _is_a_numeric_date(finding.text)
+
+
+def _is_a_numeric_date(text: str) -> bool:
+    """Whether ``text`` is a date in figures: day and month in either order and then the year, or
+    the year first ("01.03.2026", "03/31/26", "2026.03.01"), each part a day, month and year that
+    can be. A two-figure year may be any; a four-figure one is from 1900 to 2099.
+    """
+    parts = _NUMERIC_DATE.fullmatch(text)
+    if parts is None:
+        return False
+    if parts["a"] is not None:
+        a, b, year = int(parts["a"]), int(parts["b"]), parts["year"]
+        day_and_month = (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
+    else:
+        month, day, year = int(parts["month"]), int(parts["day"]), parts["long_year"]
+        day_and_month = 1 <= month <= 12 and 1 <= day <= 31
+    return day_and_month and (len(year) == 2 or 1900 <= int(year) <= 2099)
 
 
 def _trimmed(text: str, start: int, end: int) -> tuple[int, int]:
-    """The span ``start``-``end`` without white space around it and without trailing punctuation."""
-    while start < end and text[start].isspace():
+    """The span ``start``-``end`` without white space around it, without trailing punctuation,
+    and without an opening bracket at its start that it does not close ("(01.03.2026").
+    """
+    while start < end and (text[start].isspace() or _opens_outside_the_value(text, start, end)):
         start += 1
     while end > start and _ends_outside_the_value(text, start, end):
         end -= 1
     return start, end
+
+
+def _opens_outside_the_value(text: str, start: int, end: int) -> bool:
+    """Whether the first character of the span opens a bracket that the span does not close."""
+    closing = _OPENING_BRACKETS.get(text[start])
+    return closing is not None and text.count(closing, start, end) < text.count(
+        text[start], start, end
+    )
 
 
 def _ends_outside_the_value(text: str, start: int, end: int) -> bool:

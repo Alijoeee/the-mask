@@ -104,6 +104,9 @@ _COUNTRIES = _vocabulary(
     uae qatar europe eu eea
     """
 )
+# The words of a country's name in an address: "the Netherlands", "United Kingdom", "United States
+# of America", "Czech Republic".
+_COUNTRY_WORDS = _COUNTRIES | _vocabulary("the of united states republic federal")
 _CURRENCIES = _vocabulary(
     """
     euro euros eur pound pounds gbp sterling dollar dollars usd franc francs chf lira liras yen jpy
@@ -118,8 +121,9 @@ _NOT_IN_A_NAME = _FUNCTION_WORDS | _LABEL_WORDS | _ROLE_WORDS
 _NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS
 _NOT_A_PARTY = _NOT_IN_A_COMPANY | _COUNTRIES | _CURRENCIES | frozenset({"company", "companies"})
 
-# The words of a contract's own headings ("TERMINATION", "GOVERNING LAW"): with the roles and the
-# labels, the words a part of a model finding may consist of and still name nobody.
+# The words of a contract's own headings ("TERMINATION", "GOVERNING LAW") and titles ("LOGISTICS
+# SERVICES AGREEMENT", "NON-DISCLOSURE AGREEMENT"): with the roles and the labels, the words a
+# part of a model finding may consist of and still name nobody.
 _HEADING_WORDS = _vocabulary(
     """
     operative provisions agreed terms term termination duration commencement renewal expiry notices
@@ -136,7 +140,7 @@ _HEADING_WORDS = _vocabulary(
     support maintenance hosting access staff non-solicitation competition exclusivity survival
     effect consequences return materials processing transfers breach breaches remedy part parts
     attachment attachments date dates period periods effective completion closing exchange purpose
-    purposes and of the for to in on &
+    purposes logistics non-disclosure and of the for to in on &
     """
 )
 _CONTRACT_WORDS = _ROLE_WORDS | _LABEL_WORDS | _HEADING_WORDS
@@ -179,6 +183,15 @@ _JOB_TITLE_WORDS = _JOB_TITLE_NOUNS | _vocabulary(
 # GOODS AS DESCRIBED"). "LIMITED" between capitals is a word too ("PRODUCT LIMITED WARRANTY").
 _SHORT_FORMS = frozenset({"se", "ab", "as", "co"})
 _WORD_FORMS = frozenset({"limited", "incorporated", "corporation"})
+# A legal form written as a word is part of a term when one of these words follows it in capitals:
+# "UK Corporation Tax", "the Product Limited Warranty".
+_TERM_AFTER_A_WORD_FORM = frozenset({"tax", "taxes", "warranty", "warranties", "guarantee"})
+# "KG" after one of these words is a weight in kilograms, as a packing table heads its columns
+# ("NET WEIGHT KG", "Max Load KG"), not the German legal form.
+_BEFORE_KILOGRAMS = frozenset(
+    {"weight", "net", "gross", "tare", "mass", "load", "payload", "capacity", "max", "min"}
+    | {"maximum", "minimum", "total", "per", "in"}
+)
 
 # --- Words ---------------------------------------------------------------------------------------
 
@@ -272,21 +285,35 @@ def _is_honorific(word: str) -> bool:
 def _written_as_a_legal_form(doc: _Document, i: int, count: int) -> bool:
     """Whether words ``i`` to ``i + count - 1``, a legal form by spelling, are one in running text.
 
-    In lower case only "plc" is ("ltd", "kg" and "limited" are words); see also _SHORT_FORMS.
+    In lower case only "plc" is ("ltd", "kg" and "limited" are words); see also _SHORT_FORMS,
+    _TERM_AFTER_A_WORD_FORM and _BEFORE_KILOGRAMS.
     """
     form = _core(doc.text[doc.words[i].start : doc.words[i + count - 1].end])
     key = normalize(form)
     if form.islower():
         return key == "plc"
+    if key == "kg" and doc.joined(i) and _core(doc.word(i - 1)).casefold() in _BEFORE_KILOGRAMS:
+        return False
+    following = i + count
+    goes_on = doc.joined(following)  # a word follows on the same line
+    next_word = _core(doc.word(following)).rstrip(".,;:") if goes_on else ""
+    if key in _WORD_FORMS and _is_a_term_word(next_word):
+        return False  # "Corporation Tax"
     after_capitals = doc.joined(i, comma=True) and _core(doc.word(i - 1)).isupper()
     if key in _SHORT_FORMS and not any(mark in form for mark in "./"):
         return not after_capitals and (form.isupper() or form == "Co")
-    if key in _WORD_FORMS and after_capitals:
-        following = i + count
-        if doc.joined(following):
-            word = _core(doc.word(following))
-            return not (word.isupper() and not has_legal_form(word))
+    if key in _WORD_FORMS and after_capitals and goes_on:
+        word = _core(doc.word(following))
+        return not (word.isupper() and not has_legal_form(word))
     return True
+
+
+def _is_a_term_word(word: str) -> bool:
+    """Whether ``word``, after a legal form written as a word, makes a term with it: one of
+    _TERM_AFTER_A_WORD_FORM in capitals ("Corporation Tax"). In lower case it follows the company
+    ("Acme Corporation warranty claims").
+    """
+    return word[:1].isupper() and word.casefold() in _TERM_AFTER_A_WORD_FORM
 
 
 def _legal_form_length(doc: _Document, i: int) -> int:
@@ -850,11 +877,11 @@ _ENGLISH_STREET = re.compile(
     r"(?<![\w.,/])" + _HOUSE_NUMBER + _SP + "+"
     r"(?=(?P<name>(?:" + _NAME_WORD_RE + _SP + "+){1,4})(?:" + _ENGLISH_STREET_WORDS + r")\b)"
 )
-# "Keizersgracht 123", "Friedrichstraße 12", "Berliner Straße 12": a street word ends the street's
-# name or follows it, then the house number.
+# "Keizersgracht 123", "Friedrichstraße 12", "Berliner Straße 12", "Hauptstr. 12": a street word
+# ends the street's name or follows it, then the house number.
 _STREET_SUFFIXES = (
     "straat|weg|laan|plein|gracht|kade|dijk|singel|steeg|markt|stra\N{LATIN SMALL LETTER SHARP S}e"
-    "|strasse|allee|gasse|platz|damm|ufer"
+    "|strasse|str\\.|allee|gasse|platz|damm|ufer"
 )
 _CONTINENTAL_STREET = re.compile(
     r"(?<![\w\-])[^\W\d_][\w'\N{RIGHT SINGLE QUOTATION MARK}\-]*(?:(?i:" + _STREET_SUFFIXES + ")"
@@ -882,7 +909,10 @@ _UNIT = re.compile(_UNIT_WORDS + _SP + r"+\w{1,5}," + _SP + r"*\Z")
 # Postcodes. The UK's: "SW1A 2AA". The Netherlands': "1015 CJ" before a town (the letters F, I, O,
 # Q, U and Y are not used, nor SA, SD and SS). Germany's, France's and Turkey's: five digits before
 # a town. A Dutch or five-digit postcode starts a part of the address (after a comma or a line
-# break), so that "2026 EU Member States" and "pay 50000 Euros" are no addresses.
+# break), so that "2026 EU Member States" and "pay 50000 Euros" are no addresses. After a spaced
+# hyphen, or the en dash Word makes of one, a Dutch postcode with its town goes on the address
+# before it, as a line of a form may read ("Keizersgracht 123 - 1015 CJ Amsterdam", ruling R97);
+# it starts none on its own there ("Page 2 - 1500 KG Steel").
 _UK_POSTCODE = re.compile(
     r"(?<![\w-])[A-Z]{1,2}\d[A-Z\d]?" + _SP + r"\d[ABD-HJLNP-UW-Z]{2}(?![\w-])"
 )
@@ -892,6 +922,7 @@ _NL_POSTCODE = re.compile(
 _NL_POSTCODE_LETTERS = re.compile(r"[1-9]\d{3} [A-Z]{2}")
 _FIVE_DIGIT_POSTCODE = re.compile(r"(?<![\w.,/-])\d{5}(?=" + _SP + ")")
 _STARTS_A_PART = re.compile(r"(?:^|[,;:(\t|])[ \N{NO-BREAK SPACE}]*\Z", re.MULTILINE)
+_SPACED_DASH = re.compile(_SP + r"+[\-\N{EN DASH}]" + _SP + "+")
 # Words after a postcode-like number that are no town.
 _NOT_A_TOWN = (
     _FUNCTION_WORDS
@@ -934,6 +965,8 @@ _ADDRESS_ABBREVIATIONS = _vocabulary(
 _HOUSE_NUMBER_LABEL = frozenset({"no", "nr"})
 # An address has at most this many parts (the words between two commas) and words.
 _MAX_ADDRESS_PARTS = 8
+# A word of a postcode has at most this many letters and digits ("SW1A", "X285", "10115").
+_POSTCODE_WORD_LENGTH = 8
 _MAX_ADDRESS_WORDS = 30
 
 
@@ -962,6 +995,14 @@ def _is_address_word(doc: _Document, k: int, first: bool) -> bool:
     )
 
 
+def _is_address_abbreviation(word: str) -> bool:
+    """Whether ``word``, without its full stop, is an address word's abbreviation: "St", "Rd", and
+    a German street's name shortened to "str" ("Hauptstr").
+    """
+    folded = word.casefold()
+    return folded in _ADDRESS_ABBREVIATIONS or (folded.endswith("str") and len(folded) > 3)
+
+
 def _address_joined(doc: _Document, k: int) -> bool:
     """Whether word ``k`` goes on the part of an address that word ``k - 1`` is in."""
     before = doc.word(k - 1)
@@ -972,30 +1013,64 @@ def _address_joined(doc: _Document, k: int) -> bool:
         return False
     # A full stop ends the sentence, unless it ends an abbreviation or an initial.
     bare = before.rstrip(".")
-    return before == bare or bare.casefold() in _ADDRESS_ABBREVIATIONS or len(_letters(bare)) <= 1
+    return before == bare or _is_address_abbreviation(bare) or len(_letters(bare)) <= 1
 
 
 def _address_word_end(doc: _Document, k: int) -> int:
     word = doc.words[k]
     bare = word.text.rstrip(".")
-    if bare.casefold() in _ADDRESS_ABBREVIATIONS:
+    if _is_address_abbreviation(bare):
         return word.end
     return word.start + len(bare)
 
 
 def _starts_next_part(doc: _Document, k: int) -> bool:
-    """Whether word ``k`` follows a comma and starts the next part of the address."""
+    """Whether word ``k`` follows a comma and starts the next part of the address, or follows a
+    spaced hyphen and starts a Dutch postcode with its town ("Keizersgracht 123 - 1015 CJ
+    Amsterdam", ruling R97).
+    """
     if not 0 < k < len(doc):
         return False
     gap = doc.gap(k)
-    return gap.startswith(",") and all(character in _SPACES for character in gap[1:])
+    if gap.startswith(",") and all(character in _SPACES for character in gap[1:]):
+        return True
+    if _SPACED_DASH.fullmatch(gap) is None:
+        return False
+    postcode = _NL_POSTCODE.match(doc.text, doc.words[k].start)
+    return postcode is not None and _town_follows(doc, postcode)
+
+
+def _is_a_country(doc: _Document, part: list[int]) -> bool:
+    """Whether the words ``part`` of an address are its country: "the Netherlands", "Germany",
+    "United Kingdom".
+    """
+    words = [_core(doc.word(k)).rstrip(".").casefold() for k in part]
+    return all(word in _COUNTRY_WORDS for word in words) and any(w in _COUNTRIES for w in words)
+
+
+def _is_a_postcode_part(doc: _Document, k: int) -> bool:
+    """Whether the part of an address that starts at word ``k`` is a postcode: one or two short
+    words of letters and digits, a digit among them, and no label ("D02 X285", "SW1A 1AA"; not
+    "VAT BE0123456789" nor "Attention Finance").
+    """
+    last = k
+    while last - k < 2 and last + 1 < len(doc) and _address_joined(doc, last + 1):
+        last += 1
+    words = [_core(doc.word(i)) for i in range(k, last + 1)]
+    return (
+        len(words) <= 2
+        and any(character.isdigit() for word in words for character in word)
+        and all(word.isalnum() and len(word) <= _POSTCODE_WORD_LENGTH for word in words)
+        and not any(word.casefold() in _LABEL_WORDS for word in words)
+    )
 
 
 def _address_end(doc: _Document, k: int) -> int | None:
     """Where the address that starts at word ``k`` ends: after its last part, a part being the
     words up to the next comma. It ends at a bracket, a semicolon, a quote, a tab, a line break, or
-    a word that cannot be part of an address ("and", "a company", "VAT number"), and after
-    _MAX_ADDRESS_PARTS parts or _MAX_ADDRESS_WORDS words at most.
+    a word that cannot be part of an address ("and", "a company", "VAT number"), after its country
+    unless its postcode follows ("..., the Netherlands, Attention Finance"; "..., Ireland, D02
+    X285" goes on), and after _MAX_ADDRESS_PARTS parts or _MAX_ADDRESS_WORDS words at most.
     """
     end = None
     limit = min(len(doc), k + _MAX_ADDRESS_WORDS)
@@ -1022,6 +1097,8 @@ def _address_end(doc: _Document, k: int) -> int | None:
         end = _address_word_end(doc, part[-1])
         if not complete or not _starts_next_part(doc, j):
             break
+        if _is_a_country(doc, part) and not _is_a_postcode_part(doc, j):
+            break  # what follows the country is no part of the address, but its postcode
         k = j
     return end
 
@@ -1115,6 +1192,19 @@ def _street_anchors(doc: _Document) -> Iterable[int]:
             yield k
 
 
+def _town_follows(doc: _Document, postcode: re.Match[str]) -> bool:
+    """Whether a town follows ``postcode`` on its line: a capitalised word that is no small word,
+    unit, currency or month, nor a code of three capitals at most ("3000 MT", "1500 KG", "2024 UK").
+    """
+    town = doc.first_word_from(postcode.end())
+    if town >= len(doc) or doc.words[town - 1].end != postcode.end() or not doc.joined(town):
+        return False
+    word = doc.word(town)
+    if not word[0].isupper() or _core(word).rstrip(".").casefold() in _NOT_A_TOWN:
+        return False
+    return not (word.isupper() and len(_letters(word)) <= 3)
+
+
 def _postcode_anchors(doc: _Document) -> Iterable[int]:
     text = doc.text
     for match in _UK_POSTCODE.finditer(text):
@@ -1123,15 +1213,8 @@ def _postcode_anchors(doc: _Document) -> Iterable[int]:
         for match in pattern.finditer(text):
             if not _STARTS_A_PART.search(text, max(0, match.start() - 40), match.start()):
                 continue
-            town = doc.first_word_from(match.end())
-            if town >= len(doc) or doc.words[town - 1].end != match.end() or not doc.joined(town):
-                continue
-            word = doc.word(town)
-            if not word[0].isupper() or _core(word).rstrip(".").casefold() in _NOT_A_TOWN:
-                continue
-            if word.isupper() and len(_letters(word)) <= 3:
-                continue  # "3000 MT", "1500 KG", "2024 UK"
-            yield _with_street_before(doc, doc.first_word_from(match.start()))
+            if _town_follows(doc, match):
+                yield _with_street_before(doc, doc.first_word_from(match.start()))
 
 
 def _addresses(doc: _Document, terms: frozenset[str]) -> list[Finding]:
@@ -1196,11 +1279,13 @@ _HEREINAFTER = re.compile(
     r"\b(?i:hereinafter|hereafter)(?i:[ \t]+(?:referred[ \t]+to[ \t]+as|called|known[ \t]+as))?"
     r"[ \t]*:?[ \t]*(?i:the[ \t]+)?" + _QUOTED
 )
-# A definitions clause: "Business Day" means ..., 1.1 “Confidential Information” means ...
+# A definitions clause: "Business Day" means ..., 1.1 “Confidential Information” means ..., and a
+# definition in the middle of a line: In this Agreement, "Field of Use" means ...
 _MEANS = re.compile(
-    r"^[ \t]*(?:\(?[0-9a-z]{1,3}(?:\.\d{1,3})*[.)]?[ \t]+)?" + _QUOTED + r"[ \t]+(?i:means|shall"
-    r"[ \t]+mean|has[ \t]+the[ \t]+meaning|have[ \t]+the[ \t]+meanings?|includes|shall[ \t]+include"
-    r"|refers[ \t]+to)\b",
+    r"(?:^[ \t]*(?:\(?[0-9a-z]{1,3}(?:\.\d{1,3})*[.)]?[ \t]+)?|(?<=[ \t,;:(]))"
+    + _QUOTED
+    + r"[ \t]+(?i:means|shall[ \t]+mean|has[ \t]+the[ \t]+meaning|have[ \t]+the[ \t]+meanings?"
+    r"|includes|shall[ \t]+include|refers[ \t]+to)\b",
     re.MULTILINE,
 )
 _LEADING_THE = re.compile(r"(?i:the)[ \t]+")

@@ -16,8 +16,9 @@ before a colon is part of the value ("Note: keep" is hidden as it is).
 ``is_never_hide`` tells whether a text is a never-hide term. A term matches whatever its case,
 spacing and punctuation, in the singular and the plural, with or without a leading "the" and a
 possessive "'s". A document word with its reference ("SCHEDULE 1", "Clause 4.2", "1.2 Clause",
-"Annex II") is never hidden either, nor is a date in words ("25 June 2026"). A text that holds a
-term but is longer than it is no term: "Supplier Logistics Ltd" is a name. The names found in a document beat its defined terms: after
+"Annex II") is never hidden either, nor is a date in words ("25 June 2026"), nor a standard with
+its number ("ISO 9001", "EN 1090"). A text that holds a term but is longer than it is no term:
+"Supplier Logistics Ltd" is a name. The names found in a document beat its defined terms: after
 ``"Acme" means Acme Supplies Ltd`` the term "Acme" is still a name to hide. The owner's own
 never-hide lists and the defaults always win.
 """
@@ -49,12 +50,13 @@ _ROLES = _terms(
     Sub-contractor, Consultant, Service Provider, Provider, Licensor, Licensee, Lessor, Lessee,
     Landlord, Tenant, Employer, Employee, Worker, Lender, Borrower, Guarantor, Distributor,
     Reseller, Agent, Principal, Manufacturer, Producer, Carrier, Shipper, Consignee, Consignor,
-    Party, Parties, Other Party, Disclosing Party, Receiving Party, Discloser, Recipient, Data
-    Controller, Data Processor, Controller, Processor, Sub-processor, Joint Controller, Data
-    Subject, Data Exporter, Data Importer, Supervisory Authority, Beneficiary, Affiliate, Group
-    Company, Subsidiary, Holding Company, Parent Company, Company, Group, Supplier Group, Buyer
-    Group, Customer Group, Representative, Authorised Representative, Authorised Signatory,
-    Signatory, Third Party, Personnel, Staff, Supplier Personnel, Customer Personnel
+    Party, Parties, Other Party, First Party, Second Party, Disclosing Party, Receiving Party,
+    Discloser, Recipient, Data Controller, Data Processor, Controller, Processor, Sub-processor,
+    Joint Controller, Data Subject, Data Exporter, Data Importer, Supervisory Authority,
+    Beneficiary, Affiliate, Group Company, Subsidiary, Holding Company, Parent Company, Company,
+    Group, Supplier Group, Buyer Group, Customer Group, Representative, Authorised Representative,
+    Authorised Signatory, Signatory, Third Party, Personnel, Staff, Supplier Personnel, Customer
+    Personnel
     """
 )
 # The document's own words: what the contract calls itself, its parts, labels and headings.
@@ -276,6 +278,18 @@ def _is_reference(text: str) -> bool:
     return number_first and _REFERENCE_TERMS.has(term_key(" ".join(words[1:])))
 
 
+# A standard with its number: "ISO 9001", "ISO 9001:2015", "ISO/IEC 27001", "BS EN 1176-1".
+_STANDARD = re.compile(
+    r"(?:ISO|EN|IEC|DIN|BS|NEN|ASTM|ANSI|IEEE)(?:[/ ](?:IEC|EN|ISO|TS|TR|PAS))*"
+    r"[ \N{NO-BREAK SPACE}]?\d{1,6}(?:[\-:.]\d{1,4})*"
+)
+
+
+def _is_standard(text: str) -> bool:
+    """Whether ``text`` is a standard with its number, which a contract cites: "ISO 9001"."""
+    return _STANDARD.fullmatch(text.strip()) is not None
+
+
 _MONTH_KEYS = frozenset(map(term_key, _MONTHS))
 _WEEKDAY_KEYS = frozenset(map(term_key, _WEEKDAYS))
 # The other words of a date: a day ("25", "1st"), a year ("2026"), and "of" or "the".
@@ -327,6 +341,8 @@ def never_hide_check(
         if not key:
             return False
         if _DEFAULTS.has(key) or explicit.has(key) or _is_reference(text) or _is_date(text):
+            return True
+        if _is_standard(text):
             return True
         return defined.has(key) and key not in name_keys
 

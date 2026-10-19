@@ -135,21 +135,34 @@ _CURRENCY_AFTER = _any_of(_CURRENCY_MARK, _CURRENCY_WORD)
 
 # The units a quantity is counted or measured in; never a unit of time, so that "30 days" stays
 # visible. Single letters are case-sensitive (t, l, L, m) so that they do not match a stray capital.
+# "records" is how a data processing agreement counts the personal data it covers ("up to 350,000
+# records"); one record is no volume.
 _UNIT_WORDS = (
     "units?|pieces?|pcs|pc|items?|cartons?|cases?|boxes|box|pallets?|packs?|rolls?|bags?"
     "|containers?|kilograms?|kilos?|kgs?|tonnes?|tons?|litres?|liters?|ml|sqm|cbm|metres?|meters?"
-    r"|km|m\N{SUPERSCRIPT TWO}|m2|m\N{SUPERSCRIPT THREE}|m3"
+    r"|km|m\N{SUPERSCRIPT TWO}|m2|m\N{SUPERSCRIPT THREE}|m3|records"
 )
 _UNIT = "(?:(?i:" + _UNIT_WORDS + r")|t|l|L|m)(?!\w)"
 
 # What makes a figure a duration, which stays visible: "1,000 days", "2,500 working days",
-# "a 1,000-day period".
+# "a 1,000-day period", "ten thousand (10,000) days".
 _DAY_KIND = "(?i:(?:business|working|calendar|banking)" + _SPACE + "+)?"
 _TIME_UNIT = r"(?i:day|week|month|year|hour)s?\b"
-_DURATION_AFTER = re.compile("(?:" + _SPACE + "|-)*" + _DAY_KIND + _TIME_UNIT)
+_DURATION_AFTER = re.compile("(?:" + _SPACE + r"|-|\))*" + _DAY_KIND + _TIME_UNIT)
 
-# What may stand between a label such as "number" and the value after it.
-_LABEL_TO_VALUE = _SPACE + "*[:#]?" + _SPACE + "*"
+# What may stand between a label such as "number" and the value after it: spaces, and the tab a
+# form in Word puts there ("BIC:\tDEUTDEBB").
+_LABEL_GAP = "[" + _SPACE_CHARS + "\t]"
+_LABEL_TO_VALUE = _LABEL_GAP + "*[:#]?" + _LABEL_GAP + "*"
+
+# The words that make the number after them a reference into the contract or a law, which stays
+# visible: "section 1159", "Article 1101", "§ 1004".
+_REFERENCE_WORDS = (
+    "clauses?|sections?|sec|articles?|art|schedules?|annex(?:es)?|appendix|appendices|exhibits?"
+    "|paragraphs?|para|parts?"
+)
+_REFERENCE = r"(?:\b(?i:" + _REFERENCE_WORDS + r")\.?|\N{SECTION SIGN})"
+_REFERENCE_BEFORE = re.compile(_REFERENCE + _SPACE + r"*\Z")
 
 # A figure that is not part of a longer number or word.
 _ALONE_BEFORE = r"(?<![\w.,])"
@@ -289,6 +302,35 @@ class PercentRecognizer(CheckedPatternRecognizer):
         )
 
 
+# The words that make the figure after them a reference into the contract, whatever unit follows
+# it: "Annex 2 Units of Measure", "Schedule 3 Pallets", "under Clause 4 cartons", "the Article 30
+# records", "§ 5 pallets" (ruling R97). Not "parts", nor "art", "para" or "sec" as words, which a
+# count may follow ("spare parts 500 units", "the art 12 pieces"); written as abbreviations, with
+# their full stop, they are references ("the Art. 30 records"). "Part" is one only with its
+# capital ("Part 2 Units", but "the spare part 5 units").
+_QUANTITY_REFERENCE = (
+    r"(?:\b(?:(?i:clauses?|sections?|articles?|schedules?|annex(?:es)?|appendix|appendices"
+    r"|exhibits?|paragraphs?|(?:art|sec|para)\.)|P(?:art|ART))|\N{SECTION SIGN})"
+)
+_REFERENCE_BEFORE_A_QUANTITY = re.compile(_QUANTITY_REFERENCE + _SPACE + r"*\Z")
+# Two digits with a space between them: after a reference word, a figure that goes on with a group
+# of digits after a space may be the reference and a count whose comma was left out ("Schedule 3
+# 500 pallets" for "Schedule 3, 500 pallets").
+_SPACED_DIGITS = re.compile(r"\d" + _SPACE + r"\d")
+# A figure in a year's range before "records" is their year after "the" or a possessive, maybe
+# with other years between ("the 2025 records", "Acme's 2025 records", "its 2025 records", "the
+# 2026 and 2027 records"); after anything else it counts them ("up to 2000 records", "about 2025
+# records", "a total of 2000 records", ruling R97).
+_YEAR = r"(?:19|20)\d{2}(?!\d)"
+_YEAR_RECORDS = re.compile(_YEAR + _SPACE + r"?(?i:records)\Z")
+_OWNER = _any_of(
+    r"\b(?i:the|its|their|our|your|his|her|my)",
+    r"\w[" + _APOSTROPHES + "](?i:s)",
+    "(?i:s)[" + _APOSTROPHES + "]",
+)
+# What stands between two years of a list: "2024, 2025", "2024/2025", "2025 and 2026".
+_BETWEEN_YEARS = _any_of(_SPACE + "*[,/]" + _SPACE + "*", _SPACE + "+(?i:and|or|&)" + _SPACE + "+")
+_OWNER_BEFORE = re.compile(_OWNER + _SPACE + "+(?:" + _YEAR + _BETWEEN_YEARS + r")*\Z")
 # A currency just before a figure: the figure is an amount (€2.5m), not a length in metres.
 _CURRENCY_BEFORE = re.compile(_CURRENCY_MARK + _SPACE + r"?\Z")
 _SCALE_WORD = re.compile(r"(?i:hundred|thousand|million|billion)")
@@ -298,8 +340,9 @@ class QuantityRecognizer(CheckedPatternRecognizer):
     """Quantities: a figure or a number in words with a unit that is not a unit of time.
 
     10,000 units · 48 pallets · 2.5 tonnes · 500kg · 1 250 m² · 2.5 million units · "ten (10)
-    pallets". A number in words counts only with a scale word or figures after it, so that "in two
-    cases" and "one item" stay prose.
+    pallets" · 350,000 records. A number in words counts only with a scale word or figures after
+    it, so that "in two cases" and "one item" stay prose. A figure that is a reference ("Annex 2
+    Units of Measure") or the year of the records after it ("the 2025 records") is none.
     """
 
     def __init__(self) -> None:
@@ -322,7 +365,31 @@ class QuantityRecognizer(CheckedPatternRecognizer):
             return pattern.score if spelled_out else 0.0
         if _CURRENCY_BEFORE.search(text, max(0, match.start() - 8), match.start()):
             return 0.0
+        if _is_a_reference(text, match) or _is_the_records_year(text, match):
+            return 0.0
         return pattern.score
+
+
+def _is_a_reference(text: str, match: re.Match[str]) -> bool:
+    """Whether the figure of the quantity ``match`` is a reference into the contract: it follows a
+    reference word ("Annex 2 Units of Measure", ruling R97) and has no group of digits after a
+    space, which may be a count after the reference ("Schedule 3 500 pallets": when unsure, hide).
+    """
+    start = match.start()
+    if _REFERENCE_BEFORE_A_QUANTITY.search(text, max(0, start - 24), start) is None:
+        return False
+    return _SPACED_DIGITS.search(match.group()) is None
+
+
+def _is_the_records_year(text: str, match: re.Match[str]) -> bool:
+    """Whether the figure of the quantity ``match`` is the year of the records after it, not their
+    number: a year after "the" or a possessive ("the 2025 records", "Acme's 2025 records"), but
+    not after any other word ("up to 2000 records", ruling R97).
+    """
+    if _YEAR_RECORDS.match(match.group()) is None:
+        return False
+    start = match.start()
+    return _OWNER_BEFORE.search(text, max(0, start - 40), start) is not None
 
 
 # --- VAT, registration and identity numbers ------------------------------------------------------
@@ -484,22 +551,56 @@ class BicRecognizer(CheckedPatternRecognizer):
         return 0.0
 
 
-# Account numbers and sort codes come directly after their label, on the same line.
+# Account numbers and sort codes come directly after their label, on the same line, maybe after
+# "is" ("the account number is 12345678").
 _ACCOUNT_SEP = "[" + _SPACE_CHARS + r"\-]?"
 _ACCOUNT_NUMBER_WORD = "(?:" + _SPACE + r"+(?i:number|no|nr)\b\.?)?"
-_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
+_IS = "(?:" + _SPACE + r"+(?i:is)\b)?"
+_ACCOUNT_LABEL = r"(?i:\b(?:account|acct|a/c)\b)" + _ACCOUNT_NUMBER_WORD + _IS + _LABEL_TO_VALUE
 _ACCOUNT_DIGITS = r"(?P<value>\d(?:" + _ACCOUNT_SEP + r"\d){5,17})(?!\d)"
-_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)" + _LABEL_TO_VALUE
+_SORT_CODE_LABEL = r"(?i:\bsort[ \-]?code\b)" + _IS + _LABEL_TO_VALUE
 _SORT_CODE_DIGITS = r"(?P<value>\d{2}" + _ACCOUNT_SEP + r"\d{2}" + _ACCOUNT_SEP + r"\d{2})(?!\d)"
-# A date written with hyphens (01-03-2026, 2026-03-01) is not an account number.
-_HYPHENATED_DATE = re.compile(r"\d{1,2}-\d{1,2}-\d{4}|\d{4}-\d{1,2}-\d{1,2}")
+# A date written with hyphens (01-03-2026, 03-31-2026, 2026-03-01) is not an account number; one
+# whose day or month cannot be (1234-56-78) may be.
+_HYPHENATED = re.compile(
+    r"(?P<a>\d{1,2})-(?P<b>\d{1,2})-\d{4}|\d{4}-(?P<month>\d{1,2})-(?P<day>\d{1,2})"
+)
+# An IBAN after its label, its check digits right or wrong: a country, two digits, then up to 30
+# letters and digits, in groups of four or in one piece.
+_IBAN_LABEL = r"(?i:\biban\b)" + _ACCOUNT_NUMBER_WORD + _LABEL_TO_VALUE
+_IBAN_GROUP = "(?:" + _SPACE + r"?[A-Z0-9]{4})"
+_IBAN_REST = "(?:" + _SPACE + r"?[A-Z0-9]{1,3})"
+_IBAN_SHAPE = r"(?P<value>[A-Z]{2}\d{2}" + _IBAN_GROUP + "{2,7}" + _IBAN_REST + r"?)(?![A-Za-z0-9])"
+_IBAN = "IBAN after its label"
+
+
+def _is_a_hyphenated_date(value: str) -> bool:
+    """Whether ``value`` is a date written with hyphens: day and month first in either order, or
+    the year first, each of them a day and a month that can be.
+    """
+    parts = _HYPHENATED.fullmatch(value)
+    if parts is None:
+        return False
+    if parts["a"] is not None:
+        a, b = int(parts["a"]), int(parts["b"])
+        return (1 <= a <= 31 and 1 <= b <= 12) or (1 <= a <= 12 and 1 <= b <= 31)
+    return 1 <= int(parts["month"]) <= 12 and 1 <= int(parts["day"]) <= 31
+
+
+def _iban_is_valid(value: str) -> bool:
+    """Whether the check digits of the IBAN ``value`` are right (ISO 7064, mod 97)."""
+    compact = "".join(value.split())
+    moved = compact[4:] + compact[:4]
+    return int("".join(str(int(character, 36)) for character in moved)) % 97 == 1
 
 
 class AccountNumberRecognizer(CheckedPatternRecognizer):
     """Bank account numbers and sort codes, found by the label directly before them.
 
     "Account number: 12345678" · "A/C 87654321" · "Sort code: 12-34-56". An IBAN on an account
-    line is left to Presidio's IBAN recognizer, which checks it.
+    line is left to Presidio's IBAN recognizer, which checks it. After its own label, an IBAN
+    whose check digits are wrong is still the party's number, with a typing error in it: it is
+    found at 0.6, for the owner to check, as a VAT number with wrong check digits is.
     """
 
     def __init__(self) -> None:
@@ -508,11 +609,14 @@ class AccountNumberRecognizer(CheckedPatternRecognizer):
             [
                 Pattern("Account number", _ACCOUNT_LABEL + _ACCOUNT_DIGITS, 0.7),
                 Pattern("Sort code", _SORT_CODE_LABEL + _SORT_CODE_DIGITS, 0.7),
+                Pattern(_IBAN, _IBAN_LABEL + _IBAN_SHAPE, 0.6),
             ],
         )
 
     def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
-        return 0.0 if _HYPHENATED_DATE.fullmatch(match["value"]) else pattern.score
+        if pattern.name == _IBAN:
+            return 0.0 if _iban_is_valid(match["value"]) else pattern.score
+        return 0.0 if _is_a_hyphenated_date(match["value"]) else pattern.score
 
 
 _BSN = "Dutch BSN"
@@ -564,17 +668,46 @@ _BARE_BEFORE = r"(?<![\w.,/" + _APOSTROPHES + "])"
 _BARE_AFTER = r"(?![\w%]|[.," + _APOSTROPHES + r"]\d)"
 _BARE_FIGURE = _BARE_BEFORE + _BARE_INTEGER + r"(?P<decimals>[.,]\d+)?" + _BARE_AFTER
 
-# The words that make the number after them a reference into the contract or a law, which stays
-# visible: "section 1159", "Article 1101", "§ 1004".
-_REFERENCE_WORDS = (
-    "clauses?|sections?|sec|articles?|art|schedules?|annex(?:es)?|appendix|appendices|exhibits?"
-    "|paragraphs?|para|parts?"
-)
-_REFERENCE = r"(?:\b(?i:" + _REFERENCE_WORDS + r")\.?|\N{SECTION SIGN})"
-_REFERENCE_BEFORE = re.compile(_REFERENCE + _SPACE + r"*\Z")
 _THOUSANDS_WORD = re.compile(r"(?i:thousand|million|billion)")
+# A standard a number is the reference of: "ISO 9001", "EN 1090", "ISO/IEC 27001", "BS EN 1176".
+_STANDARD_BEFORE = re.compile(
+    r"\b(?:ISO|EN|IEC|DIN|BS|NEN|ASTM|ANSI|IEEE)(?:[/ ](?:IEC|EN|ISO|TS|TR|PAS))*" + _SPACE + r"*\Z"
+)
+# A number with a slash and a number after it is the reference of a law or a case: "Regulation
+# (EU) No 1169/2011".
+_SLASH_AND_NUMBER = re.compile(r"/\d")
+# The month before a year makes the year a date's: "21 July 2026", "July 21, 2026"; a PDF's text
+# may glue a footnote mark to it ("21 July 2026.3").
+_MONTH_NAMES = (
+    "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    "|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_DAY_AND_COMMA = r"\d{1,2}(?i:st|nd|rd|th)?,"
+_MONTH_BEFORE = re.compile(
+    r"\b(?i:" + _MONTH_NAMES + r")\.?" + _SPACE + "+(?:" + _DAY_AND_COMMA + _SPACE + r"*)?\Z"
+)
+# A time of day in four figures, before its time zone: "by 1700 CET".
+_TIME_ZONE_AFTER = re.compile(_SPACE + r"*(?:CET|CEST|GMT|BST|UTC|EET|EEST|WET|WEST)\b")
+# A clause number with three digits after its point starts its line, and its heading or its first
+# sentence follows it: "1.100 The Supplier shall ...". Only that shape: an amount at the start of a
+# line, before the words that say what it pays for, stays one ("48,000<tab>Annual licence fee",
+# "1.250.000 Gesamtpreis", ruling R95).
+_CLAUSE_SHAPE = re.compile(r"\d{1,3}\.\d{3}")
+_LINE_START_BEFORE = re.compile(r"(?:\A|\n)[ \t]*\Z")
+_HEADING_AFTER = re.compile(r"[ \t]+[A-Z]")
 # Words that make a bare number a likely amount when they come shortly before it.
-_PRICE_WORDS = ("price", "fee", "amount", "total", "value", "charge", "consideration", "sum")
+# Presidio matches them as whole words, so "subtotal" is one of its own.
+_PRICE_WORDS = (
+    "price",
+    "fee",
+    "amount",
+    "total",
+    "subtotal",
+    "value",
+    "charge",
+    "consideration",
+    "sum",
+)
 
 
 class BareNumberRecognizer(CheckedPatternRecognizer):
@@ -582,9 +715,12 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
 
     48,000 · 1.250.000,00 · 1 250 000 · 48000 · "ten thousand (10,000)". They are amounts for the
     owner to check: 0.4, which Presidio raises to 0.75 when a word such as "price" or "fee" comes
-    shortly before. Years (1900 to 2099), durations ("1,000 days") and references ("section 1159")
-    stay visible. A clause number such as 10.2, at the start of a line or after "clause", is never
-    one of these numbers: it is below 1,000, and its digits are not in groups of three.
+    shortly before. Years (1900 to 2099, and the year of a date with something glued to it,
+    "21 July 2026.3"), durations ("1,000 days"), times of day ("1700 CET") and references
+    ("section 1159", "ISO 9001", "Regulation (EU) No 1169/2011") stay visible. A clause number such
+    as 10.2, at the start of a line or after "clause", is never one of these numbers: it is below
+    1,000, and its digits are not in groups of three; one with three digits after its point ("1.100
+    The Supplier shall") starts its line before a capital.
     """
 
     def __init__(self) -> None:
@@ -605,14 +741,45 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
         if words is not None:
             return pattern.score if _THOUSANDS_WORD.search(words) else 0.0
         integer = match["integer"]
-        value = int(re.sub(r"\D", "", integer))
+        digits = re.sub(r"\D", "", integer).lstrip("0")
+        # Only four digits or fewer can be below 1,000 or a year. A longer run is never turned into
+        # a number: Python refuses to for more than 4,300 digits.
+        value = int(digits or "0") if len(digits) <= 4 else 10_000
         if value < 1000:
             return 0.0
-        if match["decimals"] is None and integer.isdigit() and 1900 <= value <= 2099:
+        before = max(0, start - 24)
+        is_a_year = integer.isdigit() and 1900 <= value <= 2099
+        if is_a_year and (match["decimals"] is None or _MONTH_BEFORE.search(text, before, start)):
             return 0.0  # a year
-        if _REFERENCE_BEFORE.search(text, max(0, start - 24), start):
+        if integer.isdigit() and _is_a_time_of_day(value) and _TIME_ZONE_AFTER.match(text, end):
+            return 0.0
+        if _SLASH_AND_NUMBER.match(text, end):
+            return 0.0
+        if _REFERENCE_BEFORE.search(text, before, start):
+            return 0.0
+        if _STANDARD_BEFORE.search(text, before, start):
+            return 0.0
+        if _is_a_clause_number(text, match):
             return 0.0
         return pattern.score
+
+
+def _is_a_clause_number(text: str, match: re.Match[str]) -> bool:
+    """Whether the bare figure ``match`` is a clause number: in its shape (``_CLAUSE_SHAPE``, no
+    decimals), at the start of its line and before a capital.
+    """
+    start, end = match.span()
+    return (
+        match["decimals"] is None
+        and _CLAUSE_SHAPE.fullmatch(match["integer"]) is not None
+        and _LINE_START_BEFORE.search(text, max(0, start - 24), start) is not None
+        and _HEADING_AFTER.match(text, end) is not None
+    )
+
+
+def _is_a_time_of_day(value: int) -> bool:
+    """Whether four figures ``value`` read as hours and minutes: 1700 is five in the afternoon."""
+    return value // 100 < 24 and value % 100 < 60
 
 
 # --- E-mail and web addresses ---------------------------------------------------------------------
@@ -684,6 +851,38 @@ class WebAddressRecognizer(UrlRecognizer):
         )
 
 
+# A web address after its label ("Website:", "Web:", "URL:"), with any top-level domain of two
+# letters or more: the label says what it is ("Website: acme.me"). The label ends in a colon or a
+# tab, so that "on the web e.g. on its portal" and "a web site.Customers" stay prose (ruling R95).
+_WEB_LABEL = (
+    r"(?i:\b(?:website|web|url|internet|homepage)\b)" + _LABEL_GAP + r"*[:\t]" + _LABEL_GAP + "*"
+)
+_TOP_LEVEL_DOMAIN_LETTERS = re.compile(r"[^\W\d_]{2,}")
+_LABELLED_DOMAIN = (
+    r"(?P<value>(?i:" + _DOMAIN_LABEL + r"(?:\." + _DOMAIN_LABEL + r")+)" + _ADDRESS_REST + r")"
+    r"(?<![.,;:!?)])"
+)
+
+
+class LabelledWebAddressRecognizer(CheckedPatternRecognizer):
+    """A web address written after its label, whatever its top-level domain: "Website: acme.me".
+
+    Without a label, a domain needs a known top-level domain (``WebAddressRecognizer``), so that a
+    full stop with no space after it ("the Supplier.to") is no web address.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            PlaceholderType.URL,
+            [Pattern("Web address after its label", _WEB_LABEL + _LABELLED_DOMAIN, 0.85)],
+        )
+
+    def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
+        top_level_domain = match["value"].split("/")[0].rsplit(".", 1)[-1]
+        letters = _TOP_LEVEL_DOMAIN_LETTERS.fullmatch(top_level_domain) is not None
+        return pattern.score if letters else 0.0
+
+
 def contract_recognizers() -> list[EntityRecognizer]:
     """One of each of the recognizers above, to add to a Presidio registry."""
     return [
@@ -698,4 +897,5 @@ def contract_recognizers() -> list[EntityRecognizer]:
         BareNumberRecognizer(),
         EmailAddressRecognizer(),
         WebAddressRecognizer(),
+        LabelledWebAddressRecognizer(),
     ]
