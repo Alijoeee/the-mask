@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from typing import NoReturn
 
 import pytest
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 
@@ -26,6 +27,14 @@ def no_unanswerable_dialogs(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(QMessageBox, name, staticmethod(_refuse))
     for name in ("getOpenFileNames", "getExistingDirectory", "getSaveFileName"):
         monkeypatch.setattr(QFileDialog, name, staticmethod(_refuse))
+
+
+@pytest.fixture(autouse=True)
+def no_real_finder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opening a folder in Finder fails the test; one that clicks "Show in Finder" replaces the
+    screen's ``reveal`` with a recorder.
+    """
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(_refuse))
 
 
 @pytest.fixture(autouse=True)

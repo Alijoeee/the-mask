@@ -1,13 +1,15 @@
-"""Moving between the screens: the tool bar, and the way from the review to the export."""
+"""Moving between the screens: the tool bar, and the way from the review to the export dialog."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QToolBar
 
+from themask.ui.export_dialog import ExportDialog
 from themask.ui.main_window import MainWindow
 
 if TYPE_CHECKING:
@@ -55,15 +57,19 @@ def test_the_review_can_be_returned_to_once_there_is_one(
     assert w.review_screen.group_count() > 0
 
 
-def test_continuing_from_the_review_goes_to_the_export(
-    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+def test_continuing_from_the_review_opens_the_export_dialog_over_it(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    started: list[object] = []
+    monkeypatch.setattr(ExportDialog, "run", lambda self, *args: started.append(self))
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
     with qtbot.waitSignal(w.analysisFinished, timeout=60000):
         w.open_files([corpus / "supply-01.docx"], redline_split=False)
     qtbot.mouseClick(w.review_screen.export_button, Qt.MouseButton.LeftButton)
-    assert w.current_screen_name() == "export"
+    assert started == [w.export_dialog] and w.export_dialog is not None
+    assert w.export_dialog.isVisible()
+    assert w.current_screen_name() == "review"  # a dialog over the review, not a screen of its own
 
 
 def test_the_work_done_in_the_review_survives_a_visit_to_another_screen(

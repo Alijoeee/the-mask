@@ -30,6 +30,7 @@ TYPE_COLOURS: dict[PlaceholderType, str] = {
 
 STYLESHEET = """
 QLabel#title { font-size: 30px; font-weight: 600; }
+QLabel#heading { font-size: 18px; font-weight: 600; }
 QLabel#tagline { font-size: 14px; }
 QLabel#dropTitle { font-size: 20px; font-weight: 600; }
 QLabel#status { font-size: 13px; }

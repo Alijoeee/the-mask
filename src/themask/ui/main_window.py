@@ -1,7 +1,8 @@
 """The main window: the screens of the app, and the way from the files the owner chose to the review.
 
-The screens are in a stack, each under a name: "home", "review", "export", "restore", "cases" and
-"settings". ``open_files`` is the one way in. It asks whether to make a before-and-after pair when
+The screens are in a stack, each under a name: "home", "review", "restore", "cases" and "settings".
+The export is a dialog over the review, not a screen of its own (``show_export``).
+``open_files`` is the one way in. It asks whether to make a before-and-after pair when
 a file has tracked changes, loads the case a file is added to, and hands the analysis to a thread
 (``AnalysisWorker``), so that the window stays alive; its result becomes the review screen. The
 detection engine takes seconds to load and is loaded in a thread too: until it is there the home
@@ -37,10 +38,11 @@ from themask.detect.lists import CaseLists
 from themask.docx.package import DocxPackage
 from themask.docx.reader import has_revisions
 from themask.errors import MaskError
-from themask.export import SourceDoc, combined_text
+from themask.export import ExportOptions, SourceDoc, combined_text
 from themask.model import Analysis, Case
 from themask.review import ReviewState
 from themask.ui.drop_zone import DropZone
+from themask.ui.export_dialog import ExportDialog
 from themask.ui.review_screen import ReviewScreen
 from themask.ui.workers import AnalysisWorker, EngineWorker
 
@@ -52,6 +54,7 @@ REDLINE_QUESTION = "This file contains tracked changes. Make a before-and-after 
 BUSY_MESSAGE = "The MASK is still analysing a file. Wait until it is done, then try again."
 CASE_GONE = "That case no longer exists. It may have been deleted, or it has expired."
 PURGE_FAILED = "Old cases could not be cleaned up."
+CASES_UNREADABLE = "The saved cases could not be read:"
 
 # What the home screen says for each step of an analysis (the names are the worker's).
 STEP_TEXT = {
@@ -187,7 +190,8 @@ class MainWindow(QMainWindow):
     ``load_engine`` makes the engine when ``ctx.engine`` is None; without it the default engine is
     loaded. Signals: ``analysisProgress(percent, step)`` for each step of an analysis (it ends
     with 100 and "done"), ``analysisFinished`` once the review screen is showing, and
-    ``analysisFailed(message)`` after the message was shown to the owner.
+    ``analysisFailed(message)`` after the message was shown to the owner. ``export_dialog`` is the
+    export while it is open, else None.
     """
 
     analysisProgress = Signal(int, str)
@@ -200,6 +204,7 @@ class MainWindow(QMainWindow):
         self.sources: list[SourceDoc] = []
         self.redline_split = False
         self.pending_case: Case | None = None
+        self.export_dialog: ExportDialog | None = None
         self._run: _Run | None = None
         self._queued: _Request | None = None
         self._analysis: AnalysisWorker | None = None
@@ -215,7 +220,6 @@ class MainWindow(QMainWindow):
         self._screens: dict[str, QWidget] = {
             "home": self.home,
             "review": self.review_screen,
-            "export": _placeholder("The export is the next step of the build."),
             "restore": _placeholder("Restoring is the next step of the build."),
             "cases": _placeholder("The list of cases is the next step of the build."),
             "settings": _placeholder("The settings are the next step of the build."),
@@ -265,7 +269,49 @@ class MainWindow(QMainWindow):
         self._show("review")
 
     def show_export(self) -> None:
-        self._show("export")
+        """Open the export dialog over the review, for the files and the review as they are.
+
+        The dialog gets the owner's settings (the folder, the days a case is kept), whether the
+        files were loaded as before-and-after pairs, the case a file is added to, and the codes
+        of the cases the store holds, so that a new case never takes one. A request made while
+        the dialog is open is ignored. A case store that cannot be read is said in words.
+        """
+        if self.export_dialog is not None:
+            return
+        try:
+            codes = self._case_codes()
+        except MaskError as error:
+            show_error(self, error.user_message)
+            return
+        except OSError as error:
+            show_error(self, f"{CASES_UNREADABLE} {error.strerror or error}")
+            return
+        settings = self.ctx.settings
+        options = ExportOptions(
+            out_dir=settings.out_dir,
+            redline_split=self.redline_split,
+            retention_days=settings.retention_days,
+            existing_case=self.pending_case,
+            existing_codes=codes,
+        )
+        dialog = ExportDialog(self)
+        dialog.finished.connect(self._export_closed)
+        self.export_dialog = dialog
+        dialog.open()
+        dialog.run(self.sources, self.review_screen.review, options, self.ctx)
+
+    def _case_codes(self) -> list[str]:
+        """The codes of the cases in the store: those that open, and the names of the files that
+        do not (ruling R74).
+        """
+        store = self.ctx.case_store
+        codes = [summary.id for summary in store.list()]  # also finds the files that do not open
+        return codes + [path.stem for path in store.unreadable]
+
+    def _export_closed(self) -> None:
+        dialog, self.export_dialog = self.export_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
 
     def show_restore(self) -> None:
         self._show("restore")
@@ -464,6 +510,8 @@ class MainWindow(QMainWindow):
                 worker.deleteLater()
         self._analysis = None
         self._engine_loader = None
+        if self.export_dialog is not None:
+            self.export_dialog.wait_for_worker()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closing = True

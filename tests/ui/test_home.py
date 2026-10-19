@@ -89,7 +89,7 @@ def test_the_window_opens_on_the_home_screen_with_every_screen_in_its_stack(
     w.show()
     assert w.windowTitle() == "The MASK"
     assert w.current_screen_name() == "home"
-    assert w.screen_names() == ["home", "review", "export", "restore", "cases", "settings"]
+    assert w.screen_names() == ["home", "review", "restore", "cases", "settings"]
     assert w.home.status_label.text() == "Ready" and w.home.drop_zone.isEnabled()
 
 
