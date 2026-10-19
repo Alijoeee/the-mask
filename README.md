@@ -30,8 +30,8 @@ The export and the restore screens are added in later steps of the build plan.
 
 ## Install on your Mac
 
-The MASK is also a normal Mac app, "The MASK.app". It is built for Apple silicon and asks for
-macOS 14 or later. It is signed "ad hoc", not by an Apple developer: that is enough to run on the
+The MASK is also a normal Mac app, "The MASK.app". It is built for Apple silicon and needs
+macOS 26 or newer. It is signed "ad hoc", not by an Apple developer: that is enough to run on the
 Mac it was built on, and there is no installer, just the app.
 
 ### Build it
@@ -66,11 +66,12 @@ A rebuilt app is a new program to macOS, so it can ask again.
 
 ### Open it on another Mac
 
-Copy the zip from `dist/` over (AirDrop, a USB stick), unzip it and move the app to Applications.
-macOS refuses to open an app from an unknown developer the first time. Either open System
-Settings, then Privacy & Security, scroll down to the message that "The MASK" was blocked and
-press Open Anyway; or, on macOS 14, Control-click the app, choose Open and press Open. On macOS 15
-and later only the first way works. It is needed once for each copy.
+That Mac needs macOS 26 or newer as well. Copy the zip from `dist/` over (AirDrop, a USB stick),
+unzip it and move the app to Applications. macOS refuses to open an app from an unknown developer
+the first time. Open System Settings, then Privacy & Security, scroll down to the message that
+"The MASK" was blocked and press Open Anyway. (The older way, Control-click and Open, has not
+worked since macOS 15, so it does not work on any Mac that can run this app.) It is needed once
+for each copy.
 
 ### Where it keeps its files
 

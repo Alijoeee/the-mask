@@ -9,10 +9,12 @@ path would otherwise go unseen.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
 import tomllib
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -50,6 +52,27 @@ def read_briefcase_config() -> tuple[dict[str, Any], MagicMock]:
     return apps[APP], console
 
 
+def macos_needed_by(module: Path) -> tuple[int, ...]:
+    """The macOS version the arm64 slice of the Mach-O file ``module`` says it needs (its minos)."""
+    shown = subprocess.run(
+        ["vtool", "-arch", "arm64", "-show-build", str(module)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    ).stdout
+    match = re.search(r"minos (\d+(?:\.\d+)*)", shown)
+    assert match, f"{module.name} names no minimum macOS version"
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def python_modules_of(package: str) -> list[Path]:
+    """The compiled Python modules (``*.abi3.so``) that sit directly in an installed package."""
+    spec = find_spec(package)
+    assert spec is not None and spec.submodule_search_locations, f"{package} is not installed"
+    return sorted(Path(next(iter(spec.submodule_search_locations))).glob("*.abi3.so"))
+
+
 def test_briefcase_installs_exactly_the_runtime_dependencies() -> None:
     # Briefcase adds [project].dependencies to the app's requirements by itself, so the app
     # section lists none of its own: a copy would be installed twice and could drift.
@@ -77,6 +100,18 @@ def test_the_sources_icon_and_architecture_are_those_of_the_plan() -> None:
     assert (ROOT / "src" / "themask" / "__main__.py").is_file()  # what the stub binary runs
     assert (ROOT / f"{config['icon']}.icns").is_file()
     assert config["universal_build"] is False  # one slice (arm64), as the plan says
+
+
+@pytest.mark.skipif(shutil.which("vtool") is None, reason="vtool is part of Xcode's tools")
+def test_the_bundle_asks_for_a_macos_new_enough_for_pyside6() -> None:
+    # Ruling R92: Info.plist declares what the wheels support, not the lowest macOS that pip
+    # would accept. The PySide6 wheels are tagged 14.0, but their Python modules are marked 26.0.
+    modules = python_modules_of("PySide6") + python_modules_of("shiboken6")
+    assert modules
+    needed = max(macos_needed_by(module) for module in modules)
+    config, _ = read_briefcase_config()
+    declared = tuple(int(part) for part in config["min_os_version"].split("."))
+    assert declared >= needed
 
 
 @pytest.mark.skipif(shutil.which("iconutil") is None, reason="iconutil is part of macOS")

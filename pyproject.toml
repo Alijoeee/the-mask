@@ -80,6 +80,7 @@ icon = "packaging/icon/themask"
 
 [tool.briefcase.app.themask.macOS]
 universal_build = false  # one slice, for the Mac this is built on (Apple silicon)
-# The PySide6 6.12 wheels are tagged macosx_14_0, so pip finds none for anything lower.
-min_os_version = "14.0"
+# What the wheels support (ruling R92): PySide6 6.12 and shiboken6 are tagged macosx_14_0, which is
+# all pip checks, but their Python modules are marked as needing macOS 26.0. Info.plist says 26.0.
+min_os_version = "26.0"
 requires = []  # nothing that only the Mac version needs
