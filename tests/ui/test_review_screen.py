@@ -1372,6 +1372,35 @@ def test_command_f_works_from_anywhere_in_the_screen(qtbot: QtBot, review_screen
     assert s.find_field.hasFocus()
 
 
+def test_command_f_is_the_reviews_only_while_the_review_shows_in_the_window(
+    qtbot: QtBot,
+) -> None:
+    # The screens are in a stack: while another one shows, ⌘F is not the review's.
+    from PySide6.QtWidgets import QLineEdit, QStackedWidget
+
+    combined, st = custom_review(CONTRACT, FAMILY_SPECS)
+    screen = ReviewScreen()
+    screen.load(st, combined)
+    other = QLineEdit()
+    stack = QStackedWidget()
+    qtbot.addWidget(stack)
+    stack.addWidget(other)
+    stack.addWidget(screen)
+    stack.resize(1000, 600)
+    stack.show()
+    qtbot.waitExposed(stack)
+    stack.activateWindow()
+    qtbot.waitUntil(stack.isActiveWindow, timeout=3000)
+    stack.setCurrentWidget(other)
+    other.setFocus()
+    qtbot.keyClick(other, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+    assert not screen.find_field.hasFocus() and other.hasFocus()
+    stack.setCurrentWidget(screen)
+    screen.text.setFocus()
+    qtbot.keyClick(screen.text, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+    assert screen.find_field.hasFocus()
+
+
 def test_the_find_shortcut_is_the_systems(qtbot: QtBot, review_screen: Screen) -> None:
     from PySide6.QtGui import QKeySequence
 
