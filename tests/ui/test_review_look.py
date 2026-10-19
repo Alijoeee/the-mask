@@ -90,7 +90,11 @@ def open_screen(
         item = screen.tree_item_for(by_placeholder[selected])
         screen.tree.setCurrentItem(item)
         item.setSelected(True)
-    qtbot.wait(20)  # the list lays itself out
+    # The list lays its rows out a moment after it is shown.
+    rows = [screen.row_for(group.id) for group in review.groups[:3]]
+    qtbot.waitUntil(
+        lambda: all(row.width() == screen.tree.viewport().width() > 0 for row in rows), timeout=3000
+    )
     return screen
 
 

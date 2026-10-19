@@ -1622,11 +1622,14 @@ def test_the_rows_are_as_wide_as_the_list_whatever_the_width(
 ) -> None:
     s, st = review_screen
     show(qtbot, s)
+    rows = [s.row_for(g.id) for g in st.groups[:5]]
     for width in (960, 1400):
         s.resize(width, 700)
-        qtbot.waitUntil(lambda width=width: s.width() == width)
+        # The list takes the new width and lays its rows out for it a moment after the resize.
+        qtbot.waitUntil(
+            lambda: all(row.width() == s.tree.viewport().width() for row in rows), timeout=3000
+        )
         viewport = s.tree.viewport().width()
-        assert all(s.row_for(g.id).width() == viewport for g in st.groups[:5])
         row = s.row_for(st.groups[0].id)
         assert row.switch is not None
         assert row.switch.geometry().right() < viewport - 8  # inside the row, not under the edge
