@@ -179,3 +179,13 @@ TODO (filled in after the final whole-branch review)
    Mac"), then `ditto "build/themask/macos/app/The MASK.app" "/Applications/The MASK.app"` and open it.
 6. Then the Wi-Fi-off smoke test above, then Task 26.
 7. Merging `mac-v1` into `main` is your decision; the controller has not done it and will not.
+
+## After v1: the design pass you asked for
+
+You asked (19 Oct) for the app to feel integrated, charming, easy to use — "the Apple way". That is a
+separate pass after the functional build and the smoke test, and we talk it through first. Points to
+decide then: the native macOS look (system font, spacing, light and dark mode), one window with a
+sidebar instead of tool-bar screens, drag-and-drop everywhere, progress shown in the window rather
+than in dialogs, icons, plain-language wording of every message, keyboard shortcuts, a first-run
+walkthrough. Nothing in the current build stands in the way of it: every screen is a separate
+module and the tests drive the screens through their widgets, not their looks.
