@@ -13,8 +13,9 @@ What each kind of revision becomes, accepting / rejecting:
 - content put in (``w:ins``, ``w:moveTo``, and ``w14:conflictIns``, a co-authoring conflict's
   insertion: ruling R110): kept without its wrapper / removed. Content taken out (``w:del``,
   ``w:moveFrom``, ``w14:conflictDel``): removed / kept, its ``w:delText`` and
-  ``w:delInstrText`` becoming ``w:t`` and ``w:instrText``. Deleted text outside any deletion, as a damaged file may hold it,
-  is removed / kept as text, the way the reader's two views read it. A move's range markers go.
+  ``w:delInstrText`` becoming ``w:t`` and ``w:instrText``. Deleted text outside any deletion,
+  as a damaged file may hold it, is removed / kept as text, the way the reader's two views read
+  it. A move's range markers go.
 - a change of properties (``w:rPrChange`` and the other ``*Change`` records): the record goes and
   the current properties stay / the properties go back to the old ones the record holds (see
   ``_restore``). A numbering change only goes: it holds no old properties, and so does a record
@@ -128,8 +129,8 @@ class _Side:
     gone_cell: str  # the mark of a cell that goes
 
 
-_ACCEPT = _Side(accept=True, gone=frozenset({_DEL, _MOVE_FROM, _CONFLICT_DEL}), gone_cell=_CELL_DEL)
-_REJECT = _Side(accept=False, gone=frozenset({_INS, _MOVE_TO, _CONFLICT_INS}), gone_cell=_CELL_INS)
+_ACCEPT = _Side(True, gone=frozenset({_DEL, _MOVE_FROM, _CONFLICT_DEL}), gone_cell=_CELL_DEL)
+_REJECT = _Side(False, gone=frozenset({_INS, _MOVE_TO, _CONFLICT_INS}), gone_cell=_CELL_INS)
 
 
 def accept_all(pkg: DocxPackage) -> int:

@@ -198,10 +198,10 @@ class ReviewState:
         analysis's guess, so it takes the next free number of ``type``, and is no longer marked
         to check. Otherwise the occurrences make a new group. Either way the group is switched
         on, its occurrences of the value switched back on if any was off (F-12), ``value`` is one
-        of its variants, and an occurrence inside a longer finding stays inside it. Raises ValueError for text
-        too short to look for, and for text with no occurrence to hide: one that is not in the
-        document, runs over a line break (a replacement lies within one paragraph) or is hidden
-        already.
+        of its variants, and an occurrence inside a longer finding stays inside it. Raises
+        ValueError for text too short to look for, and for text with no occurrence to hide: one
+        that is not in the document, runs over a line break (a replacement lies within one
+        paragraph) or is hidden already.
         """
         value = value.strip()
         if not is_searchable(value):

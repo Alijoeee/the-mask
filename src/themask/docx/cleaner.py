@@ -834,7 +834,9 @@ def _text_around(element: etree._Element) -> tuple[str, str]:
             a.tag == _FALLBACK or (a.tag == _P and a is not paragraph) for a in ancestors
         ):
             continue
-        pieces.append(node.text or "" if node.tag in _SHOWN_TEXTS else _SHOWN_CHARACTERS[node.tag])
+        pieces.append(
+            (node.text or "") if node.tag in _SHOWN_TEXTS else _SHOWN_CHARACTERS[node.tag]
+        )
     return "".join(before), "".join(after)
 
 

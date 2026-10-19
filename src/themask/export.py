@@ -15,9 +15,10 @@ saved (ruling R83). It puts the banner on top and saves the file under a neutral
 private temporary folder. The leak gate decides on a twin of each file (ruling R84), masked the
 same way but with every place the review holds of any group replaced, the places the owner
 switched off too (ruling R114): any value the leak check still finds in a twin is a leftover,
-and blocks the export; so does any picture or media file left in it (ruling R101). The files are then deleted and nothing is saved. The places the owner left visible
-on purpose are what the leak check finds in a file itself beyond its twin; they are listed,
-never blocking. Otherwise the detection runs again on the masked files, for what nobody marked;
+and blocks the export; so does any picture or media file left in it (ruling R101). The files
+are then deleted and nothing is saved. The places the owner left visible on purpose are what the
+leak check finds in a file itself beyond its twin; they are listed, never blocking. Otherwise
+the detection runs again on the masked files, for what nobody marked;
 the files are written into the output folder, never over a file that is there; and the case's
 key is saved. If the key cannot be saved, the files written go again: a masked file without its
 key could never be restored. A file added to an existing case keeps the case's code, date and

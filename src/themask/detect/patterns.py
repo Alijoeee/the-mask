@@ -311,8 +311,8 @@ class PercentRecognizer(CheckedPatternRecognizer):
 # but "the spare part 5 units", "shall schedule 500 pallets", "per article 12 pieces".
 _QUANTITY_REFERENCE = (
     r"(?:\b(?:(?i:clauses?|annex(?:es)?|appendix|appendices|paragraphs?|(?:art|sec|para)\.)"
-    r"|S(?:ections?|ECTIONS?)|A(?:rticles?|RTICLES?)|S(?:chedules?|CHEDULES?)|E(?:xhibits?|XHIBITS?)"
-    r"|P(?:art|ART))|\N{SECTION SIGN})"
+    r"|S(?:ections?|ECTIONS?)|A(?:rticles?|RTICLES?)|S(?:chedules?|CHEDULES?)"
+    r"|E(?:xhibits?|XHIBITS?)|P(?:art|ART))|\N{SECTION SIGN})"
 )
 _REFERENCE_BEFORE_A_QUANTITY = re.compile(_QUANTITY_REFERENCE + _SPACE + r"*\Z")
 # Two digits with a space, or a range's dash or "to", between them: after a reference word, a

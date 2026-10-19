@@ -37,10 +37,10 @@ It searches:
   %-decoded as well (ruling R26). Every namespace an element declares is searched too, its
   address and its prefix, and so is the name of every element and attribute outside the file
   format's own vocabularies, with a camel-cased name read as its words (ruling R102): a
-  document-assembly schema may be named after a party. A word of a field instruction that is exactly a field's name or
-  the format keyword after a format switch (PAGE, \\* MERGEFORMAT) is no hit for a value spelt
-  like it; anything else in an instruction is, a value of several words or a path led by a
-  backslash too (ruling R31);
+  document-assembly schema may be named after a party. A word of a field instruction that is
+  exactly a field's name or the format keyword after a format switch (PAGE, \\* MERGEFORMAT) is no
+  hit for a value spelt like it; anything else in an instruction is, a value of several words
+  or a path led by a backslash too (ruling R31);
 * every other part (pictures, embedded files, a part that is not valid XML): its bytes read as
   UTF-8 and as UTF-16, for the values of at least six letters and digits that are not all digits
   ("EUR 10.00" has seven), which stray bytes do not spell by chance (ruling R14 b);
@@ -238,9 +238,12 @@ def media_left(path: Path) -> list[LeakHit]:
         parts = {info.filename: archive.read(info) for info in archive.infolist()}
     types = _content_types_of(parts)
     hits = []
+    if types is None:  # the content types cannot be read: no part's type can be told
+        hits.append(LeakHit(CONTENT_TYPES, MEDIA_PLACEHOLDER, MEDIA_LEFT))
+        types = {}
     for name, data in parts.items():
-        media = name.casefold().startswith("word/media/") or (
-            types is None or types.get(name, "").startswith(MEDIA_TYPES)
+        media = name.casefold().startswith("word/media/") or types.get(name, "").startswith(
+            MEDIA_TYPES
         )
         if media or (_is_rels_part(name) and _relates_to_media(data)):
             hits.append(LeakHit(name, MEDIA_PLACEHOLDER, MEDIA_LEFT))
@@ -792,7 +795,7 @@ def _located(text: str, matches: Iterable[_Match], trace: _Trace | None) -> Loca
             while end in folded_away:  # what folds away at its end is its own (ruling R72)
                 end += 1
             # A decimal part, the needle's own or one folded away, ends the number.
-            closed = end != source[1] or _DECIMAL_MARK in match.key
+            closed = end != source[1] or _DECIMAL_POINT_IN_KEY.search(match.key) is not None
             source = (start, end)
             if len(normalize(text[start:end])) < MIN_LENGTH:
                 continue
@@ -1375,7 +1378,8 @@ class _Reader:
         if foreign:
             self._name(tag, "element name")
         for name, value in element.attrib.items():
-            if (":" in name and not _is_format_namespace(name)) or (foreign and ":" not in name):
+            namespaced = name.startswith("{")
+            if (namespaced and not _is_format_namespace(name)) or (foreign and not namespaced):
                 self._name(name, "attribute name")
             self._attribute(element, name, value)
         if paragraph is not None and tag in _SHOWN_CHARACTERS:

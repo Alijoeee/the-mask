@@ -5,10 +5,10 @@ reads every entry into memory and is done with the file, so the original is neve
 ``save`` always writes a new one. Before it reads, it checks what the zip's directory declares
 (ruling R104): at most ``MAX_ENTRIES`` entries, none over ``MAX_PART_SIZE`` once expanded and at
 most ``MAX_TOTAL_SIZE`` in all, so that a zip bomb never takes the app down; a file over a limit
-is refused as not a Word file. No Word file comes near them. A part's XML is parsed the first time it is asked for and kept,
-and what ``raw`` and ``save`` give for it is that tree as it is now, changes included. A file that
-is not a Word file, or that Word has encrypted with a password, is refused with a message the
-owner can act on.
+is refused as not a Word file. No Word file comes near them. A part's XML is parsed the first
+time it is asked for and kept, and what ``raw`` and ``save`` give for it is that tree as it is
+now, changes included. A file that is not a Word file, or that Word has encrypted with a
+password, is refused with a message the owner can act on.
 """
 
 from __future__ import annotations
