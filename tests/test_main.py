@@ -8,9 +8,11 @@ asked to run. Everything else, the start-up included, is the real code.
 
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
+import weakref
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,17 +22,23 @@ from themask.about import APP_NAME
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pytestqt.qtbot import QtBot
+
 PROGRAM = """
-import runpy, socket
+import gc, runpy, socket
 from PySide6.QtWidgets import QApplication
 
 import themask.ui.workers as workers
+from themask.ui.app import GarbageCollector
 
 workers.load_default_engine = lambda: object()  # no language model
 
 def run_the_loop(*arguments):
     windows = [w.windowTitle() for w in QApplication.topLevelWidgets() if w.isVisible()]
     print("visible windows:", windows)
+    collector = QApplication.instance().findChild(GarbageCollector)
+    print("collector running:", collector is not None and collector.timer.isActive())
+    print("gc enabled while the window lives:", gc.isenabled())
     return 0
 
 QApplication.exec = run_the_loop
@@ -38,6 +46,7 @@ try:
     runpy.run_module("themask", run_name="__main__")
 except SystemExit as stop:
     print("exit:", stop.code)
+print("gc enabled after:", gc.isenabled())
 try:
     socket.create_connection(("127.0.0.1", 9))
 except OSError as error:
@@ -87,6 +96,53 @@ def test_the_entry_point_prints_nothing_to_the_terminal_of_its_own(
 ) -> None:
     assert started.stdout.splitlines() == [
         f"visible windows: ['{APP_NAME}']",
+        "collector running: True",
+        "gc enabled while the window lives: False",
         "exit: 0",
+        "gc enabled after: True",
         "NetworkBlockedError",
     ]
+
+
+# ---- the garbage collector (ruling R111) --------------------------------------------------------
+
+
+def test_the_collector_runs_from_the_gui_thread_while_the_window_lives(
+    started: subprocess.CompletedProcess[str],
+) -> None:
+    lines = started.stdout.splitlines()
+    assert "collector running: True" in lines
+    assert "gc enabled while the window lives: False" in lines
+    assert "gc enabled after: True" in lines  # stopped at exit, once the workers are joined
+
+
+def test_the_collector_collects_cyclic_garbage_when_its_timer_fires(qtbot: QtBot) -> None:
+    from themask.ui.app import GarbageCollector
+
+    class Node:
+        me: Node | None = None
+
+    collector = GarbageCollector(interval_ms=10)
+    collector.start()
+    try:
+        node = Node()
+        node.me = node
+        gone = weakref.ref(node)
+        del node
+        assert gone() is not None  # a cycle: nothing frees it but the collector, which is off
+        qtbot.waitUntil(lambda: gone() is None, timeout=3000)
+    finally:
+        collector.stop()
+    assert gc.isenabled()
+
+
+def test_the_collector_takes_the_generations_in_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from themask.ui import app
+
+    collected: list[int] = []
+    monkeypatch.setattr(app.gc, "collect", lambda generation=2: collected.append(generation))
+    collector = app.GarbageCollector()
+    for _ in range(8):
+        collector.collect()
+    assert collected == [0, 0, 1, 0, 0, 2, 0, 0]
+    assert collector.timer.interval() == 2000 and not collector.timer.isActive()
