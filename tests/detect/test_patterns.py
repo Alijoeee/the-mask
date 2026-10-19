@@ -258,6 +258,14 @@ def test_records_are_a_quantity(text, needle):
         # Ruling R95 (I1): a year before "records" is the records' year.
         "The Supplier shall keep the 2025 records for audit.",
         "the 2026 and 2027 records are retained",
+        # Ruling R97 (c): after "the" or a possessive.
+        "Acme's 2025 records are kept.",
+        # Ruling R97 (a): any unit after a reference word of the contract.
+        "Section 5 pallets",
+        "Annex 2 Units of Measure",
+        "Schedule 3 Pallets",
+        "under Clause 4 cartons are listed",
+        "Part 2 Units",
     ],
 )
 def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
@@ -271,6 +279,14 @@ def test_a_reference_a_year_or_a_single_record_is_no_quantity(text):
         ("The Supplier keeps spare parts 500 units in stock.", "500 units"),
         ("and replacement parts 2,000 pieces", "2,000 pieces"),
         ("up to 2,000 records", "2,000 records"),
+        ("the spare part 5 units", "5 units"),  # a part in lower case is no reference
+        ("the art 12 pieces", "12 pieces"),
+        # Ruling R97 (c): a number in a year's range is a count after these words.
+        ("up to 2000 records", "2000 records"),
+        ("about 2025 records", "2025 records"),
+        ("approximately 1999 records", "1999 records"),
+        ("no more than 2050 records", "2050 records"),
+        ("a total of 2000 records", "2000 records"),
     ],
 )
 def test_a_quantity_after_a_word_like_parts_is_still_found(text, needle):

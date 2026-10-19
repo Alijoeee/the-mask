@@ -4,6 +4,7 @@ The two slow tests run the whole detection over every corpus file, the way the a
 owner's review. The others check how the evaluation counts, on texts made up here.
 """
 
+import json
 import time
 
 import pytest
@@ -60,6 +61,62 @@ def test_thirty_pages_under_sixty_seconds(corpus, engine, lists, name):
     srcs = load_sources([corpus / name], False)
     analyze(combined_text(srcs), engine, lists)
     assert time.perf_counter() - t0 < 60
+
+
+@pytest.mark.slow
+def test_full_round_trip_every_docx(corpus, engine, lists, tmp_path):
+    """Mask every Word file of the corpus, change it as an AI tool might, and restore it.
+
+    Every value of the key comes back (the one placeholder the AI changed once the owner
+    confirms it), the AI's invented [PERSON_9] stays as it is and nothing else is left; every
+    secret of the truth is in the restored text, so no value came back in another's place. A
+    file that held placeholders of its own keeps them as they are.
+    """
+    from tests.helpers import simulate_ai
+    from themask.docx.package import DocxPackage
+    from themask.docx.reader import extract_text
+    from themask.export import ExportOptions, export_case
+    from themask.placeholders import find_placeholders
+    from themask.restore.docx_restore import plan_docx, restore_docx
+    from themask.review import ReviewState
+
+    manifest = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+    for doc in (d for d in manifest if d["format"] == "docx"):
+        name = doc["file"]
+        sources = load_sources([corpus / name], False)
+        case_lists = CaseLists([], [], set())
+        review = ReviewState.from_analysis(
+            analyze(combined_text(sources), engine, lists, case_lists), lists, case_lists
+        )
+        options = ExportOptions(tmp_path / name)
+        res = export_case(sources, review, options, engine, lists, lambda case: None)
+        assert not res.blocked and res.case is not None, (name, res.leak_hits)
+        ai = simulate_ai(res.outputs[0], tmp_path / f"ai-{name}")
+        plan = plan_docx(ai, res.case)
+        out, rep = restore_docx(ai, res.case, True, expected_sha256=plan.sha256)
+        text = extract_text(DocxPackage.open(out)).text
+        altered = [item for item in plan.items if item.status == "altered"]
+        print(
+            f"{name}: key {len(res.case.entries)}, planned {len(plan.items)}, restored"
+            f" {rep.restored} ({rep.altered_restored} changed), unknown {rep.unknown}"
+        )
+        for entry in res.case.entries:
+            assert entry.value in text, (name, entry.placeholder)
+        truth = json.loads((corpus / doc["truth"]).read_text(encoding="utf-8"))
+        for secret in truth:
+            if not (secret.get("only_in_deletion") or secret.get("hidden")):
+                assert secret["value"] in text, (name, secret["value"])
+        assert rep.needs_check == [] and rep.altered_restored == len(altered)
+        if "existing_placeholders" not in doc["features"]:
+            # The AI changed the first [PERSON_1], when the key has one (an annex may name no
+            # person): caught, confirmed and restored.
+            person_1 = any(entry.placeholder == "[PERSON_1]" for entry in res.case.entries)
+            assert [item.match.raw for item in altered] == (["[PERSON 1]"] if person_1 else [])
+            assert {m.placeholder for m in find_placeholders(text)} == {"[PERSON_9]"}
+            assert rep.unknown == ["[PERSON_9]"]
+        else:
+            # The first [PERSON_1] is the file's own, which the key does not hold: left as written.
+            assert "[PERSON_9]" in rep.unknown and "[PERSON 1]" in text
 
 
 # --- How the evaluation counts -------------------------------------------------------------------
