@@ -28,7 +28,9 @@ The window opens at once and says "Loading…" for a few seconds while it loads 
 Drop a Word or PDF contract on it (or use "Choose files…") to analyse it and review what it found.
 "Continue to export" saves the masked copy in `~/Documents/The MASK` and keeps its key in a case on
 this Mac, locked with a key in your Keychain. When the AI tool gives you its Word file or its text
-back, the Restore screen puts the real values back. The Cases screen lists the saved cases, and
+back, the Restore screen puts the real values back. It never guesses which case a file belongs to:
+it takes the case whose code is in the file's name (`MASKED-<code>.docx`, which many AI tools keep),
+and when two cases fit the file equally well it asks you. The Cases screen lists the saved cases, and
 Settings holds your always-hide and never-hide lists, how long a case is kept and the folder of the
 masked files.
 

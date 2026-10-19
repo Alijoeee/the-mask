@@ -35,6 +35,7 @@ QLabel#heading { font-size: 18px; font-weight: 600; }
 QLabel#tagline { font-size: 14px; }
 QLabel#dropTitle { font-size: 20px; font-weight: 600; }
 QLabel#status { font-size: 13px; }
+QLabel#preview { font-size: 12px; }
 
 QFrame#dropZone {
     border: 2px dashed palette(mid);

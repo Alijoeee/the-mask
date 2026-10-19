@@ -6,7 +6,9 @@ the cases come best fit first and the owner's choice is respected, that each pla
 is confirmed or left as the AI wrote it (by the ordinals of the plan, ruling R91, and True when
 every one is confirmed), what the result panel shows, a file that changes under the plan (the
 restore is given its fingerprint, ruling R96), and that whatever goes wrong is said in words and
-never ends in a trace.
+never ends in a trace. Ruling R103: two cases that hold the same placeholder names are never
+guessed between (the code in the name of the file decides, else the owner is asked), and the
+screen shows which values the selected case would put back.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import logging
+import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,6 +35,7 @@ from themask.model import Case, KeyEntry, PlaceholderType
 from themask.restore.docx_restore import FILE_CHANGED_MESSAGE
 from themask.restore.report import TRACKED_CHANGE
 from themask.ui import restore_screen
+from themask.ui.cases_screen import format_moment
 from themask.ui.restore_screen import RestoreScreen, file_text
 
 if TYPE_CHECKING:
@@ -677,8 +681,8 @@ def test_the_owner_s_case_is_kept_while_it_fits_as_well_as_the_best(
     two_cases(app_ctx)
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
-    s.paste_box.setPlainText("[PERSON_1]")  # both cases hold the person
-    assert s.case_combo.currentData() == "B2B2"  # the newer
+    s.paste_box.setPlainText("[PERSON_1]")  # both cases hold the person: not the newer, by guess
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
     s.case_combo.setCurrentIndex(s.case_combo.findData("A1A1"))
     s.case_combo.activated.emit(s.case_combo.currentIndex())  # the owner chose it
     s.paste_box.setPlainText("[PERSON_1] again")
@@ -764,10 +768,441 @@ def test_a_store_that_cannot_be_read_is_said_in_the_screen(
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
     assert s.status_label.text() == keychain and s.case_combo.count() == 0
+    assert not s.no_cases_label.isVisibleTo(s)  # "no saved case" would not be true: not readable
     monkeypatch.undo()
     app_ctx.case_store.save(a_case("K4F7"))
     s.refresh_cases()
     assert combo_ids(s) == ["K4F7"] and s.status_label.text() == ""
+
+
+# ---- two cases that fit a file alike (ruling R103) ---------------------------------------------------
+
+
+def alice_and_bob(ctx: AppContext) -> None:
+    """The cases of two contracts, both holding [PERSON_1]: K4F7, the older, where it is Alice
+    Smith, and M5N6, the newer, where it is Bob Jones.
+    """
+    person = PlaceholderType.PERSON
+    older, newer = NOW - timedelta(days=5), NOW
+    ctx.case_store.save(
+        Case(
+            "K4F7", older, ["Supply.docx"], [], [KeyEntry("[PERSON_1]", person, "Alice Smith", [])]
+        )
+    )
+    ctx.case_store.save(
+        Case(
+            "M5N6", newer, ["Services.docx"], [], [KeyEntry("[PERSON_1]", person, "Bob Jones", [])]
+        )
+    )
+
+
+def named_file(make_docx: MakeDocx, tmp_path: Path, name: str, *lines: str) -> Path:
+    """A Word file called ``name`` holding ``lines``: what an AI tool gives back under its name."""
+    path = tmp_path / name
+    shutil.copy(make_docx(body(*lines)), path)
+    return path
+
+
+def pick(s: RestoreScreen, case_id: str) -> None:
+    """The owner chooses a case in the combo box."""
+    s.case_combo.setCurrentIndex(s.case_combo.findData(case_id))
+    s.case_combo.activated.emit(s.case_combo.currentIndex())
+
+
+def screen_with_alice_and_bob(qtbot: QtBot, ctx: AppContext) -> RestoreScreen:
+    alice_and_bob(ctx)
+    s = RestoreScreen(ctx)
+    qtbot.addWidget(s)
+    return s
+
+
+def test_two_cases_that_fit_a_file_alike_are_not_guessed_between(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))  # nothing in the name says which contract
+    assert s.case_combo.currentIndex() == -1 and s.case_combo.currentData() is None
+    assert combo_ids(s) == ["M5N6", "K4F7"]  # both are on offer, the newer one first
+    assert s.choose_label.isVisibleTo(s)
+    assert s.choose_label.text() == "Several cases fit this file \N{EM DASH} choose one."
+    assert not s.restore_button.isEnabled()
+    assert s.altered_list.count() == 0 and s.file_fit_label.text() == ""
+    assert not s.preview_label.isVisibleTo(s)  # no case, so no values to show
+
+
+def test_the_owner_s_choice_is_the_case_the_file_is_restored_with(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    ai = make_docx(body("Dear [PERSON_1],"))
+    s.load_file(ai)
+    pick(s, "K4F7")  # the older contract's case
+    assert s.restore_button.isEnabled() and not s.choose_label.isVisibleTo(s)
+    assert s.file_fit_label.text() == "1 of 1 placeholder found in this case."
+    click_restore(qtbot, s)
+    assert text_of(restored_beside(ai)) == "Dear Alice Smith,"  # not the newer case's Bob Jones
+
+
+@pytest.mark.parametrize(
+    ("name", "case_id", "value"),
+    [
+        ("MASKED-K4F7.docx", "K4F7", "Alice Smith"),
+        ("MASKED-K4F7-1.docx", "K4F7", "Alice Smith"),
+        ("masked-m5n6-2.docx", "M5N6", "Bob Jones"),
+    ],
+)
+def test_the_code_in_the_name_of_the_file_picks_the_case_without_asking(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    name: str,
+    case_id: str,
+    value: str,
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    ai = named_file(make_docx, tmp_path, name, "Dear [PERSON_1],")
+    s.load_file(ai)
+    assert s.case_combo.currentData() == case_id  # the older case, though the newer fits as well
+    assert not s.choose_label.isVisibleTo(s) and s.restore_button.isEnabled()
+    click_restore(qtbot, s)
+    assert text_of(restored_beside(ai)) == f"Dear {value},"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["MASKED-B2C3.docx", "MASKED-K4F7-M5N6.docx", "MASKED-K4F7X.docx", "answer.docx"],
+    ids=["a case that is not here", "two codes", "not a whole word", "no code"],
+)
+def test_a_name_that_does_not_point_to_one_case_leaves_the_choice_to_the_owner(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path, name: str
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(named_file(make_docx, tmp_path, name, "Dear [PERSON_1],"))
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
+    assert not s.restore_button.isEnabled()
+
+
+def test_pasted_text_is_not_guessed_either(qtbot: QtBot, app_ctx: AppContext) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.paste_box.setPlainText("Dear [PERSON_1],")
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
+    assert s.choose_label.text() == "Several cases fit this file \N{EM DASH} choose one."
+    assert not s.restore_text_button.isEnabled()
+    qtbot.mouseClick(s.restore_text_button, CLICK)  # a disabled button takes no click
+    assert not s.result_panel.isVisibleTo(s)
+    pick(s, "K4F7")
+    assert s.restore_text_button.isEnabled() and not s.choose_label.isVisibleTo(s)
+    qtbot.mouseClick(s.restore_text_button, CLICK)
+    assert s.result_box.toPlainText() == "Dear Alice Smith,"
+
+
+def test_the_ranking_is_given_the_name_of_the_file_and_none_for_pasted_text(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[tuple[str, str | None]] = []
+    real = restore_screen.suggest_cases
+
+    def spy(text: str, cases: list[Case], file_name: str | None = None) -> list[Case]:
+        asked.append((text, file_name))
+        return real(text, cases, file_name)
+
+    monkeypatch.setattr(restore_screen, "suggest_cases", spy)
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "Dear [PERSON_1],"))
+    assert asked[-1] == ("Dear [PERSON_1],", "MASKED-K4F7.docx")
+    s.paste_box.setPlainText("[PERSON_1] again")
+    assert asked[-1] == ("[PERSON_1] again", None)
+
+
+def test_a_case_the_owner_chose_stays_chosen_while_the_text_changes_and_on_a_visit(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    pick(s, "K4F7")
+    s.paste_box.setPlainText("[PERSON_1] again")  # both cases still fit alike: the owner's stays
+    s.paste_box.setPlainText("[PERSON_1] and once more")
+    assert s.case_combo.currentData() == "K4F7" and not s.choose_label.isVisibleTo(s)
+    s.refresh_cases()  # a visit to the screen
+    assert s.case_combo.currentData() == "K4F7" and s.restore_button.isEnabled()
+
+
+def test_clearing_the_paste_box_takes_back_the_question_its_text_raised(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.paste_box.setPlainText("Dear [PERSON_1],")
+    assert s.choose_label.isVisibleTo(s) and s.case_combo.currentIndex() == -1
+    s.paste_box.clear()
+    assert not s.choose_label.isVisibleTo(s)  # nothing is left to fit
+    assert s.case_combo.currentData() == "M5N6"  # the newest, as at the start
+
+
+def test_clearing_the_paste_box_goes_back_to_the_file(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "Dear [PERSON_1],"))
+    assert s.case_combo.currentData() == "K4F7"  # the name of the file says which
+    s.paste_box.setPlainText("[PERSON_1] in the text")  # a text has no file name to go by
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
+    assert not s.restore_button.isEnabled()
+    s.paste_box.clear()  # only the file is left, and its name says which case again
+    assert s.case_combo.currentData() == "K4F7" and not s.choose_label.isVisibleTo(s)
+    assert s.restore_button.isEnabled()
+
+
+def test_a_visit_changes_nothing_while_the_cases_are_the_same(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    pick(s, "K4F7")
+    click_restore(qtbot, s)  # the choice is used up by the restore ...
+    assert s.result_panel.isVisibleTo(s)
+    s.refresh_cases()  # ... and a visit to the screen does not take the case away again
+    assert s.case_combo.currentData() == "K4F7" and s.restore_button.isEnabled()
+    assert s.result_panel.isVisibleTo(s) and not s.choose_label.isVisibleTo(s)
+    app_ctx.case_store.save(Case("B2C3", NOW, ["Other.docx"], [], the_key()[:1]))  # a new case
+    s.refresh_cases()  # now the cases are put in order again, for the file
+    assert combo_ids(s) == ["B2C3", "M5N6", "K4F7"] and s.case_combo.currentIndex() == -1
+    assert s.choose_label.isVisibleTo(s)
+
+
+def test_the_one_case_that_fits_best_is_selected_without_a_question(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    two_cases(app_ctx)  # A1A1 holds the person and the company (older), B2B2 the person only
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(make_docx(body("[PERSON_1] signs for [COMPANY_1].")))
+    assert s.case_combo.currentData() == "A1A1" and not s.choose_label.isVisibleTo(s)
+    assert s.restore_button.isEnabled()
+
+
+def test_when_no_case_fits_the_newest_is_selected_and_nothing_is_asked(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    assert s.case_combo.currentData() == "M5N6" and not s.choose_label.isVisibleTo(s)
+    s.load_file(make_docx(body("[PERSON_9] and nothing else.")))  # no case holds it
+    assert s.case_combo.currentData() == "M5N6" and not s.choose_label.isVisibleTo(s)
+    assert s.file_fit_label.text() == "0 of 1 placeholder found in this case."  # nothing to write
+
+
+def test_a_choice_made_for_one_file_is_not_carried_to_the_next(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    pick(s, "K4F7")
+    assert s.case_combo.currentData() == "K4F7"
+    s.load_file(make_docx(body("Another contract: [PERSON_1] signs.")))  # fits both alike again
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
+    assert not s.restore_button.isEnabled()
+
+
+def test_a_choice_ends_with_the_restore_it_was_made_for(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.paste_box.setPlainText("Dear [PERSON_1],")
+    pick(s, "K4F7")
+    qtbot.mouseClick(s.restore_text_button, CLICK)
+    assert s.result_box.toPlainText() == "Dear Alice Smith,"
+    assert s.restore_text_button.isEnabled()  # the same text can be restored again
+    s.paste_box.setPlainText("The next answer: [PERSON_1] signs.")
+    assert s.case_combo.currentIndex() == -1 and not s.restore_text_button.isEnabled()
+    pick(s, "M5N6")
+    qtbot.mouseClick(s.restore_text_button, CLICK)
+    assert s.result_box.toPlainText() == "The next answer: Bob Jones signs."
+    s.load_file(make_docx(body("And a file: [PERSON_1].")))  # the pick was for the text
+    assert s.case_combo.currentIndex() == -1
+
+
+def test_the_same_file_can_be_restored_again_with_the_case_chosen_for_it(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    ai = make_docx(body("Dear [PERSON_1], and PERSON_1 too."))
+    s.load_file(ai)
+    pick(s, "K4F7")
+    click_restore(qtbot, s)
+    s.altered_list.item(0).setCheckState(Qt.CheckState.Checked)
+    assert s.case_combo.currentData() == "K4F7" and s.restore_button.isEnabled()
+    click_restore(qtbot, s)
+    second = ai.with_name(f"{ai.stem} \N{EN DASH} restored (2).docx")
+    assert text_of(second) == "Dear Alice Smith, and Alice Smith too."
+
+
+def test_the_case_asked_for_in_the_cases_screen_counts_as_chosen_for_the_first_file(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.refresh_cases("K4F7")  # "Restore from this case" in the Cases screen
+    s.load_file(make_docx(body("Dear [PERSON_1],")))  # both fit alike: the owner has said which
+    assert s.case_combo.currentData() == "K4F7" and not s.choose_label.isVisibleTo(s)
+
+
+def test_the_case_asked_for_in_the_cases_screen_is_for_the_next_file_even_when_one_is_loaded(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("An earlier answer: [PERSON_1].")))
+    pick(s, "M5N6")
+    click_restore(qtbot, s)  # the owner is done with that file ...
+    s.refresh_cases("K4F7")  # ... and goes to the Cases screen: "Restore from this case"
+    assert s.case_combo.currentData() == "K4F7"
+    next_answer = make_docx(body("The next answer: [PERSON_1]."))
+    s.load_file(next_answer)  # both fit alike, and K4F7 was asked for
+    assert s.case_combo.currentData() == "K4F7" and not s.choose_label.isVisibleTo(s)
+    s.load_file(make_docx(body("And another: [PERSON_1].")))  # but the request was for one file
+    assert s.case_combo.currentIndex() == -1 and s.choose_label.isVisibleTo(s)
+
+
+def test_when_the_case_chosen_is_deleted_the_one_that_is_left_is_selected(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    pick(s, "K4F7")
+    app_ctx.case_store.delete("K4F7")  # deleted in the Cases screen
+    s.refresh_cases()
+    assert combo_ids(s) == ["M5N6"] and s.case_combo.currentData() == "M5N6"  # now the only one
+    assert not s.choose_label.isVisibleTo(s)
+
+
+# ---- which values the selected case would put back (ruling R103) ----------------------------------------
+
+
+def test_the_preview_shows_the_values_the_selected_case_would_put_back(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    assert not s.preview_label.isVisibleTo(s)
+    pick(s, "K4F7")
+    assert s.preview_label.isVisibleTo(s)
+    assert s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Alice Smith"
+    pick(s, "M5N6")
+    assert (
+        s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Bob Jones"
+    )  # the wrong one shows
+
+
+def test_the_preview_follows_the_text_and_hides_when_there_is_nothing_to_show(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    assert not screen.preview_label.isVisibleTo(screen)  # nothing loaded or pasted
+    screen.paste_box.setPlainText("Dear [PERSON_1], [PERSON_9] too")
+    assert (
+        screen.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"
+    )  # not [PERSON_9]
+    screen.paste_box.setPlainText("Dear [PERSON_1], [COMPANY_1] pays")
+    assert screen.preview_label.text().split("\n") == [
+        "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith",
+        "[COMPANY_1] \N{RIGHTWARDS ARROW} Acme Supplies Ltd",
+    ]
+    screen.paste_box.setPlainText("Nothing masked here, and [PERSON_9] is not in the case.")
+    assert not screen.preview_label.isVisibleTo(screen) and screen.preview_label.text() == ""
+
+
+def test_the_preview_names_at_most_five_placeholders_in_the_order_they_stand(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    people = [
+        KeyEntry(f"[PERSON_{n}]", PlaceholderType.PERSON, f"Person {n} of K4F7", [])
+        for n in range(1, 9)
+    ]
+    app_ctx.case_store.save(Case("K4F7", NOW, ["K4F7.docx"], [], people))
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(
+        make_docx(body("[PERSON_3] [PERSON_1] [PERSON_8] [PERSON_3] [PERSON_2] [PERSON_5]"))
+    )
+    s.paste_box.setPlainText("[PERSON_7] [PERSON_1] [PERSON_4]")  # the text's come after the file's
+    arrow = "\N{RIGHTWARDS ARROW}"
+    assert s.preview_label.text().split("\n") == [
+        f"[PERSON_{n}] {arrow} Person {n} of K4F7" for n in (3, 1, 8, 2, 5)
+    ]  # each once, five of the seven
+    s.load_file(make_docx(body("[PERSON_2]")))
+    s.paste_box.clear()
+    assert s.preview_label.text() == f"[PERSON_2] {arrow} Person 2 of K4F7"
+
+
+def test_the_preview_shows_a_placeholder_the_ai_changed_too(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("The fee is AMOUNT_1.")))  # changed: it waits for a tick
+    assert screen.preview_label.text() == "[AMOUNT_1] \N{RIGHTWARDS ARROW} EUR 1,250,000"
+
+
+def test_the_preview_is_plain_text_and_keeps_a_long_value_short(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    markup = "<b>Bob</b> & <i>Co</i>"
+    long_value = "Brightwater Logistics Holdings " * 10
+    entries = [
+        KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, markup, []),
+        KeyEntry("[ADDRESS_1]", PlaceholderType.ADDRESS, f"Main Street 1,\n{long_value}", []),
+    ]
+    app_ctx.case_store.save(Case("K4F7", NOW, ["K4F7.docx"], [], entries))
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(make_docx(body("[COMPANY_1] at [ADDRESS_1]")))
+    first, second = s.preview_label.text().split("\n")
+    assert s.preview_label.textFormat() == Qt.TextFormat.PlainText
+    assert first == f"[COMPANY_1] \N{RIGHTWARDS ARROW} {markup}"  # shown as written, not as markup
+    assert second.startswith("[ADDRESS_1] \N{RIGHTWARDS ARROW} Main Street 1, Brightwater")
+    assert len(second) < 100 and second.endswith("\N{HORIZONTAL ELLIPSIS}")  # and on one line
+
+
+def test_the_values_of_the_preview_are_never_logged(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG):
+        s = screen_with_alice_and_bob(qtbot, app_ctx)
+        s.load_file(make_docx(body("Dear [PERSON_1],")))
+        pick(s, "K4F7")
+        s.paste_box.setPlainText("[PERSON_1] again")
+        click_restore(qtbot, s)
+    assert "Alice Smith" in s.preview_label.text()
+    assert "Alice" not in caplog.text and "Bob" not in caplog.text and "Smith" not in caplog.text
+
+
+# ---- what a line of the case list says ---------------------------------------------------------------
+
+
+def test_a_case_line_carries_the_code_the_date_and_the_original_files(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    case = Case("K4F7", NOW, ["Supply.docx", "Annex.pdf"], [], the_key())
+    app_ctx.case_store.save(case)
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    line = s.case_combo.itemText(0)
+    assert "K4F7" in line and "Supply.docx" in line and "Annex.pdf" in line
+    assert format_moment(NOW) in line
+
+
+@pytest.mark.parametrize(("entries", "words"), [(3, "3 entries"), (1, "1 entry")])
+def test_a_case_that_stores_no_file_names_is_told_by_its_code_date_and_entries(
+    qtbot: QtBot, app_ctx: AppContext, entries: int, words: str
+) -> None:
+    app_ctx.case_store.save(Case("K4F7", NOW, [], [], the_key()[:entries]))
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    line = s.case_combo.itemText(0)
+    assert "K4F7" in line and format_moment(NOW) in line and words in line
+    assert "()" not in line and "\N{EN DASH}  " not in line  # no empty list of files
 
 
 # ---- the files that are dropped ----------------------------------------------------------------------
