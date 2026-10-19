@@ -310,6 +310,40 @@ def test_a_store_with_another_key_lists_nothing_and_reports_every_file(
     assert [p.name for p in other.unreadable] == ["B2C3.mask", "K4F7.mask"]
 
 
+def test_load_all_gives_every_case_that_opens_with_its_key_newest_first(
+    case_store: CaseStore, keystore: KeyStore, sample_case: Case
+) -> None:
+    case_store.save(make_case("B2C3", OCT_17))
+    case_store.save(make_case("K4F7", datetime(2026, 10, 20, tzinfo=UTC)))
+    case_store.save(make_case("M5N6", datetime(2026, 10, 18, tzinfo=UTC)))
+    plant(case_store, keystore, sample_case, DAMAGED_FILES["empty"], "Z9Z9")
+    cases = case_store.load_all()
+    assert [c.id for c in cases] == ["K4F7", "M5N6", "B2C3"]
+    # What ``list`` leaves in the file is here: the key itself, and the files' names.
+    assert cases[0].entries == make_case("K4F7").entries
+    assert cases[0].source_files == ["K4F7.docx"]
+    assert [p.name for p in case_store.unreadable] == ["Z9Z9.mask"]  # reported like ``list`` does
+
+
+def test_load_all_puts_cases_made_at_the_same_moment_in_order_of_id(case_store: CaseStore) -> None:
+    for case_id in ("M5N6", "B2C3", "K4F7"):
+        case_store.save(make_case(case_id))
+    assert [c.id for c in case_store.load_all()] == ["B2C3", "K4F7", "M5N6"]
+
+
+def test_load_all_of_a_folder_that_does_not_exist_is_empty(case_store: CaseStore) -> None:
+    assert case_store.load_all() == [] and case_store.unreadable == []
+
+
+def test_list_is_load_all_without_the_keys(case_store: CaseStore) -> None:
+    case_store.save(make_case("B2C3", OCT_17, retention_days=7))
+    case_store.save(make_case("K4F7", datetime(2026, 10, 20, tzinfo=UTC)))
+    assert case_store.list() == [
+        CaseSummary(c.id, c.created_at, c.expires_at, c.source_files, len(c.entries))
+        for c in case_store.load_all()
+    ]
+
+
 def test_a_copy_of_a_case_file_under_another_name_is_not_a_second_case(
     case_store: CaseStore, sample_case: Case
 ) -> None:
@@ -386,6 +420,60 @@ def test_delete_all_also_removes_what_a_crashed_save_left_behind(
 def test_delete_all_of_a_folder_that_does_not_exist(case_store: CaseStore) -> None:
     case_store.delete_all()
     assert not case_store.dir.exists()
+
+
+def test_delete_unreadable_removes_that_file_and_only_that_file(
+    case_store: CaseStore, keystore: KeyStore, sample_case: Case
+) -> None:
+    case_store.save(make_case("B2C3"))
+    bad = plant(case_store, keystore, sample_case, DAMAGED_FILES["empty"], "Z9Z9")
+    other = plant(case_store, keystore, sample_case, DAMAGED_FILES["cut short"], "M5N6")
+    case_store.list()
+    case_store.delete_unreadable("Z9Z9.mask")
+    assert not bad.exists() and other.exists()
+    assert case_store.unreadable == [other]
+    assert [s.id for s in case_store.list()] == ["B2C3"]
+
+
+def test_delete_unreadable_never_deletes_a_case_that_opens(
+    case_store: CaseStore, sample_case: Case
+) -> None:
+    case_store.save(sample_case)
+    case_store.list()
+    with pytest.raises(ValueError, match="cannot be opened"):
+        case_store.delete_unreadable("K4F7.mask")
+    assert [s.id for s in case_store.list()] == ["K4F7"]
+
+
+@pytest.mark.parametrize(
+    "name", ["../outside.mask", "/etc/passwd", "", ".", "..", "sub/K4F7.mask", "notes.txt"]
+)
+def test_delete_unreadable_only_deletes_what_the_listing_reported(
+    case_store: CaseStore,
+    keystore: KeyStore,
+    sample_case: Case,
+    tmp_path: Path,
+    name: str,
+) -> None:
+    plant(case_store, keystore, sample_case, DAMAGED_FILES["empty"])
+    (case_store.dir / "notes.txt").write_text("not a case")
+    outside = tmp_path / "outside.mask"
+    outside.write_bytes(b"not a case either")
+    case_store.list()
+    with pytest.raises(ValueError):
+        case_store.delete_unreadable(name)
+    assert outside.exists() and (case_store.dir / "notes.txt").exists()
+    assert [p.name for p in case_store.unreadable] == ["K4F7.mask"]
+
+
+def test_delete_unreadable_of_a_file_that_is_gone_already_is_not_an_error(
+    case_store: CaseStore, keystore: KeyStore, sample_case: Case
+) -> None:
+    bad = plant(case_store, keystore, sample_case, DAMAGED_FILES["empty"])
+    case_store.list()
+    bad.unlink()
+    case_store.delete_unreadable("K4F7.mask")
+    assert case_store.unreadable == []
 
 
 def test_purge_expired(case_store: CaseStore, sample_case: Case) -> None:
@@ -483,6 +571,8 @@ def test_the_master_key_is_fetched_once_per_operation_and_not_once_per_file(
     assert keys.calls == 2
     assert store.purge_expired(OCT_17) == []
     assert keys.calls == 3
+    store.load_all()
+    assert keys.calls == 4  # one for every case, not one for each
 
 
 def test_the_package_exports_the_public_names() -> None:

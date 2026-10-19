@@ -1,4 +1,6 @@
-"""Fixtures for the tests of the interface (tests/ui): the application's context and a review."""
+"""Fixtures for the tests of the interface (tests/ui): the application's context, a review and a
+file that was exported.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ if TYPE_CHECKING:
     from themask.detect.lists import CaseLists, UserLists
     from themask.detect.pipeline import CombinedText
     from themask.keystore.cases import CaseStore
-    from themask.model import Analysis
+    from themask.model import Analysis, Case
     from themask.review import ReviewState
     from themask.ui.app import AppContext
     from themask.ui.review_screen import ReviewScreen
@@ -73,3 +75,28 @@ def review_screen(
     qtbot.addWidget(screen)
     screen.load(review, combined)
     return screen, review
+
+
+@pytest.fixture
+def exported(app_ctx: AppContext, corpus: Path, tmp_path: Path) -> tuple[Path, Case]:
+    """supply-01.docx exported the way the app does it: the masked file and the case, which is
+    saved in the context's case store.
+
+    The masked file is alone in a folder of its own, so that a test can write the AI's answer
+    beside it and see what a restore writes there.
+    """
+    from tests.helpers import analysed
+    from themask.export import ExportOptions, export_case
+
+    assert app_ctx.engine is not None
+    sources, review = analysed(app_ctx, [corpus / "supply-01.docx"])
+    result = export_case(
+        sources,
+        review,
+        ExportOptions(tmp_path / "exported"),
+        app_ctx.engine,
+        app_ctx.user_lists,
+        app_ctx.case_store.save,
+    )
+    assert not result.blocked and result.case is not None
+    return result.outputs[0], result.case

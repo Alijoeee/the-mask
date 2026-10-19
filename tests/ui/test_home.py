@@ -3,12 +3,15 @@
 The first four tests are the brief's: a contract goes from the home screen to the review, an old
 .doc and a scanned PDF are refused in plain words, and the progress reaches 100. The rest cover
 what the brief leaves to the builder: the question about tracked changes, a file added to a case,
-the engine that is still loading, and the old cases that are deleted when the window opens.
+the engine that is still loading, and the old cases that are deleted when the window opens. The
+last section is what the review of the window left open: one request at a time, an error while
+the review is built, the tool bar during an analysis, and the files that were not opened.
 """
 
 from __future__ import annotations
 
 import errno
+import logging
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,12 +19,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import QApplication, QToolBar, QToolButton, QWidget
 
 from themask.errors import KeyStoreError
 from themask.keystore.cases import CaseStore
 from themask.model import Case, KeyEntry, PlaceholderType
 from themask.ui import main_window
 from themask.ui.main_window import MainWindow
+from themask.ui.review_screen import ReviewScreen
 
 if TYPE_CHECKING:
     from pytestqt.qtbot import QtBot
@@ -89,7 +96,7 @@ def test_the_window_opens_on_the_home_screen_with_every_screen_in_its_stack(
     w.show()
     assert w.windowTitle() == "The MASK"
     assert w.current_screen_name() == "home"
-    assert w.screen_names() == ["home", "review", "export", "restore", "cases", "settings"]
+    assert w.screen_names() == ["home", "review", "restore", "cases", "settings"]
     assert w.home.status_label.text() == "Ready" and w.home.drop_zone.isEnabled()
 
 
@@ -467,3 +474,238 @@ def test_closing_the_window_waits_for_the_analysis_to_end(
     assert w.is_analysing()
     w.close()  # a thread must never be destroyed while it runs
     assert not w.is_analysing() and not w.isVisible()
+
+
+# ---- what the review of this window left open ------------------------------------------------------
+
+
+def toolbar(w: MainWindow) -> QToolBar:
+    bar = w.findChild(QToolBar)
+    assert bar is not None
+    return bar
+
+
+def toolbar_actions(w: MainWindow) -> dict[str, QAction]:
+    """The actions of the window's tool bar, by their text."""
+    return {action.text(): action for action in toolbar(w).actions()}
+
+
+def click_in_tool_bar(w: MainWindow, text: str) -> None:
+    """Click the tool bar's button of the action called ``text``, as the owner does (a disabled
+    button takes no click; ``QAction.trigger`` would not ask).
+    """
+    button = toolbar(w).widgetForAction(toolbar_actions(w)[text])
+    assert isinstance(button, QToolButton)
+    button.click()
+
+
+def test_a_second_request_while_the_engine_loads_is_refused(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shown: list[str] = []
+    monkeypatch.setattr(main_window, "show_error", lambda parent, msg: shown.append(msg))
+    gate = threading.Event()
+
+    def load_engine() -> Engine:
+        gate.wait(30)
+        return app_ctx.engine  # the session's, already loaded
+
+    w = MainWindow(replace(app_ctx, engine=None), load_engine=load_engine)
+    qtbot.addWidget(w)
+    w.open_files([corpus / "supply-01.docx"], redline_split=False)  # waits for the engine
+    w.open_files([corpus / "supply-02.docx"], redline_split=False)  # must not replace it
+    assert shown == [main_window.BUSY_MESSAGE]
+    with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        gate.set()
+    assert [s.path.name for s in w.sources] == ["supply-01.docx"]  # the first one carried on
+
+
+def test_an_error_while_the_review_is_built_is_told_and_only_its_type_is_logged(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    corpus: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    shown: list[str] = []
+    monkeypatch.setattr(main_window, "show_error", lambda parent, msg: shown.append(msg))
+
+    def broken(self: ReviewScreen, review: object, combined: object) -> None:
+        raise RuntimeError("Secret Client Ltd")
+
+    monkeypatch.setattr(ReviewScreen, "load", broken)
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    with (
+        caplog.at_level(logging.INFO, logger="themask"),
+        qtbot.assertNotEmitted(w.analysisFinished),
+        qtbot.waitSignal(w.analysisFailed, timeout=ANALYSIS_TIMEOUT) as failed,
+    ):
+        w.open_files([corpus / "supply-01.docx"], redline_split=False)
+    assert shown == [main_window.REVIEW_FAILED] and failed.args == [main_window.REVIEW_FAILED]
+    assert "RuntimeError" in caplog.text and "Secret" not in caplog.text
+    # Nothing of the window was changed on the way: it is as if the file had never been opened.
+    assert w.sources == [] and w.pending_case is None and w.current_screen_name() == "home"
+    assert not w.is_analysing() and w.home.drop_zone.isEnabled()
+    actions = toolbar_actions(w)
+    assert not actions["Review"].isEnabled() and actions["Home"].isEnabled()
+
+
+def test_the_tool_bar_is_off_while_a_file_is_analysed_and_on_again_after(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    actions = toolbar_actions(w)
+    assert actions["Cases"].isEnabled() and not actions["Review"].isEnabled()
+    with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        w.open_files([corpus / "supply-01.docx"], redline_split=False)
+        assert w.is_analysing() and not any(a.isEnabled() for a in actions.values())
+        click_in_tool_bar(w, "Settings")
+        click_in_tool_bar(w, "Cases")
+        assert w.current_screen_name() == "home"  # the analysis is what the owner waits for
+    assert all(a.isEnabled() for a in actions.values())  # the review included: there is one now
+    click_in_tool_bar(w, "Cases")
+    assert w.current_screen_name() == "cases"
+
+
+def test_the_tool_bar_comes_back_when_the_analysis_fails(
+    qtbot: QtBot, app_ctx: AppContext, fixtures: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_window, "show_error", lambda parent, msg: None)
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    with qtbot.waitSignal(w.analysisFailed, timeout=10000):
+        w.open_files([fixtures / "not-a-docx.doc"], redline_split=False)
+        assert not toolbar_actions(w)["Cases"].isEnabled()
+    actions = toolbar_actions(w)
+    assert actions["Cases"].isEnabled() and actions["Restore"].isEnabled()
+    assert not actions["Review"].isEnabled()  # still nothing to go back to
+
+
+def test_opening_files_from_another_screen_shows_the_progress_on_the_home_screen(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    w.show_settings()
+    screens: list[str] = []
+    w.analysisProgress.connect(lambda percent, step: screens.append(w.current_screen_name()))
+    with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        w.open_files([corpus / "supply-01.docx"], redline_split=False)
+        assert w.current_screen_name() == "home"
+    assert screens and set(screens) == {"home"} and w.current_screen_name() == "review"
+
+
+def test_a_request_made_while_the_engine_loads_shows_the_home_screen_at_once(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    gate = threading.Event()
+
+    def load_engine() -> Engine:
+        gate.wait(30)
+        return app_ctx.engine
+
+    w = MainWindow(replace(app_ctx, engine=None), load_engine=load_engine)
+    qtbot.addWidget(w)
+    w.show_cases()  # the owner asked from the Cases screen ("Add file to this case")
+    w.open_files([corpus / "supply-01.docx"], redline_split=False)
+    assert w.current_screen_name() == "home" and w.home.status_label.text() == "Loading…"
+    gate.set()
+    qtbot.waitUntil(lambda: w.current_screen_name() == "review", timeout=ANALYSIS_TIMEOUT)
+
+
+def test_the_home_screen_is_shown_again_when_a_waiting_request_starts(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    gate = threading.Event()
+
+    def load_engine() -> Engine:
+        gate.wait(30)
+        return app_ctx.engine
+
+    w = MainWindow(replace(app_ctx, engine=None), load_engine=load_engine)
+    qtbot.addWidget(w)
+    w.open_files([corpus / "supply-01.docx"], redline_split=False)
+    w.show_settings()  # the owner looks at something else while the engine loads
+    gate.set()
+    qtbot.waitUntil(w.is_analysing, timeout=ANALYSIS_TIMEOUT)
+    assert w.current_screen_name() == "home"  # the progress is where the owner can see it
+    qtbot.waitUntil(lambda: w.current_screen_name() == "review", timeout=ANALYSIS_TIMEOUT)
+
+
+def drop(zone: QWidget, *paths: Path) -> None:
+    """Drop files on the zone the way a drag does: it enters first, then the drop is delivered."""
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+    entering = QDragEnterEvent(
+        QPointF(5, 5),
+        Qt.DropAction.CopyAction,
+        mime,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(zone, entering)
+    dropped = QDropEvent(
+        QPointF(5, 5),
+        Qt.DropAction.CopyAction,
+        mime,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(zone, dropped)
+
+
+def test_files_that_were_not_opened_are_named_on_the_home_screen(
+    qtbot: QtBot, app_ctx: AppContext, caplog: pytest.LogCaptureFixture
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    w.show()
+    assert w.home.refused_label.isHidden()
+    with caplog.at_level(logging.DEBUG, logger="themask"):
+        drop(w.home.drop_zone, Path("/somewhere/old.doc"), Path("/somewhere/notes.txt"))
+    text = w.home.refused_label.text()
+    assert not w.home.refused_label.isHidden()
+    assert "old.doc" in text and "notes.txt" in text
+    assert "Word (.docx) and PDF" in text and "saved as .docx" in text  # the advice is reachable
+    assert not w.is_analysing()  # nothing was opened
+    assert "old.doc" not in caplog.text and "notes.txt" not in caplog.text  # on screen only
+
+
+def test_the_advice_about_an_old_doc_is_only_given_for_one(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    drop(w.home.drop_zone, Path("/somewhere/notes.txt"))
+    text = w.home.refused_label.text()
+    assert "notes.txt" in text and "Word (.docx) and PDF" in text and ".doc " not in text
+
+
+def test_a_mixed_drop_opens_the_contracts_and_names_the_rest(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        drop(w.home.drop_zone, corpus / "supply-01.docx", Path("/somewhere/old.doc"))
+    assert [s.path.name for s in w.sources] == ["supply-01.docx"]
+    assert "old.doc" in w.home.refused_label.text()  # still there when the owner comes back
+    w.show_home()
+    assert not w.home.refused_label.isHidden()
+
+
+def test_the_next_drop_clears_the_notice_about_the_last(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    drop(w.home.drop_zone, Path("/somewhere/old.doc"))
+    assert "old.doc" in w.home.refused_label.text()
+    drop(w.home.drop_zone, Path("/somewhere/notes.txt"))
+    assert "notes.txt" in w.home.refused_label.text()
+    assert "old.doc" not in w.home.refused_label.text()  # replaced, not added to
+    with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        drop(w.home.drop_zone, corpus / "supply-01.docx")
+    assert w.home.refused_label.isHidden() and w.home.refused_label.text() == ""

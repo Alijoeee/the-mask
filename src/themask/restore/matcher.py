@@ -5,9 +5,14 @@ is put back, a form of it the AI changed waits for the owner's confirmation, and
 not hold is left as written. The MASK's banner and its instruction for the AI hold placeholders as
 examples; a line that is one of them is not planned, because a restore takes the line out.
 ``restore_span`` says which stretch of the text a restore replaces for a placeholder.
+``suggest_cases`` puts the cases in order of fit; the case code in the name of the file, which
+many AI tools keep (``MASKED-<code>.docx``), comes before the placeholders (ruling R103): their
+names repeat from case to case, so they cannot tell which contract a file belongs to.
 """
 
 from __future__ import annotations
+
+import re
 
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case
@@ -17,6 +22,9 @@ from themask.textnorm import normalize
 
 # The MASK's own lines as a line is compared with them: letters and digits only, case folded.
 _OWN_LINES = frozenset(normalize(line) for line in (BANNER_TEXT, AI_INSTRUCTION))
+# The words of a file name: its runs of letters and digits (a hyphen, a dot, a space, an
+# underscore or a bracket ends one).
+_NAME_WORD = re.compile(r"[^\W_]+")
 
 
 def banner_spans(text: str) -> list[tuple[int, int]]:
@@ -93,17 +101,39 @@ def plan_restore(text: str, case: Case) -> list[RestoreItem]:
     return plan
 
 
-def suggest_cases(text: str, cases: list[Case]) -> list[Case]:
+def case_in_file_name(file_name: str, cases: list[Case]) -> Case | None:
+    """The case whose code stands in ``file_name``, if the code of exactly one case does.
+
+    The masked files are named ``MASKED-<code>.docx`` (``MASKED-<code>-2.docx`` ...) and many AI
+    tools keep the name. A code counts as a whole word only: the words of a name are its runs of
+    letters and digits, so ``MASKED-K4F7-1.docx`` has the words MASKED, K4F7, 1 and docx, and
+    K4F7X is not K4F7. Case is not looked at. The codes of two cases in one name tell nothing.
+    """
+    words = {word.casefold() for word in _NAME_WORD.findall(file_name)}
+    named = [case for case in cases if case.id.casefold() in words]
+    return named[0] if len({case.id for case in named}) == 1 else None
+
+
+def suggest_cases(text: str, cases: list[Case], file_name: str | None = None) -> list[Case]:
     """All of ``cases``, the one that fits ``text`` best first.
 
     A case fits better the more of the text's placeholders its key holds, exact or changed, each
     counted once however often it stands in the text; of two that hold as many, the newer comes
     first. Cases that hold none still come back, last and newest first, so that the most recent
     case can be preselected when no case fits. The MASK's own lines do not count.
+
+    With ``file_name``, the name of the file the text is from, the case whose code stands in it
+    (``case_in_file_name``) comes first, whatever the placeholders say (ruling R103); the others
+    follow in their order. Without a name, or with a name that does not point to one case, the
+    order is the placeholders' alone.
     """
     found = {match.placeholder for match in _placeholders(text)}
 
     def held(case: Case) -> int:
         return len(found & {entry.placeholder for entry in case.entries})
 
-    return sorted(cases, key=lambda case: (held(case), case.created_at), reverse=True)
+    ranked = sorted(cases, key=lambda case: (held(case), case.created_at), reverse=True)
+    named = case_in_file_name(file_name, cases) if file_name else None
+    if named is None:
+        return ranked
+    return [named, *(case for case in ranked if case is not named)]

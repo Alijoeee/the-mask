@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from themask.export import SourceDoc
     from themask.model import Case
     from themask.review import ReviewState
+    from themask.ui.app import AppContext
 
 
 def plant(src: Path, part: str, payload: bytes, out: Path) -> Path:
@@ -62,6 +63,14 @@ def reviewed(
     analysis = analyze(combined_text(sources), engine, user_lists, case_lists, seed_entries=key)
     reserved = [entry.placeholder for entry in key]
     return sources, ReviewState.from_analysis(analysis, user_lists, case_lists, reserved)
+
+
+def analysed(ctx: AppContext, paths: list[Path]) -> tuple[list[SourceDoc], ReviewState]:
+    """The files at ``paths`` loaded, analysed and reviewed the way the window does it, with the
+    engine and the owner's lists of ``ctx``: what the export dialog is given.
+    """
+    assert ctx.engine is not None, "the context of a test has its engine"
+    return reviewed(paths, ctx.engine, ctx.user_lists)
 
 
 # What simulate_ai writes, named here rather than taken from the code under test.
