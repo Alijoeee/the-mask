@@ -22,6 +22,15 @@ confirms. Everything else stays parked and is listed for the owner in notes/RULI
    gone; the attribution still decides what the export dialog shows under "left visible on purpose"
    and "also found" — verify what remains.)
 
+## A2. External review findings (owner-supplied 2026-10-19, confirmed by the controller) — MUST-FIX, with their rulings
+
+4. R100 — type-specific grouping identity (amounts/percentages/quantities on the number fold + currency/unit; e-mails and web addresses case-folded with punctuation kept; phones/IBAN/ID alphanumeric): "EUR 1.25" vs "EUR 125", "$100" vs "€100", "a.b@example.com" vs "ab@example.com" must be separate groups and restore to their own values. src/themask/detect/grouping.py `_by_value`, seed matching in pipeline.py; reuse leakcheck's fold rather than a second copy (the review's architectural point: one shared set of value-comparison rules).
+5. R101 — remove every media part and every reference to it (picture bullets in numbering.xml, w:background, theme images, headers/footers, glossary); the export gate fails closed on any remaining media part or image-type relationship. src/themask/docx/cleaner.py `_sweep`/`_referenced`, src/themask/export.py gate.
+6. R102 — scan namespace declarations and non-standard element/attribute names; strip unused declarations. src/themask/leakcheck.py `_element` (lxml nsmap), cleaner.
+7. R103 — (restore screen; sent to the Tasks 22+23 implementer first; the fix wave verifies) file-name code preference in suggest_cases, no preselection on ambiguity, case titles with file names, placeholder → value preview.
+8. R104 — zip limits in DocxPackage.open (entries, per-entry and total expanded size, capped inflate).
+9. README: no stale wording that export/restore are future work (the external review saw such wording on the packaging branch).
+
 ## B. Parked items with a leak, restore or crash angle (verify; fix if Important)
 
 - Task 11 (line 164, "→ final fix wave"): `_restore` in src/themask/docx/revisions.py assumes a *Change
