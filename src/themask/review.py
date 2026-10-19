@@ -196,7 +196,8 @@ class ReviewState:
         group of another type has, that whole group is re-typed: the owner's choice beats the
         analysis's guess, so it takes the next free number of ``type``, and is no longer marked
         to check. Otherwise the occurrences make a new group. Either way the group is switched
-        on, and an occurrence inside a longer finding stays inside it. Raises ValueError for text
+        on, its occurrences of the value switched back on if any was off (F-12), ``value`` is one
+        of its variants, and an occurrence inside a longer finding stays inside it. Raises ValueError for text
         too short to look for, and for text with no occurrence to hide: one that is not in the
         document, runs over a line break (a replacement lies within one paragraph) or is hidden
         already.
@@ -391,6 +392,12 @@ class ReviewState:
             ]
         kind = group.type
         group.enabled = True
+        group.variants.add(value)
+        # The places of the value the owner switched off come back on: they chose it (F-12).
+        key = value_key(kind, value)
+        group.disabled = {
+            i for i in group.disabled if value_key(kind, group.findings[i].text) != key
+        }
         known = {id(f) for f in group.findings}
         taken = Spans(
             [(f.start, f.end) for g in self.groups for f in g.findings]
@@ -409,12 +416,17 @@ class ReviewState:
 
     def _holding(self, value: str, kind: PlaceholderType) -> Group | None:
         """The group that has ``value`` among its forms however it is spelt, as a value of
-        ``kind`` is spelt (``value_key``, ruling R100): of ``kind`` first."""
+        ``kind`` is spelt (``value_key``, ruling R100): its canonical form, its variants or a
+        form it was seen in; of ``kind`` first."""
         key = value_key(kind, value)
         holding = [
             g
             for g in self.groups
-            if key in {value_key(kind, form) for form in (g.canonical, *g.variants)}
+            if key
+            in {
+                value_key(kind, form)
+                for form in (g.canonical, *g.variants, *(f.text for f in g.findings))
+            }
         ]
         return next((g for g in holding if g.type is kind), holding[0] if holding else None)
 

@@ -229,6 +229,58 @@ def test_the_owner_can_hide_a_bare_name_the_sweep_left_visible(lists):
     assert g.findings[1].start == text.index("The Smith") + 4
 
 
+def test_hide_text_switches_a_place_switched_off_back_on(lists):
+    # F-12: the owner unticks the second place, then selects that very text and clicks Hide.
+    text = "Acme Supplies Ltd sells. Acme Supplies Ltd buys. Acme delivers."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [
+            spot(C, text, "Acme Supplies Ltd", source="rule"),
+            spot(C, text, "Acme Supplies Ltd", 1, source="sweep"),
+            spot(C, text, "Acme", 2, source="sweep"),
+        ],
+        ["Acme"],
+    )
+    review = hand_made(text, [acme], lists)
+    review.set_occurrence_enabled(acme.id, 1, False)
+    assert review.hide_text("Acme Supplies Ltd", C).placeholder == "[COMPANY_1]"
+    assert review.groups[0].disabled == set()
+    assert [(r.start, r.end) for r in review.mask_plan().replacements] == [
+        (0, 17),
+        (25, 42),
+        (49, 53),
+    ]
+
+
+def test_always_hide_after_a_never_hide_of_the_short_form_hides_it_again(lists):
+    # F-12: the owner never-hides "Acme", then changes their mind in the same review.
+    text = "Acme Supplies Ltd sells. Acme Supplies Ltd buys. Acme delivers."
+    acme = group(
+        C,
+        "[COMPANY_1]",
+        "Acme Supplies Ltd",
+        [
+            spot(C, text, "Acme Supplies Ltd", source="rule"),
+            spot(C, text, "Acme Supplies Ltd", 1, source="sweep"),
+            spot(C, text, "Acme", 2, source="sweep"),
+        ],
+        ["Acme"],
+    )
+    review = hand_made(text, [acme], lists)
+    review.add_never_hide("Acme")
+    assert review.groups[0].disabled == {2}
+    review.add_always_hide("Acme")
+    assert review.groups[0].disabled == set() and "Acme" in review.groups[0].variants
+    assert [(r.start, r.end) for r in review.mask_plan().replacements] == [
+        (0, 17),
+        (25, 42),
+        (49, 53),
+    ]
+    assert placeholders(review) == ["[COMPANY_1]"]  # it joined the group that has the form
+
+
 def test_hide_text_switches_a_group_back_on(review):
     flagged = review.groups[3]
     review.set_group_enabled(flagged.id, False)
