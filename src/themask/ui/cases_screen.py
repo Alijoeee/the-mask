@@ -159,12 +159,10 @@ class CasesScreen(QWidget):
         try:
             summaries = store.list()
         except MaskError as error:
-            self._show([], [])
-            set_status(self.status_label, error.user_message, problem=True)
+            self._show_unreadable(error.user_message)
             return
         except OSError as error:
-            self._show([], [])
-            set_status(self.status_label, f"{NOT_READ} {error.strerror or error}", problem=True)
+            self._show_unreadable(f"{NOT_READ} {error.strerror or error}")
             return
         set_status(self.status_label, "")
         self._show(summaries, [path.name for path in store.unreadable])
@@ -184,6 +182,14 @@ class CasesScreen(QWidget):
         header.setSectionResizeMode(FILES_COLUMN, QHeaderView.ResizeMode.Stretch)
         table.itemSelectionChanged.connect(self._update_buttons)
         return table
+
+    def _show_unreadable(self, message: str) -> None:
+        """Say that the store cannot be read. It is not empty as far as anyone knows, so the
+        screen does not say there are no cases.
+        """
+        self._show([], [])
+        self.empty_label.hide()
+        set_status(self.status_label, message, problem=True)
 
     def _show(self, summaries: list[CaseSummary], damaged: list[str]) -> None:
         self.table.clearSelection()

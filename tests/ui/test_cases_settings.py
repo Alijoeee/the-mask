@@ -423,6 +423,7 @@ def test_a_store_that_cannot_be_read_is_said_in_the_screen(
     c = CasesScreen(app_ctx)  # no dialog: the window opens on this screen's neighbours
     qtbot.addWidget(c)
     assert c.status_label.text() == keychain and c.table.rowCount() == 0
+    assert not c.empty_label.isVisibleTo(c)  # "No cases yet" would not be true: they cannot be read
     monkeypatch.undo()  # the Keychain is unlocked
     app_ctx.case_store.save(a_case("K4F7"))
     c.refresh()
@@ -439,6 +440,7 @@ def test_a_folder_that_cannot_be_read_is_said_in_words(
     c = CasesScreen(app_ctx)
     qtbot.addWidget(c)
     assert "Permission denied" in c.status_label.text() and "/Users" not in c.status_label.text()
+    assert not c.empty_label.isVisibleTo(c)
 
 
 # ---- the Settings screen: the brief's ---------------------------------------------------------
