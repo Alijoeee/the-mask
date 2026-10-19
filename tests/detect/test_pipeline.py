@@ -272,6 +272,31 @@ def test_no_finding_runs_from_one_line_into_the_next(lists):
     assert_one_replacement_each(a)
 
 
+def test_a_finding_is_cut_at_a_note_as_at_a_line_break(lists):
+    # Ruling R113: the model read the company and the note that follows it as one name.
+    t = "Acme Supplies Ltd[image removed] sells. [embedded object removed]Northwind buys."
+    fake = FakeEngine(
+        (P, "Acme Supplies Ltd[image", 0.85, "model"),
+        (C, "removed]Northwind", 0.7, "model"),
+        (C, "Acme Supplies Ltd", 0.95, "rule"),
+    )
+    a = analyze(one(t), fake, lists)
+    assert [(g.type, g.canonical) for g in a.groups] == [(C, "Acme Supplies Ltd"), (C, "Northwind")]
+    assert_one_replacement_each(a)
+    assert (
+        masked(a) == "[COMPANY_1][image removed] sells. [embedded object removed][COMPANY_2] buys."
+    )
+
+
+def test_the_real_engine_reads_a_name_beside_a_note_as_the_name(engine, lists):
+    a = analyze(
+        one("Acme Supplies Ltd[image removed] sells to Brightwater Foods Ltd."), engine, lists
+    )
+    assert all("[" not in g.canonical and "[" not in f.text for g in a.groups for f in g.findings)
+    (acme,) = [g for g in a.groups if g.canonical == "Acme Supplies Ltd"]
+    assert acme.type is C and acme.placeholder == "[COMPANY_1]"
+
+
 def test_edges_that_belong_to_the_sentence_are_trimmed(lists):
     fake = FakeEngine((C, '"Northwind Trading B.V. …', 0.85, "model"))
     a = analyze(one('See "Northwind Trading B.V. … here.'), fake, lists)

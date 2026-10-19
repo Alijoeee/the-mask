@@ -1524,6 +1524,72 @@ def test_pictures_in_headers_and_footers_count_too() -> None:
     assert_consistent(pkg)
 
 
+def test_a_note_stands_apart_from_the_text_beside_it() -> None:
+    # Ruling R113: the model read "Acme Supplies Ltd[image removed]" as one name. The note is a
+    # run of its own, with a space before it or after it where the text does not end or start
+    # with one; its wording stays.
+    header = para(run("Acme Supplies Ltd"), f"<w:r>{picture('rId1')}</w:r>")
+    pkg = package(
+        para(run("Body")),
+        rels=[(HEADER, "header1.xml")],
+        parts={
+            **in_header(header),
+            "word/_rels/header1.xml.rels": rels_xml([(IMAGE, "media/logo.png")]),
+            "word/media/logo.png": b"PNG",
+        },
+        types={"word/header1.xml": HEADER_TYPE},
+    )
+    clean(pkg)
+    assert text_of(pkg) == f"Body\nAcme Supplies Ltd {IMAGE_NOTE}"
+    runs = pkg.xml("word/header1.xml").findall(".//w:r", NS)
+    assert [[t.text for t in r.findall("w:t", NS)] for r in runs] == [
+        ["Acme Supplies Ltd"],
+        [" ", IMAGE_NOTE],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "expected"),
+    [
+        ("Logo:", "Acme", f"Logo: {IMAGE_NOTE} Acme"),  # a space on either side
+        ("See ", " above", f"See {IMAGE_NOTE} above"),  # none where the text has one
+        ("", "Acme", f"{IMAGE_NOTE} Acme"),  # none at the paragraph's start
+        ("Acme\t", "", f"Acme\t{IMAGE_NOTE}"),  # a tab is whitespace
+    ],
+)
+def test_a_note_is_spaced_by_what_stands_beside_it(before: str, after: str, expected: str) -> None:
+    text_before = (
+        "<w:t>Acme</w:t><w:tab/>"
+        if before == "Acme\t"
+        else f'<w:t xml:space="preserve">{before}</w:t>'
+    )
+    pkg = package(
+        para(f'<w:r>{text_before}{picture("rId1")}<w:t xml:space="preserve">{after}</w:t></w:r>'),
+        rels=[(IMAGE, "media/a.png")],
+        parts={"word/media/a.png": b"PNG"},
+    )
+    clean(pkg)
+    assert text_of(pkg) == expected
+    note = next(
+        t for t in pkg.xml("word/document.xml").iter(f"{{{NS['w']}}}t") if t.text == IMAGE_NOTE
+    )
+    assert all(t.text in (" ", IMAGE_NOTE) for t in note.getparent().findall("w:t", NS))
+
+
+def test_every_kind_of_note_is_spaced_the_same_way() -> None:
+    equation = "<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>"
+    embedded = '<w:object><v:shape><v:imagedata r:id="rId1"/></v:shape><o:OLEObject r:id="rId2"/></w:object>'
+    pkg = package(
+        para(
+            run("Fee:"), f"<w:r>{embedded}</w:r>", run("per"), f"<w:r>{equation}</w:r>", run("unit")
+        ),
+        rels=[(IMAGE, "media/a.wmf"), (OLE, "embeddings/o.bin")],
+        parts={"word/media/a.wmf": b"WMF", "word/embeddings/o.bin": b"OLE"},
+    )
+    clean(pkg)
+    assert text_of(pkg) == f"Fee: {OBJECT_NOTE} per {EQUATION_NOTE} unit"
+
+
 def test_a_picture_amid_text_leaves_the_text_around_it() -> None:
     pkg = package(
         para(f"<w:r><w:t>See </w:t>{picture('rId1')}<w:t> above</w:t></w:r>"),

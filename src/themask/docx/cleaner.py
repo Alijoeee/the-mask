@@ -39,7 +39,10 @@ Then each text part (the document, the headers, the footers, the notes), in read
 7. Pictures, charts (Word 2016's too), diagrams, ink and embedded objects become a note and their
    parts go. A drawing that holds a text box as well (ruling R28: a group of a picture and a text
    box, a text box filled with a picture) loses only the picture and the note stands beside it.
-   Equations (ruling R17) and embedded documents (``w:altChunk``) become a note too. Then the
+   Equations (ruling R17) and embedded documents (``w:altChunk``) become a note too. A note is a
+   run of its own, with a space before it where the text before it does not end in one and a
+   space after it where the text after it does not start with one (ruling R113): "Acme Supplies
+   Ltd [image removed]", never "Acme Supplies Ltd[image removed]", which reads as one name. Then the
    drawings that are left lose their descriptions and titles, in a group's shapes and in VML
    shapes too, and get the names Shape1, Shape2 ... (ruling R19), numbered after the pictures so
    that a picture, which is gone, takes no number. What binds a control to custom XML and what
@@ -79,6 +82,7 @@ document protection in the settings.
 
 from __future__ import annotations
 
+import copy
 import itertools
 import posixpath
 import re
@@ -91,12 +95,9 @@ from lxml import etree
 
 from themask.docx.package import CONTENT_TYPES, DOCUMENT, NS, RELS_NS, TYPES_NS, DocxPackage
 from themask.errors import UnsupportedFileError
-from themask.instruction import IMAGE_NOTE, OBJECT_NOTE
+from themask.instruction import ALTCHUNK_NOTE, EQUATION_NOTE, IMAGE_NOTE, OBJECT_NOTE
 
-# What stands in for an equation and for an embedded document: the reader does not read the
-# first (``m:t``) and cannot read the second, so neither can be masked, and both are removed.
-EQUATION_NOTE = "[equation removed]"
-ALTCHUNK_NOTE = "[embedded content removed]"
+__all__ = ["ALTCHUNK_NOTE", "EQUATION_NOTE", "CleanReport", "clean", "comment_parts"]
 
 # The prefixes used in find() and xpath(), with the two the package leaves out.
 _NAMESPACES = {
@@ -115,6 +116,16 @@ def _q(prefix: str, name: str) -> str:
 
 # WordprocessingML.
 _P, _R, _T, _RPR = _q("w", "p"), _q("w", "r"), _q("w", "t"), _q("w", "rPr")
+_XML_SPACE = _q("xml", "space")
+# What a paragraph shows, for the spacing of a note: its texts, and these characters.
+_SHOWN_TEXTS = frozenset({_T, _q("w", "instrText")})
+_SHOWN_CHARACTERS = {
+    _q("w", "tab"): "\t",
+    _q("w", "ptab"): "\t",
+    _q("w", "br"): "\n",
+    _q("w", "cr"): "\n",
+    _q("w", "noBreakHyphen"): "\N{NON-BREAKING HYPHEN}",
+}
 _ID, _VAL = _q("w", "id"), _q("w", "val")
 _VANISH, _SPEC_VANISH = _q("w", "vanish"), _q("w", "specVanish")
 _COMMENT, _COMMENT_REFERENCE = _q("w", "comment"), _q("w", "commentReference")
@@ -724,36 +735,107 @@ def _replace_embedded_documents(root: etree._Element, report: CleanReport) -> No
 
 
 def _replace_with_note(element: etree._Element, text: str, *, paragraph: bool = False) -> None:
-    """Puts a note where ``element`` was: a ``w:t`` in the run it is in, else a new run."""
-    element.getparent().replace(element, _note(element, text, paragraph))
+    """Puts a note where ``element`` was: a run of its own (a paragraph of its own if asked)."""
+    if paragraph:
+        wrapper = element.makeelement(_P, {})
+        wrapper.append(_note(element, text))
+        element.getparent().replace(element, wrapper)
+        return
+    _put_note(element, _note(element, text), keep=False)
 
 
 def _add_note_after(element: etree._Element, text: str) -> None:
     """Puts a note beside ``element``, which stays."""
-    element.addnext(_note(element, text, False))
+    _put_note(element, _note(element, text), keep=True)
 
 
-def _note(element: etree._Element, text: str, paragraph: bool) -> etree._Element:
-    """A ``w:t`` with ``text`` to put where ``element`` is: in a run, in a paragraph if asked."""
-    note = element.makeelement(_T, {})
-    note.text = text
-    if paragraph or not _in_run(element):
-        run = element.makeelement(_R, {})
-        run.append(note)
-        note = run
-    if paragraph:
-        wrapper = element.makeelement(_P, {})
-        wrapper.append(note)
-        note = wrapper
-    return note
+def _note(element: etree._Element, text: str) -> etree._Element:
+    """A run holding the note ``text``, with a space before it where the paragraph's text before
+    ``element`` does not end in one and a space after it where the text after ``element`` does
+    not start with one (ruling R113)."""
+    before, after = _text_around(element)
+    run = element.makeelement(_R, {})
+    if before and not before[-1].isspace():
+        _add_text(run, " ")
+    _add_text(run, text)
+    if after and not after[0].isspace():
+        _add_text(run, " ")
+    return run
 
 
-def _in_run(element: etree._Element) -> bool:
-    """Whether ``element`` is content of a run, possibly through an ``mc:AlternateContent``."""
+def _add_text(run: etree._Element, text: str) -> None:
+    node = etree.SubElement(run, _T)
+    node.text = text
+    if text != text.strip():
+        node.set(_XML_SPACE, "preserve")
+
+
+def _put_note(element: etree._Element, note: etree._Element, *, keep: bool) -> None:
+    """Puts the run ``note`` right after ``element``'s place, as a run of its own, and takes
+    ``element`` out unless ``keep``.
+
+    When ``element`` is content of a run (through an ``mc:AlternateContent`` or not), the run is
+    cut there: what follows ``element`` in it goes into a run of its own with the same
+    properties, and a run left with nothing but its properties goes. An ``mc:AlternateContent``
+    stays for ``_remove_fallbacks``, which counts its second copy.
+    """
+    run = _run_of(element)
+    if run is None:
+        if keep:
+            element.addnext(note)
+        else:
+            element.getparent().replace(element, note)
+        return
+    top = element
+    while top.getparent() is not run:
+        top = top.getparent()
+    following = [child for child in run if run.index(child) > run.index(top)]
+    run.addnext(note)
+    if following:
+        tail = run.makeelement(_R, {})
+        properties = run.find(_RPR)
+        if properties is not None:
+            tail.append(copy.deepcopy(properties))
+        tail.extend(following)
+        note.addnext(tail)
+    if not keep:
+        element.getparent().remove(element)
+        if _is_empty_run(run):
+            _remove(run)
+
+
+def _run_of(element: etree._Element) -> etree._Element | None:
+    """The run ``element`` is content of, possibly through an ``mc:AlternateContent``."""
     parent = element.getparent()
     while parent is not None and parent.tag in _MC_WRAPPERS:
         parent = parent.getparent()
-    return parent is not None and parent.tag == _R
+    return parent if parent is not None and parent.tag == _R else None
+
+
+def _text_around(element: etree._Element) -> tuple[str, str]:
+    """The text of ``element``'s paragraph before it and after it, as the reader shows it;
+    nothing on either side when it is in no paragraph."""
+    paragraph = next(element.iterancestors(_P), None)
+    if paragraph is None:
+        return "", ""
+    before: list[str] = []
+    after: list[str] = []
+    pieces = before
+    for node in paragraph.iter():
+        if node is element:
+            pieces = after
+            continue
+        if node.tag not in _SHOWN_TEXTS and node.tag not in _SHOWN_CHARACTERS:
+            continue
+        ancestors = list(node.iterancestors())
+        # What is inside the element goes with it; a fallback copy and the paragraphs of a text
+        # box are not this paragraph's text, as the reader reads it.
+        if (pieces is after and element in ancestors) or any(
+            a.tag == _FALLBACK or (a.tag == _P and a is not paragraph) for a in ancestors
+        ):
+            continue
+        pieces.append(node.text or "" if node.tag in _SHOWN_TEXTS else _SHOWN_CHARACTERS[node.tag])
+    return "".join(before), "".join(after)
 
 
 # ---- the second copy of each drawing (ruling R16) ------------------------------------------------
