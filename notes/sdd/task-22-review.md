@@ -19,6 +19,8 @@ files; kept at `/tmp/claude-0/-home-user-the-mask/12765d91-280c-5da7-8bff-4a2c38
 
 ## Verdict
 
+*(Superseded by "Re-review round 1" at the end of this file: I-1 is addressed, APPROVED.)*
+
 **NEEDS FIXES: one Important item (I-1, R103 (b) is only partly met), no Critical.** Everything else in the
 two briefs, the dispatch decisions and R103 is met. No leak path and no crash path was found, and I-1 is the
 only way I found for a case other than the owner's choice to end up in a restored file. The code is careful and
@@ -342,3 +344,68 @@ All from `/home/user/the-mask-worktrees/task-22`, with `uv run --no-sync`, `-p n
 | the same with `STRESS_KIND=windows` and the third stress file (six times) | `exit 139` five times (`Fatal Python error: Segmentation fault`, worker `Garbage-collecting`, GUI thread in `loop.exec()`), `exit 0` once (`rounds=23`) |
 
 NEEDS FIXES: I-1 - a case the owner chose by hand (in the case box or with "Restore from this case") is replaced by another case that holds more of the placeholders, without a question (`restore_screen.py:509-516`, reached from `load_file` :422 and `_text_changed` :603); R103 (b) "a hand pick stays" and the accepted reading "a hand pick lasts until its restore or the next file" are only partly met. Fix: honour `chosen` always in `_order_cases`, update the two tests that assert the override (:405, :678), add the Cases-screen sequence as a test; or park it with a `Ruling:` line.
+
+## Re-review round 1
+
+Scope (lean, as asked): the fix commit `0cc94ca` on `task-22` (FIX_BASE `49d69ca`), diff
+`/tmp/claude-0/-home-user-the-mask/12765d91-280c-5da7-8bff-4a2c38dc5193/scratchpad/review/task22-fix1-49d69ca..0cc94ca.diff` (493 lines, three files: `src/themask/ui/restore_screen.py`,
+`tests/ui/test_restore_screen.py`, `README.md`), against ruling R106 (refines R103 (b): the owner's hand-chosen
+case is never replaced by the screen; when another case holds more of the file's placeholders the screen says
+so under the combo, "Another case fits this file — check the case.", and leaves Restore enabled). Worktree
+read-only as before: `git status` is clean at `0cc94ca`. New probes file:
+`/tmp/claude-0/-home-user-the-mask/12765d91-280c-5da7-8bff-4a2c38dc5193/scratchpad/review/t22/probes/test_probe_fix1.py`; benchmark: `/tmp/claude-0/-home-user-the-mask/12765d91-280c-5da7-8bff-4a2c38dc5193/scratchpad/review/t22/probes/bench_keystroke.py`.
+
+**I-1: ADDRESSED.**
+
+What the code does now (read in full, `restore_screen.py`):
+- `_order_cases(chosen)` (:495-528) honours `chosen` always: the `keep = None` branch and the `insist` parameter are gone
+  (`grep insist` over `src` and `tests`: nothing left). The only things that end a pick are the ruled ones: its restore
+  (`_spend_choice`) and the next file (`load_file` :415-417, unchanged; a pick made before any file, or asked for in the
+  Cases screen, still counts for the first / next file).
+- `better_fit_label` (new, exact words in `BETTER_FIT`, object name "notice") is set in `_update_state` (:594), which every
+  re-plan ends with, so it follows the combo however the selection changed (click, `setCurrentIndex`, Cases screen,
+  a store that changed). It never changes the selection and never touches the Restore buttons. It is hidden when
+  nothing is selected, so it cannot show together with `choose_label`.
+- R103 (b) is intact: `_is_a_guess` became a method with the same rule (ties are asked, a file name that points to a case
+  decides, a case that holds none of the placeholders is no fit); `_fit_of` memoises "how many placeholders each case
+  holds of the ranked text" and `_order_cases` clears the memo at every ranking, so a changed text, a new file or a
+  changed store never meets a stale count.
+
+My probes on the new code (the first review's probes B and C, plus the Cases-screen sequence through the real window):
+
+| Probe | On `49d69ca` | On `0cc94ca` |
+|---|---|---|
+| B: `refresh_cases("B2B2")` ("Restore from this case"), then `load_file` of a file A1A1 fits better | combo shows A1A1 | **B2B2**, notice shown with the exact words, Restore enabled, preview `[PERSON_1] → John Smith` (B2B2's pair); the restore wrote with B2B2 |
+| B2: the same, file loaded first and the request second | B2B2 stayed | A1A1 before asking, **B2B2** after, notice shown: the order no longer matters |
+| C: paste `[PERSON_1] and [COMPANY_1]`, hand-pick B2B2, append a line | B2B2 -> A1A1 | **B2B2 -> B2B2**, notice stays, Restore text enabled and wrote `John Smith and [COMPANY_1]` (B2B2's value) |
+| W: Cases table row of B2B2 -> click "Restore from this case" -> Restore screen -> drop the file (real `MainWindow` signals) | not run | **B2B2** selected on the Restore screen, stays after the file, notice shown |
+
+Breakage hunt in this fix diff only:
+- Stale memo: a case saved again under the same id (the "add file to a case" path) — A1A1 picked while B2B2 fits better
+  (notice shown), A1A1 re-saved holding both placeholders, `refresh_cases()`: notice gone; saved back to one: notice back
+  (probe N1). No stale count.
+- A case chosen by the file name that fits worse keeps its place and shows the notice (reading 1 of the implementer);
+  picking the better case clears it (probe N3).
+- Cost: the notice looks at every case once per ranking. One more keystroke in the paste box with 40 cases of 60 entries:
+  23 ms for a 20 KB answer, 82 ms for 100 KB (`bench_keystroke.py`). No concern.
+- The diff adds no logging, no import, no file or network use; the notice is a constant string. `ruff check`: `All checks
+  passed!`; `ruff format --check`: `134 files already formatted`; `mypy src`: `Success: no issues found in 52 source files`;
+  `git diff --check 49d69ca..0cc94ca`: clean.
+- Tests: the two tests that asserted the override were turned round (the pick stays, the notice comes and goes), and
+  twelve new ones cover both orders, the paste-box edit followed by a restore, a Word restore with the chosen case, and the
+  notice following the combo, the store and the file name. `uv run --no-sync pytest tests/ui -q -p no:cacheprovider`:
+  `353 passed in 59.21s` (341 before + 12 new). I did not rerun the whole suite (outside the asked scope; the implementer
+  reports `3053 passed, 6 skipped`).
+
+No new Critical or Important finding.
+
+Parked, not new and not asked for:
+- **A pick made for one pasted text stays for the next pasted text** (probe N2: pick A1A1 on a tie, replace the text by
+  another that ties: A1A1 stays, no notice, Restore text enabled). This was so before the fix and is the point the
+  implementer and my first review left open; the notice covers the strictly-better case only. If the controller wants it
+  closed, end the pick when the paste box is emptied, or ask again when the text is replaced (a ruling).
+- With a file and pasted text on the screen the notice speaks about whichever the cases were last ranked on (the
+  implementer's reading 3).
+- M-1 to M-11 of the first review are untouched, as scoped.
+
+APPROVED
