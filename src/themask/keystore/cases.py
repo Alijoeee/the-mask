@@ -137,7 +137,6 @@ class CaseStore:
         leftovers = self.dir.glob(f"{TEMP_PREFIX}*{TEMP_SUFFIX}")
         for path in [*self._files(), *leftovers]:
             path.unlink(missing_ok=True)
-        self.unreadable = []  # they are gone with the rest
 
     def delete_unreadable(self, name: str) -> None:
         """Delete the case file called ``name`` that ``list`` could not open (see ``unreadable``).

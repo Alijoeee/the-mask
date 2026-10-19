@@ -19,7 +19,9 @@ that change (ruling R96). What was not confirmed is left as the AI wrote it and 
 needing a check, as is a place that cannot be put back. The restore of a file is always given the
 fingerprint the plan holds (ruling R96); if the file was saved by another program meanwhile,
 nothing is restored, the owner is told in the words of the error, and the list is made again from
-the file as it is now. The plan of the pasted text is made again whenever the text changes.
+the file as it is now. So it is for a file that could not be read when the list was made: with
+no plan there is no fingerprint to give. The plan of the pasted text is made again whenever the
+text changes.
 
 A restored Word file is a new file next to the AI's (``restore_docx`` never writes over a file);
 the result panel names it and shows its folder in Finder. Restored text is shown, read-only,
@@ -58,7 +60,7 @@ from themask.restore.docx_restore import FILE_CHANGED_MESSAGE, plan_docx, restor
 from themask.restore.matcher import plan_restore, suggest_cases
 from themask.restore.report import TRACKED_CHANGE, RestoreItem, RestoreReport
 from themask.restore.text import restore_text
-from themask.ui.cases_screen import format_moment
+from themask.ui.cases_screen import NOT_READ, format_moment
 from themask.ui.drop_zone import DropZone
 from themask.ui.export_dialog import reveal
 from themask.ui.theme import set_status
@@ -73,11 +75,10 @@ CHANGED = "These placeholders were changed by the AI — restore them?"
 NO_CASES = (
     "There is no saved case to restore with. A case is made each time you export a masked file."
 )
-NOT_READ = "The saved cases could not be read:"
 ONLY_WORD = "Only a Word (.docx) file can be restored."
 ONE_AT_A_TIME = "One file at a time: the first one was taken."
 FILE_NOT_READ = "The file could not be read:"
-NOT_WRITTEN = "The restored file could not be written:"
+NOT_RESTORED = "The file could not be restored:"
 UNEXPECTED = "Something went wrong while restoring."
 
 TRACKED_NOTE = f"{TRACKED_CHANGE}: this stands for every placeholder in that change"
@@ -288,6 +289,7 @@ class RestoreScreen(QWidget):
         result_buttons.addStretch(1)
         panel.addLayout(result_buttons)
         panel.addWidget(self.result_box, 1)
+        panel.addStretch(0)  # a Word restore has no text to show: the lines stay together
         self.result_panel.hide()
 
         top = QHBoxLayout()
@@ -347,8 +349,9 @@ class RestoreScreen(QWidget):
     def refresh_cases(self, select: str | None = None) -> None:
         """Load the saved cases again and put them in order for what is on the screen.
 
-        ``select`` is the case the owner asked for in the Cases screen: it is selected when it is
-        there, and kept for the next file unless another case fits that file better.
+        A case the owner chose stays selected, however it fits what is on the screen: only a new
+        file or text that another case fits better takes the choice back. ``select`` is the case
+        the owner asked for in the Cases screen; it counts as chosen when it is there.
         """
         try:
             cases = self.ctx.case_store.load_all()
@@ -364,7 +367,7 @@ class RestoreScreen(QWidget):
         wanted = (
             select if select in self._cases else (self._selected_id() if self._manual else None)
         )
-        self._order_cases(wanted)
+        self._order_cases(wanted, insist=True)
         self._case_changed()  # the cases may have changed under the same id
 
     # ---- building the screen ---------------------------------------------------------------
@@ -401,10 +404,11 @@ class RestoreScreen(QWidget):
     def _owner_chose_case(self, index: int) -> None:
         self._manual = True
 
-    def _order_cases(self, chosen: str | None) -> bool:
+    def _order_cases(self, chosen: str | None, insist: bool = False) -> bool:
         """Put the cases in order of fit for the text they were last asked about, and select the
-        best fit, or ``chosen`` when it holds as many of the text's placeholders as the best fit.
-        Returns whether that is another case than the one that was selected.
+        best fit, or ``chosen`` when it holds as many of the text's placeholders as the best fit
+        (or however many it holds, with ``insist``). Returns whether that is another case than
+        the one that was selected.
         """
         before = self._selected_id()
         ranked = suggest_cases(self._ranked_on, list(self._cases.values()))
@@ -412,6 +416,7 @@ class RestoreScreen(QWidget):
         keep = chosen if chosen in self._cases else None
         if (
             keep is not None
+            and not insist
             and best is not None
             and _held(self._cases[keep], self._ranked_on) < _held(best, self._ranked_on)
         ):
@@ -505,8 +510,16 @@ class RestoreScreen(QWidget):
         file the list was made from; else say so and show the list again, made from the file as
         it is now.
         """
-        confirmed = _confirmation(self.altered_list)
         sha256 = self._file_sha256
+        if sha256 is None:
+            # No plan was made for this case (the file could not be read then). A restore is
+            # always given the fingerprint of the plan it follows (ruling R96), so the file is
+            # looked at again, and the owner sees the list before it is restored.
+            self._replan_file()
+            if self._file_sha256 is not None:
+                set_status(self.status_label, FILE_CHANGED_MESSAGE, problem=True)
+            return
+        confirmed = _confirmation(self.altered_list)
 
         def restore() -> tuple[Path, RestoreReport]:
             try:
@@ -516,7 +529,7 @@ class RestoreScreen(QWidget):
                     self._replan_file()  # the message is said by the caller, after this
                 raise
 
-        done = self._guarded(restore, NOT_WRITTEN)
+        done = self._guarded(restore, NOT_RESTORED)
         if done is not None:
             target, report = done
             self._show_result(report, target, None)

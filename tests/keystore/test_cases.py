@@ -422,16 +422,6 @@ def test_delete_all_of_a_folder_that_does_not_exist(case_store: CaseStore) -> No
     assert not case_store.dir.exists()
 
 
-def test_delete_all_forgets_the_files_that_could_not_be_opened(
-    case_store: CaseStore, keystore: KeyStore, sample_case: Case
-) -> None:
-    plant(case_store, keystore, sample_case, DAMAGED_FILES["empty"])
-    case_store.list()
-    assert case_store.unreadable
-    case_store.delete_all()
-    assert case_store.unreadable == []  # no listing needed to know they are gone
-
-
 def test_delete_unreadable_removes_that_file_and_only_that_file(
     case_store: CaseStore, keystore: KeyStore, sample_case: Case
 ) -> None:

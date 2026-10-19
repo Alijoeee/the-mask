@@ -314,6 +314,24 @@ def test_a_case_file_that_cannot_be_opened_is_listed_and_can_be_deleted(
     assert ids(c) == ["K4F7"]  # the case that opens is still there
 
 
+def test_a_copy_of_a_case_file_under_another_name_is_listed_and_can_be_deleted(
+    qtbot: QtBot, app_ctx: AppContext, agree: list[str]
+) -> None:
+    original = app_ctx.case_store.save(a_case("K4F7"))
+    copy = original.with_name("K4F7 (copy).mask")  # made in Finder: no purge ever finds it
+    copy.write_bytes(original.read_bytes())
+    c = CasesScreen(app_ctx)
+    qtbot.addWidget(c)
+    assert ids(c) == ["K4F7"]  # the case is listed once
+    assert [c.unreadable_list.item(n).text() for n in range(c.unreadable_list.count())] == [
+        "K4F7 (copy).mask"
+    ]
+    c.unreadable_list.setCurrentRow(0)
+    qtbot.mouseClick(c.delete_unreadable_button, CLICK)
+    assert not copy.exists() and original.exists()  # only the copy went
+    assert ids(c) == ["K4F7"] and c.unreadable_list.count() == 0
+
+
 def test_a_no_keeps_the_damaged_file(qtbot: QtBot, app_ctx: AppContext, refuse: list[str]) -> None:
     bad = damaged_file(app_ctx)
     c = CasesScreen(app_ctx)

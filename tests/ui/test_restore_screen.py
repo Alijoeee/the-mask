@@ -362,6 +362,31 @@ def test_a_file_that_changed_under_the_list_is_not_restored_by_that_list(
     assert screen.status_label.isHidden()
 
 
+def test_a_file_that_was_not_planned_is_never_restored_without_the_fingerprint(
+    qtbot: QtBot,
+    screen: RestoreScreen,
+    make_docx: MakeDocx,
+    file_restores: list[tuple[object, object]],
+) -> None:
+    ai = make_docx(body("The fee is AMOUNT_1."))
+    screen.load_file(ai)
+    good = ai.read_bytes()
+    ai.write_bytes(b"not a Word file")  # the plan of the next case change cannot be made
+    screen.case_combo.setCurrentIndex(-1)
+    screen.case_combo.setCurrentIndex(0)
+    assert not screen.status_label.isHidden() and screen.altered_list.count() == 0
+    ai.write_bytes(good)  # and now the file reads again: but nobody has seen what is in it
+    with qtbot.waitSignal(screen.restoreFinished, timeout=30000):
+        qtbot.mouseClick(screen.restore_button, CLICK)
+    assert file_restores == []  # a restore is always given the fingerprint of a plan (ruling R96)
+    assert screen.status_label.text() == FILE_CHANGED_MESSAGE
+    assert not restored_beside(ai).exists() and not screen.result_panel.isVisibleTo(screen)
+    assert screen.altered_list.count() == 1  # the file as it is now, for the owner to look at
+    click_restore(qtbot, screen)
+    assert [sha for _, sha in file_restores] == [hashlib.sha256(good).hexdigest()]
+    assert text_of(restored_beside(ai)) == "The fee is AMOUNT_1."  # nothing was confirmed
+
+
 def test_typing_in_the_paste_box_leaves_the_ticks_of_the_file_alone(
     screen: RestoreScreen, make_docx: MakeDocx
 ) -> None:
@@ -680,6 +705,22 @@ def test_the_case_asked_for_in_the_cases_screen_is_selected(
     assert s.case_combo.currentData() == "A1A1"
 
 
+def test_the_case_asked_for_in_the_cases_screen_wins_over_a_better_fit(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    two_cases(app_ctx)  # A1A1 holds the person and the company, B2B2 the person only
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(make_docx(body("PERSON_1 signs for COMPANY_1.")))
+    assert s.case_combo.currentData() == "A1A1" and s.altered_list.count() == 2
+    s.refresh_cases("B2B2")  # "Restore from this case": the owner asked for this one
+    assert s.case_combo.currentData() == "B2B2"
+    assert s.altered_list.count() == 1  # the file is read again for it
+    assert s.file_fit_label.text() == "1 of 2 placeholders found in this case."
+    s.refresh_cases()  # a visit to the screen later keeps the owner's choice
+    assert s.case_combo.currentData() == "B2B2"
+
+
 def test_refresh_shows_the_cases_the_store_holds_now(qtbot: QtBot, app_ctx: AppContext) -> None:
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
@@ -813,6 +854,19 @@ def test_a_restore_that_fails_says_why_and_still_finishes(
     text = screen.status_label.text()
     assert shown in text and "/Users" not in text and not screen.status_label.isHidden()
     assert not screen.result_panel.isVisibleTo(screen)  # no result: nothing was restored
+
+
+def test_a_file_that_is_gone_when_restore_is_clicked_is_not_called_unwritable(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    ai = make_docx(body("[PERSON_1]"))
+    screen.load_file(ai)
+    ai.unlink()  # the AI's file was moved away after it was chosen
+    with qtbot.waitSignal(screen.restoreFinished, timeout=5000):
+        qtbot.mouseClick(screen.restore_button, CLICK)
+    text = screen.status_label.text()
+    assert "No such file" in text and "written" not in text  # it was not read, not written
+    assert str(ai.parent) not in text and not screen.result_panel.isVisibleTo(screen)
 
 
 def test_an_unexpected_error_is_a_plain_sentence_and_only_its_type_is_logged(

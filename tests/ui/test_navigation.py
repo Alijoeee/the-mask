@@ -10,7 +10,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QToolBar
 
+from themask.docx.package import DocxPackage
+from themask.docx.reader import extract_text
 from themask.model import Case, KeyEntry, PlaceholderType
+from themask.placeholders import find_placeholders
 from themask.ui.cases_screen import CasesScreen
 from themask.ui.export_dialog import ExportDialog
 from themask.ui.main_window import MainWindow
@@ -181,3 +184,41 @@ def test_the_restore_screen_shows_the_cases_as_the_store_holds_them_when_it_is_s
     actions_of(w)["Restore"].trigger()
     assert w.current_screen_name() == "restore"
     assert w.restore_screen.case_combo.currentData() == sample_case.id
+
+
+def test_a_masked_file_goes_from_the_export_through_the_cases_to_the_restored_file(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path
+) -> None:
+    """The round trip through the windows: the export dialog masks the file and saves the case, the
+    Cases screen lists it, the Restore screen offers it and puts the real values back.
+    """
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    with qtbot.waitSignal(w.analysisFinished, timeout=60000):
+        w.open_files([corpus / "supply-01.docx"], redline_split=False)
+    qtbot.mouseClick(w.review_screen.export_button, Qt.MouseButton.LeftButton)
+    dialog = w.export_dialog
+    assert dialog is not None
+    qtbot.waitUntil(lambda: dialog.result is not None, timeout=60000)
+    result = dialog.result
+    assert result is not None and result.case is not None and not result.blocked
+    qtbot.mouseClick(dialog.close_button, Qt.MouseButton.LeftButton)
+    assert w.export_dialog is None
+
+    w.show_cases()
+    table = w.cases_screen.table
+    first = table.item(0, 0)
+    assert table.rowCount() == 1 and first is not None and first.text() == result.case.id
+
+    masked = result.outputs[0]
+    w.show_restore(result.case.id)
+    w.restore_screen.load_file(masked)
+    assert w.restore_screen.case_combo.currentData() == result.case.id
+    with qtbot.waitSignal(w.restore_screen.restoreFinished, timeout=30000):
+        qtbot.mouseClick(w.restore_screen.restore_button, Qt.MouseButton.LeftButton)
+    assert w.restore_screen.report_label.text().endswith("0 need your check.")
+    text = extract_text(
+        DocxPackage.open(masked.with_name(f"{masked.stem} \N{EN DASH} restored.docx"))
+    ).text
+    assert all(entry.value in text for entry in result.case.entries)
+    assert find_placeholders(text) == []  # every placeholder of the file was in the key
