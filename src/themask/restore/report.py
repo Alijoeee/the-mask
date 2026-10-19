@@ -40,6 +40,19 @@ class RestoreItem:
 
 
 @dataclass
+class RestorePlan:
+    """What ``plan_docx`` found in a Word file, without changing it.
+
+    ``items`` are the placeholders the restore deals with, in its order, each ``ordinal`` its
+    place there; ``sha256`` is the fingerprint of the file's bytes as they were read, which a
+    restore can be given to make sure the file has not changed since (ruling R96).
+    """
+
+    items: list[RestoreItem]
+    sha256: str
+
+
+@dataclass
 class RestoreReport:
     """What a restore did, for the report shown to the owner at the end.
 

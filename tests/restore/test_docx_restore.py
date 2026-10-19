@@ -18,7 +18,11 @@ through (a digit, a word, a type or a bracket of it changed) becomes one change 
 right with the change accepted and with it rejected, or is left and listed when a form of it is
 unknown or not confirmed. Ruling R91: ``plan_docx`` numbers every placeholder the restore deals
 with, comments and deletions too, and the owner confirms changed ones by those numbers.
-``simulate_ai`` copes with placeholders that share a run (review finding M4).
+``simulate_ai`` copes with placeholders that share a run (review finding M4). Ruling R96: a
+placeholder inside the stretch that a changed placeholder spans is held with it, never pruned or
+claimed; a banner line that would cut such a placeholder stays; a set that confirms every
+changed placeholder restores fallback copies as True does; and a restore checks that the file
+is the one ``plan_docx`` read.
 """
 
 from __future__ import annotations
@@ -35,10 +39,11 @@ from tests.fixtures.restore import CASE, NOW
 from tests.helpers import SPLIT_RSID, simulate_ai
 from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import View, extract_text
+from themask.errors import MaskError
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
-from themask.restore.docx_restore import plan_docx, restore_docx
+from themask.restore.docx_restore import FILE_CHANGED_MESSAGE, plan_docx, restore_docx
 from themask.restore.report import TRACKED_CHANGE
 
 DASH = "\N{EN DASH}"
@@ -560,7 +565,7 @@ def test_a_placeholder_a_change_runs_through_is_left_and_listed_when_not_sure(
     assert (rep.restored, rep.unknown) == (0, [])
     if status == "altered":
         # Confirmed by its number, it becomes one change of values like any other.
-        (planned,) = plan_docx(path, PARTIES)
+        (planned,) = plan_docx(path, PARTIES).items
         out, rep = restore_docx(path, PARTIES, {planned.ordinal}, out_dir=out.parent / "confirmed")
         assert text_of(out, "accepted") == text_of(out, "rejected") == "John Smith signs."
         assert rep.summary() == "1 placeholders restored, 0 need your check."
@@ -608,7 +613,7 @@ def test_a_confirmation_by_number_never_confirms_a_fallback_copy_by_chance(
     # stay as written rather than follow a number that names another placeholder.
     box = TEXT_BOX.format(inside=p("person_1 signs"))
     path = make_docx(f"{p('Dear [PERSON 1],')}<w:p>{box}</w:p>")
-    plan = plan_docx(path, CASE)
+    plan = plan_docx(path, CASE).items
     assert [(item.match.raw, item.ordinal) for item in plan] == [("[PERSON 1]", 0), ("person_1", 1)]
     out, rep = restore_docx(path, CASE, {0})
     texts = [t.text for t in DocxPackage.open(out).xml("word/document.xml").iter(f"{W}t")]
@@ -625,7 +630,8 @@ def test_plan_docx_numbers_every_placeholder_and_the_owner_confirms_by_number(
         f"<w:p>{run('Dear [PERSON 1] and ')}{deleted('[COMPANY_1]')}</w:p>",
         parts={"word/comments.xml": f'<w:comment w:id="0">{p("Ask person_1.")}</w:comment>'},
     )
-    plan = plan_docx(path, CASE)
+    planned = plan_docx(path, CASE)
+    plan = planned.items
     assert [(item.part, item.match.raw, item.status, item.ordinal) for item in plan] == [
         ("word/document.xml", "[PERSON 1]", "altered", 0),
         ("word/document.xml", "[COMPANY_1]", "exact", 1),
@@ -640,7 +646,7 @@ def test_plan_docx_numbers_every_placeholder_and_the_owner_confirms_by_number(
         ("word/document.xml", "[PERSON 1]", 0)
     ]
     assert (rep.restored, rep.altered_restored) == (2, 1)
-    assert plan_docx(path, CASE) == plan  # the same numbers every time
+    assert plan_docx(path, CASE) == planned  # the same numbers every time
 
 
 @pytest.mark.parametrize(
@@ -670,3 +676,112 @@ def test_simulate_ai_copes_with_placeholders_that_share_a_run(
     text = text_of(out)
     assert all(e.value in text for e in CASE.entries) and rep.unknown == ["[PERSON_9]"]
     assert {m.placeholder for m in find_placeholders(text)} == {"[PERSON_9]"}
+
+
+@pytest.mark.parametrize(
+    ("body", "accepted", "rejected"),
+    [
+        (
+            (
+                f"<w:p>{run('Signed by [PERSON_')}{deleted('1] and [COMPANY_1] who agree')}"
+                f"{inserted('2] who agrees')}{run('.')}</w:p>"
+            ),
+            "Signed by [PERSON_2] who agrees.",
+            "Signed by [PERSON_1] and [COMPANY_1] who agree.",
+        ),
+        (
+            f"<w:p>{run('[PERSON_')}{inserted('1] and [COMPANY_1]; see ')}{deleted('2].')}</w:p>",
+            "[PERSON_1] and [COMPANY_1]; see ",
+            "[PERSON_2].",
+        ),
+        (
+            (
+                f"<w:p>{run('Signed by [PERSON_')}{deleted('1] and company_1 who agree')}"
+                f"{inserted('2] who agrees')}{run('.')}</w:p>"
+            ),
+            "Signed by [PERSON_2] who agrees.",
+            "Signed by [PERSON_1] and company_1 who agree.",
+        ),
+        (
+            (
+                f"<w:p>{run('Due to ')}{inserted('[COMPANY_')}{deleted('[PERSON_1]')}"
+                f"{run('2] now.')}</w:p>"
+            ),
+            "Due to [COMPANY_2] now.",
+            "Due to [PERSON_1]2] now.",
+        ),
+    ],
+    ids=["deleted-first", "inserted-first", "changed-form-inside", "one-form-each"],
+)
+def test_a_placeholder_inside_a_changed_placeholders_stretch_is_held_with_it(
+    make_docx: MakeDocx, body: str, accepted: str, rejected: str
+) -> None:
+    # R96: the change runs through one placeholder and holds another whole. Rewriting the first
+    # would take the second's nodes too, so the place is left as it is and listed once; the
+    # report claims neither, and the plan shows the place as the report does.
+    path = make_docx(body)
+    out, rep = restore_docx(path, PARTIES, confirm_altered=True)
+    assert (text_of(out, "accepted"), text_of(out, "rejected")) == (accepted, rejected)
+    (item,) = rep.needs_check
+    assert item.reason == TRACKED_CHANGE
+    assert (rep.restored, rep.altered_restored, rep.unknown) == (0, 0, [])
+    (planned,) = plan_docx(path, PARTIES).items
+    assert (planned.reason, planned.ordinal) == (TRACKED_CHANGE, item.ordinal)
+
+
+def test_a_placeholder_right_after_a_changed_one_stays_its_own(make_docx: MakeDocx) -> None:
+    # It touches the changed placeholder's stretch but has no character in it.
+    path = make_docx(
+        f"<w:p>{run('[COMPANY_')}{deleted('1')}{inserted('2')}{run('][PERSON_1].')}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=False)
+    assert text_of(out, "accepted") == "Brightwater BVJohn Smith."
+    assert text_of(out, "rejected") == "Acme Supplies LtdJohn Smith."
+    assert rep.summary() == "2 placeholders restored, 0 need your check."
+
+
+def test_a_banner_line_that_would_cut_a_changed_placeholder_stays(make_docx: MakeDocx) -> None:
+    # R96: accepted, the line is the banner; rejected, it holds [COMPANY_2], which a change
+    # runs through. Cutting the banner would take that placeholder's nodes, so the line stays
+    # and the placeholder is listed.
+    before, after = BANNER_TEXT.split("[COMPANY_1]")
+    path = make_docx(
+        f"<w:p>{run(before + '[COMPANY_')}{deleted('2')}{inserted('1')}{run(']' + after)}</w:p>"
+    )
+    out, rep = restore_docx(path, PARTIES, confirm_altered=True)
+    assert text_of(out, "accepted") == BANNER_TEXT
+    assert text_of(out, "rejected") == f"{before}[COMPANY_2]{after}"
+    (item,) = rep.needs_check
+    assert item.reason == TRACKED_CHANGE
+    assert not rep.banner_removed and rep.restored == 0
+
+
+def test_a_set_that_confirms_every_changed_placeholder_restores_fallback_copies(
+    make_docx: MakeDocx,
+) -> None:
+    # R96: confirming every changed placeholder by number is confirming them all, as True does.
+    box = TEXT_BOX.format(inside=p("person_1 signs"))
+    path = make_docx(f"{p('Dear [PERSON 1],')}<w:p>{box}</w:p>")
+    altered = {item.ordinal for item in plan_docx(path, CASE).items if item.status == "altered"}
+    assert altered == {0, 1}
+    out, rep = restore_docx(path, CASE, altered)
+    texts = [t.text for t in DocxPackage.open(out).xml("word/document.xml").iter(f"{W}t")]
+    assert texts == ["Dear John Smith,", "John Smith signs", "John Smith signs"]
+    assert rep.summary() == "2 placeholders restored, 0 need your check."
+
+
+def test_a_restore_refuses_a_file_that_changed_since_it_was_planned(
+    make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    # R96: the plan carries the file's fingerprint; a restore given it checks the file first.
+    path = make_docx(p("Dear [PERSON 1],"))
+    planned = plan_docx(path, CASE)
+    assert planned.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    out, rep = restore_docx(path, CASE, True, tmp_path / "same", expected_sha256=planned.sha256)
+    assert text_of(out) == "Dear John Smith," and rep.restored == 1
+    path.write_bytes(make_docx(p("Dear [PERSON_1] and [COMPANY_1],")).read_bytes())
+    with pytest.raises(MaskError) as raised:
+        restore_docx(path, CASE, True, tmp_path / "changed", expected_sha256=planned.sha256)
+    assert raised.value.user_message == FILE_CHANGED_MESSAGE
+    assert FILE_CHANGED_MESSAGE == "The file changed since it was checked. Load it again."
+    assert not (tmp_path / "changed").exists()

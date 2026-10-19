@@ -72,11 +72,15 @@ class TextRestorer:
         return sorted(edits)
 
     def banner_cuts(
-        self, text: str, keep: Sequence[tuple[int, int]] = ()
+        self, text: str, keep: Sequence[tuple[int, int]] = (), note: bool = True
     ) -> list[tuple[int, int, str]]:
-        """Cuts that take The MASK's own lines out of ``text``, but none that overlaps ``keep``."""
+        """Cuts that take The MASK's own lines out of ``text``, but none that overlaps ``keep``.
+
+        With ``note`` the report records that a line was taken out; without it the caller does,
+        once it knows the cuts are made.
+        """
         banners = [span for span in banner_spans(text) if not _overlaps(*span, keep)]
-        if banners:
+        if banners and note:
             self.report.banner_removed = True
         return [(start, end, "") for start, end in banners]
 
