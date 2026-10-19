@@ -1,6 +1,7 @@
 """The encrypted case store: what is on disk, what is listed and what is deleted."""
 
 import errno
+import json
 import os
 import stat
 from collections.abc import Callable
@@ -209,7 +210,18 @@ DAMAGED_FILES: dict[str, Callable[[Case, bytes], bytes]] = {
     "text that is not JSON": lambda case, key: encrypt(key, b"not json"),
     "JSON that is not a case": lambda case, key: encrypt(key, b'{"id": "K4F7"}'),
     "bytes that are not UTF-8": lambda case, key: encrypt(key, b"\xff\xfe\xfd"),
+    # Ruling R108: a key holding the same placeholder twice is no case the app wrote.
+    "a placeholder twice in the key": lambda case, key: encrypt(
+        key, with_a_placeholder_twice(case).encode()
+    ),
 }
+
+
+def with_a_placeholder_twice(case: Case) -> str:
+    """The case's JSON with its first key entry repeated under another value."""
+    data = json.loads(case.to_json())
+    data["entries"].append({**data["entries"][0], "value": "Somebody Else"})
+    return json.dumps(data)
 
 
 def plant(

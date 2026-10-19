@@ -209,14 +209,19 @@ class Case:
         """Read a case written by ``to_json``.
 
         Raises ValueError("Not a stored case.") for anything else: text that is not JSON, a field
-        that is missing or of the wrong kind, an unknown placeholder type, or a timestamp that is
-        not a date or has no timezone (a case without one could not be compared with the clock).
+        that is missing or of the wrong kind, an unknown placeholder type, a timestamp that is
+        not a date or has no timezone (a case without one could not be compared with the clock),
+        or a key that holds the same placeholder twice (ruling R108: the app never writes one,
+        and a restore with it would take whichever entry came last).
         """
         try:
             data = json.loads(s)
             created_at = datetime.fromisoformat(_text(data["created_at"]))
             if created_at.utcoffset() is None:
                 raise ValueError("The timestamp has no timezone.")
+            placeholders = [_text(e["placeholder"]) for e in _objects(data["entries"])]
+            if len(set(placeholders)) != len(placeholders):
+                raise ValueError("A placeholder is in the key twice.")
             return cls(
                 id=_text(data["id"]),
                 created_at=created_at,
