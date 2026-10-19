@@ -306,17 +306,21 @@ class PercentRecognizer(CheckedPatternRecognizer):
 # it: "Annex 2 Units of Measure", "Schedule 3 Pallets", "under Clause 4 cartons", "the Article 30
 # records", "§ 5 pallets" (ruling R97). Not "parts", nor "art", "para" or "sec" as words, which a
 # count may follow ("spare parts 500 units", "the art 12 pieces"); written as abbreviations, with
-# their full stop, they are references ("the Art. 30 records"). "Part" is one only with its
-# capital ("Part 2 Units", but "the spare part 5 units").
+# their full stop, they are references ("the Art. 30 records"). "Part", "Schedule", "Section",
+# "Article" and "Exhibit" are references only with their capital (ruling R105): "Part 2 Units",
+# but "the spare part 5 units", "shall schedule 500 pallets", "per article 12 pieces".
 _QUANTITY_REFERENCE = (
-    r"(?:\b(?:(?i:clauses?|sections?|articles?|schedules?|annex(?:es)?|appendix|appendices"
-    r"|exhibits?|paragraphs?|(?:art|sec|para)\.)|P(?:art|ART))|\N{SECTION SIGN})"
+    r"(?:\b(?:(?i:clauses?|annex(?:es)?|appendix|appendices|paragraphs?|(?:art|sec|para)\.)"
+    r"|S(?:ections?|ECTIONS?)|A(?:rticles?|RTICLES?)|S(?:chedules?|CHEDULES?)|E(?:xhibits?|XHIBITS?)"
+    r"|P(?:art|ART))|\N{SECTION SIGN})"
 )
 _REFERENCE_BEFORE_A_QUANTITY = re.compile(_QUANTITY_REFERENCE + _SPACE + r"*\Z")
-# Two digits with a space between them: after a reference word, a figure that goes on with a group
-# of digits after a space may be the reference and a count whose comma was left out ("Schedule 3
-# 500 pallets" for "Schedule 3, 500 pallets").
-_SPACED_DIGITS = re.compile(r"\d" + _SPACE + r"\d")
+# Two digits with a space, or a range's dash or "to", between them: after a reference word, a
+# figure that goes on with a group of digits after a space may be the reference and a count whose
+# comma was left out ("Schedule 3 500 pallets" for "Schedule 3, 500 pallets"), and one that goes
+# on as a range is the reference and a count written as a range ("Schedule 3 - 500 pallets per
+# week", "Clause 7 – 250 tonnes"; ruling R105).
+_SPACED_DIGITS = re.compile(r"\d(?:" + _SPACE + "|" + _TO + r")\d")
 # A figure in a year's range before "records" is their year after "the" or a possessive, maybe
 # with other years between ("the 2025 records", "Acme's 2025 records", "its 2025 records", "the
 # 2026 and 2027 records"); after anything else it counts them ("up to 2000 records", "about 2025
