@@ -4,8 +4,10 @@ Worktree `/home/user/the-mask-worktrees/design-d1`, off `4bbde49` (= design-v1 =
 detection, export, leak check, restore, keystore or the network guard was touched (the diff is `src/themask/ui/`,
 `tools/` and `tests/ui/`). Nothing was pushed, no Briefcase build, no other worktree touched.
 
-**Status: DONE_WITH_CONCERNS** (the concerns are in section 8; the work is finished and the gate is green).
-Full suite 3,614 passed, 8 skipped (the dispatch's 3,343 + 271); ruff, ruff format and mypy clean.
+**Status: DONE_WITH_CONCERNS** (the concerns are in section 8; the work is finished and the gate is green). Ruling R124 (contrast of
+every text pair) is applied in `6bbc73a`: section 10.
+Full suite 3,614 passed, 8 skipped at `b106274` (the dispatch's 3,343 + 271); after R124, `tests/ui` alone is 640 passed (the R124 commit
+touches only the theme, four light pictures, `tools/make_art.py` and tests under `tests/ui`); ruff, ruff format and mypy clean.
 
 Commits (oldest first, Conventional Commits, trailer `Co-Authored-By: Claude Sonnet 5.5`):
 - `51ec241` feat(ui): warm theme with light and dark palettes
@@ -19,6 +21,7 @@ Commits (oldest first, Conventional Commits, trailer `Co-Authored-By: Claude Son
 - `d2bb431` feat(ui): the drop title is set tight, a switched-off card dims its caption, and the stylesheet's own parts are tested drawn
 - `3288d1d` fix(ui): Export… keeps its dots in the tool bar; the recent cases are off while analysing and ask a refusing Keychain once
 - `b106274` chore(ui): the pictures show a neutral output folder
+- `6bbc73a` fix(ui): contrast — accent text pairs above 4.5:1 (R124)
 
 The two things D2 and D3 need first are in section 2 (the surface of `MainWindow`) and its merge notes.
 
@@ -26,9 +29,9 @@ The two things D2 and D3 need first are in section 2 (the surface of `MainWindow
 
 ### a) `src/themask/ui/theme.py` (tokens, palettes, stylesheet, appearance, fonts)
 - `Tokens` (frozen dataclass) with the brief's light and dark values as plain constants, `tokens(appearance)`.
-  The brief's tokens are there unchanged; the mockups needed a few more, which I added (they are in the mockups'
+  The brief's tokens are there unchanged (the light accent excepted: #A85A24 by R124, section 10); the mockups needed a few more, which I added (they are in the mockups'
   markup, not in the brief's list): `control` (light = #FFFFFF, dark #33312D from the brief), `hairline` (row
-  separators and hover fill: #EFEBE5 / #3A3733), `accent_hover` (#8F4C1D / #F0A370), `on_accent` (#FFFFFF),
+  separators and hover fill: #EFEBE5 / #3A3733), `accent_hover` (#8F4C1D / #F0A370), `on_accent` (#FFFFFF light, #1F1D1A dark: R124),
   `notice_card_bg` (#FFF9E6 / #3D3320), `success_text` (#2E7D4F / #5CC27F).
 - `palette(appearance) -> QPalette` (Window, Base, Text, Button, Highlight, Accent, Link, PlaceholderText, the
   disabled group, ...), `stylesheet(appearance) -> str` (a `string.Template` filled from the tokens: general rules
@@ -47,7 +50,8 @@ The two things D2 and D3 need first are in section 2 (the surface of `MainWindow
 - Pillow drawing (8x supersample, BOX reduction, round caps, strokes centred on the outline as in SVG, two text
   lines at 50 % opacity) of the mask-on-document illustration, 112x88 and 224x176, and the document-with-check,
   64 and 128 px, each light and dark: eight committed PNGs (`mask-light.png`, `mask-light@2x.png`, ... `check-dark@2x.png`).
-  Colours are the theme's accent, accent-soft and panel (a test compares them with the tokens).
+  Colours are the theme's accent, accent-soft and panel (a test compares them with the tokens); the four light pictures were drawn
+  again for the light accent of R124.
 - `themask.ui.art`: `pixmap(name)` (device pixel ratio 2 for `@2x` names, `FileNotFoundError` for a missing one),
   `icon(kind, appearance)` (the 1x and the 2x as one `QIcon`), and `Illustration(kind)`, a widget that draws the
   picture in the appearance of its palette (so it follows light/dark with the window) and dimmed while disabled.
@@ -68,7 +72,7 @@ at both). The search icon is there for the find field (D2) and the Cases filter 
   Text and enabled state follow the screen; the tool button shows the dots of "Export…" (Qt strips them from the icon text
   unless `setIconText` says otherwise: found by a test, see 5).
 - `Sidebar` (220 px, chrome colour, line at its right edge): `SidebarItem`s (custom-painted `QPushButton`s: 34 high,
-  radius 8, icon + label, the chosen one on the accent with white text, hover, focus ring for keyboard focus only,
+  radius 8, icon + label, the chosen one on the accent with `on_accent` text (white; the dark text colour in the dark appearance), hover, focus ring for keyboard focus only,
   dimmed when off), Tab-focusable, Up/Down move between them, Space/Return press. A click only asks
   (`sectionRequested`); the window says which is chosen (Mask also stands for the Review screen). The note at the foot per
   screen: home = status dot + "Engine ready · offline" (follows the engine: loading / problem) and "Settings: The MASK ›
@@ -167,12 +171,12 @@ so a screen's rules can go in `_TEMPLATE` or a template of their own without tou
 ## 4. New tests (files, what they cover)
 | file | tests | covers |
 |---|---|---|
-| `tests/ui/test_theme.py` (extended) | 44 | both token sets (the brief's values), palettes from tokens, contrast >= 4.5:1 (text/secondary on every ground; accent-on-soft, notice, danger, success text), `THEMASK_APPEARANCE` override (case, blanks, junk), system scheme and "unknown -> light", `apply` installs palette + stylesheet + 13 px font, follows `colorSchemeChanged` (light -> dark -> light), a forced look ignores the system, `apply` twice = one follower, serif/mono/body fonts, stylesheet parses in Qt for both appearances |
-| `tests/ui/test_theme_shell.py` | 18 | the stylesheet of the window's parts drawn in both appearances: tool bar, primary action on/off, sidebar, notice band, code chip, row hairline, link, dimmed card caption |
+| `tests/ui/test_theme.py` (extended) | 56 | both token sets (the brief's values, with R124's), palettes from tokens, contrast >= 4.5:1 computed in the test (text/secondary on every ground; accent-on-soft, notice, danger, success text; **R124**: `on_accent` on the accent and its hover, the accent and its hover as a link on ground/panel/control, secondary and the chip text on accent-soft), the tertiary colour only in `:disabled` rules and in the placeholder/disabled roles of the palette (the stylesheet's rules are parsed), `THEMASK_APPEARANCE` override (case, blanks, junk), system scheme and "unknown -> light", `apply` installs palette + stylesheet + 13 px font, follows `colorSchemeChanged` (light -> dark -> light), a forced look ignores the system, `apply` twice = one follower, serif/mono/body fonts, stylesheet parses in Qt for both appearances |
+| `tests/ui/test_theme_shell.py` | 22 | the stylesheet of the window's parts drawn in both appearances: tool bar, primary action on/off (its words in `on_accent`), a primary button, sidebar, notice band, code chip (letters in `accent_text_on_soft`), the hint beside "Choose file…" (secondary, not tertiary), row hairline, link, dimmed card caption |
 | `tests/ui/test_art.py` | 19 | the eight PNGs exist at 112x88 / 224x176 / 64 / 128, ratio 2 for `@2x`, `make_art` regenerates them byte for byte (and twice the same), colours = theme tokens, shapes (page, face, eyes, check), `Illustration` follows the palette and dims |
 | `tests/ui/test_icons.py` | 26 | five icons at 1x/2x and any size, line drawings in the colour given, shapes of the mockups, `svg_path` parser |
 | `tests/ui/test_widgets.py` | 11 | `ElidedLabel` (ellipsis, tooltip, grows/shrinks), `LinkButton`, `Swatch`, keyboard-focus rule |
-| `tests/ui/test_sidebar.py` | 24 | 220 wide, three items in order, one chosen, click asks / window decides, off/on, arrows + Space/Return, drawn on the accent in both appearances, dimmed, focus ring only for keyboard focus, the four notes (exact copy), engine dot colours |
+| `tests/ui/test_sidebar.py` | 24 | 220 wide, three items in order, one chosen, click asks / window decides, off/on, arrows + Space/Return, drawn on the accent in both appearances (icon and word in `on_accent`), dimmed, focus ring only for keyboard focus, the four notes (exact copy), engine dot colours |
 | `tests/ui/test_settings_window.py` | 13 | dialog titled "Settings", Tool, not modal, hosts the screen, Esc closes, reload on open, stale lists reloaded on activation unless typed, Return saves and presses nothing else |
 | `tests/ui/test_shell.py` | 66 | unified-toolbar call, the fixed tool bar and its three parts in order, toggle (name flips, hides/shows, works during analysis), titles per screen and `set_title`, primary action per screen (enabled rules, Export… dots, Restore mirrors the button, off while analysing), `show_screen`, `set_primary`, `refresh_chrome`, `add_toolbar_widget`, sidebar follows screens and is off during analysis (also after a failure), notes follow screens, engine status, Settings action (role, shortcut, menu, opens window, off while analysing, closes with the window), Choose file… (⌘O), crossfade (flag off in tests; on: overlay, 120 ms, ends, restarts, no fade for same screen/hidden window), Tab order, shortcuts by keyboard, narrow window |
 | `tests/ui/test_recent_cases.py` | 33 | `describe_case` (today/yesterday/days/date, files, values, expiry, expired), rows from two saved cases and from the `exported` fixture, at most three, newest first, no section when none, Restore link -> Restore with that case chosen, All cases -> Cases, links off while analysing, unreadable store (Keychain / disk) leaves no section, a refusing Keychain asked once |
@@ -210,13 +214,14 @@ After, `/home/user/the-mask-notes/notes/design/d1-shots/`:
 - `restore-light.png`, `restore-dark.png`, `cases-light.png`, `cases-dark.png`, `review-light.png`, `review-dark.png` (1180x760): the
   shell (tool bar title/caption/primary action, sidebar, notes at the foot) on the screens D2/D3 still have to redo; their
   contents are the old screens in the new theme
+Drawn again after R124 (the light accent, the dark text on the dark accent, the chips, "or press ⌘O"): the pictures in the folder are those of `6bbc73a`.
 Before (the same screens at `4bbde49`, light only: the old app had no dark theme of its own, and Qt offscreen cannot switch the
 system to dark): `before-home-light.png`, `before-settings-light.png`.
 
 What the screenshots cannot show (see section 8): the Mac's native unified title bar and tool bar, the system menu bar, native
 controls under the stylesheet.
 
-## 7. Gate (run from the worktree, on the clean tree at `b106274`)
+## 7. Gate (the full run on the clean tree at `b106274`; after R124 `tests/ui` and the three checks at `6bbc73a`)
 ```
 $ uv run pytest -q
 3614 passed, 8 skipped in 443.63s (0:07:23)          (exit 0)
@@ -231,12 +236,22 @@ An earlier full run, on the same code before the last four small commits, said `
 alone (`uv run pytest -q tests/ui`) is about 2.5 minutes; the new UI test files were also run three times in a row for flakiness
 (198 passed each time).
 
+After ruling R124 (clean tree at `6bbc73a`; the full suite was not run again: nothing outside `tests/ui` imports the theme's colours or the art):
+```
+$ uv run pytest tests/ui -q
+640 passed in 129.72s (0:02:09)                      (exit 0)
+$ uv run ruff check src tests tools packaging
+All checks passed!
+$ uv run ruff format --check src tests tools packaging
+158 files already formatted
+$ uv run mypy src
+Success: no issues found in 58 source files
+```
+
 ## 8. Concerns and decisions (read these)
-1. **Contrast of three approved pairs is under 4.5:1** (the tokens are the mockups', so I kept them; every pair the brief's test names
-   passes). Measured: white on the accent 4.36:1 light and 2.88:1 dark (primary buttons, the chosen sidebar item); the accent as text
-   on a panel 4.36:1 light, on accent-soft 3.5:1 light (links, the code chip); tertiary on a panel 3.0:1 light, 3.2:1 dark (hints,
-   "or press ⌘O"; disabled text is exempt). One-token fixes if the owner wants them: `on_accent` dark `#1E1D1B` (5.9:1), accent light
-   `#AD5E27` (white 4.8:1, on ground 4.6:1), chip text `accent_text_on_soft` (6.6:1). Noted in the `Tokens` docstring.
+1. **Contrast: settled by ruling R124** (section 10). The three approved pairs that were under 4.5:1 (white on the accent, the accent as
+   text, tertiary on a panel) are fixed in `6bbc73a`; what is left under it is named there (the accent as text on the light chrome,
+   4.45:1, where no text stands).
 2. **Mockup versus brief**: the "RECENT CASES" header is 13/600 in the mockup and 11/600 in the brief; I followed the mockup
    (exact spacing and colours were to come from the mockups). The home tool bar shows one line ("The MASK") as the mockup does: the
    caption line is hidden when empty.
@@ -281,3 +296,34 @@ alone (`uv run pytest -q tests/ui`) is about 2.5 minutes; the new UI test files 
   the tests of the theme and of the pictures, which put the look back).
 - Discipline: only the additions listed in 8.9 beyond the brief. The stylesheet is data in `theme.py`; no colour appears in a
   widget except the placeholder tints (the legend), which come from `TYPE_COLOURS`.
+
+## 10. Ruling R124: contrast >= 4.5:1 for every text pair (commit `6bbc73a`)
+The four changes, in `theme.py` (tokens and stylesheet), with the ratios the tests compute (WCAG relative luminance):
+1. **Light accent `#B5642A` -> `#A85A24`.** White on it 5.06:1 (was 4.36:1); on the hover colour `#8F4C1D` 6.52:1. As a link the accent is
+   5.06:1 on a panel and on a control and 4.85:1 on the ground. `accent_soft` and `accent_text_on_soft` stay. `tools/make_art.py` draws the
+   light pictures in the same accent, so the four light PNGs changed (the dark ones did not; `test_art` regenerates them byte for byte).
+2. **Dark: the text on the accent is `#1F1D1A`** (`on_accent`; the accent stays `#D9834A`). 5.84:1 on the accent and 8.15:1 on the hover
+   colour `#F0A370` (white was 2.88:1). The ruling's "about 6.5:1" is 5.84:1 measured; the colour is the light appearance's text colour, as the
+   ruling says. Used by the chosen sidebar item, the tool bar's primary action, `QPushButton#primary` ("Continue to export", D2/D3's
+   "Copy instruction") and selected text in a field. Light is unchanged: `on_accent` is white.
+3. **Tertiary is never the colour of text on a panel or a ground.** "or press ⌘O" (`QLabel#dropShortcut`) is `secondary` (5.76:1 on the
+   light card, 5.22:1 on the dark one). Tertiary is left for: the palette's `PlaceholderText` (inside fields), the disabled group's text
+   roles, the `:disabled` rules (buttons, links, the primary action, the dimmed drop caption), and two things that are not text, the
+   disabled sidebar-toggle icon and the grey "loading" dot of the engine status. A test parses every rule of the stylesheet and reads the
+   palette, and fails if the tertiary colour is the colour of anything else.
+4. **Code chips** (`QLabel#caseCode`, K4F7) are `accent_text_on_soft` on `accent_soft`: 6.58:1 light, 8.37:1 dark (the light accent was 3.5:1 on it).
+
+Tests: `tests/ui/test_theme.py` computes the pairs for both appearances (the list above, plus secondary on `accent_soft`: 4.64:1 and
+4.70:1), pins the new token values, and has the stylesheet and palette checks for tertiary; `tests/ui/test_theme_shell.py` and
+`tests/ui/test_sidebar.py` draw the sidebar item, the primary action, a primary button, the chip and the hint and look for the colour of
+their ink, so no test assumes white on the accent any more (the old white-pixel count of the sidebar test is gone). Three of the
+four changes were put back by hand once to see the tests fail (the hint, the dark `on_accent`, the chip letters), then restored.
+
+What is still under 4.5:1, on purpose, and why it does not matter: the light accent as text on the chrome (4.45:1): no text of that kind
+exists (links stand on panels), and the `Tokens` docstring says so; the focus ring and the status dot are not text. The dark accent as a
+link on a control is 4.51:1 (tight; the test keeps it).
+
+For D2 and D3 (nothing to merge, but to keep to): text on an accent background is `on_accent` (from the stylesheet, or
+`theme.tokens_of(widget).on_accent` in a widget that paints), never white; hints and captions are `secondary`, never `tertiary`; the
+tertiary colour is for placeholders and for `:disabled`. The token values changed, the names did not (the API frozen at `4146e37` is
+as it was).
