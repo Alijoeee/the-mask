@@ -34,6 +34,7 @@ from pathlib import Path
 
 import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, RecognizerResult
+from presidio_analyzer.context_aware_enhancers import LemmaContextAwareEnhancer
 from presidio_analyzer.nlp_engine import NlpEngine, NlpEngineProvider
 from presidio_analyzer.predefined_recognizers import (
     NhsRecognizer,
@@ -222,7 +223,12 @@ class Engine:
         for recognizer in contract_recognizers():
             registry.add_recognizer(recognizer)
         self._analyzer = AnalyzerEngine(
-            registry=registry, nlp_engine=nlp_engine, supported_languages=["en"]
+            registry=registry,
+            nlp_engine=nlp_engine,
+            supported_languages=["en"],
+            # A context word counts as a whole word only: Presidio's default also finds it inside
+            # another word ("sum" in "assume", "charge" in "discharge", "cc" in "account").
+            context_aware_enhancer=LemmaContextAwareEnhancer(context_matching_mode="whole_word"),
         )
 
     def analyze(self, text: str) -> list[Finding]:

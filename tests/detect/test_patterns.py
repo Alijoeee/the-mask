@@ -556,6 +556,20 @@ def test_bare_number_in_price_context_is_low_confidence_amount(engine):
 
 
 @pytest.mark.parametrize(
+    "text,score",
+    [
+        ("We assume 48,000 in all.", 0.4),  # "sum" inside "assume" is no price word
+        ("It shall discharge 48,000 in all.", 0.4),  # nor "charge" inside "discharge"
+        ("the sum of 48,000 in all", 0.75),
+        ("the charges of 48,000 in all", 0.75),
+    ],
+)
+def test_a_context_word_counts_only_as_a_whole_word(engine, text, score):
+    (f,) = [f for f in engine.analyze(text) if f.type == AMOUNT]
+    assert f.score == pytest.approx(score)
+
+
+@pytest.mark.parametrize(
     "text,needle,score",
     [
         ("Total price: 48,000", "48,000", 0.75),
