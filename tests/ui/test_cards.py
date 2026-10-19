@@ -15,6 +15,8 @@ from PySide6.QtWidgets import QApplication, QFrame, QLabel, QWidget
 
 from themask.ui import theme
 from themask.ui.cards import (
+    Box,
+    ChevronCombo,
     DocGlyph,
     FlowLayout,
     MarkBadge,
@@ -345,3 +347,35 @@ def test_an_empty_flow_has_no_height_and_items_can_be_taken_out(qtbot: QtBot) ->
     assert taken is not None and layout.count() == 0 and layout.takeAt(0) is None
     assert layout.expandingDirections() == Qt.Orientation(0)
     assert isinstance(layout.sizeHint().width(), int) and QRect(0, 0, 1, 1).isValid()
+
+
+# ---- the boxes ------------------------------------------------------------------------------------
+
+
+def test_a_box_asks_for_the_height_it_is_given_and_no_more(qtbot: QtBot) -> None:
+    box = Box(110)
+    qtbot.addWidget(box)
+    box.setPlainText("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten")
+    assert box.sizeHint().height() == 110 and box.minimumHeight() == 110
+    host = QWidget()
+    qtbot.addWidget(host)
+    box.setParent(host)
+    box.resize(300, 400)  # and it takes what room there is
+    assert box.height() == 400
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_a_chevron_combo_draws_a_chevron_of_its_own_on_the_right(
+    qtbot: QtBot, appearance: str
+) -> None:
+    combo = ChevronCombo()
+    qtbot.addWidget(combo)
+    combo.setPalette(theme.palette(appearance))
+    combo.addItem("K4F7 \N{MIDDLE DOT} supply-01.docx")
+    combo.resize(300, 30)
+    image = combo.grab().toImage()
+    wanted = QColor(theme.tokens(appearance).secondary).rgb()
+    seen = {image.pixel(x, y) for x in range(270, 300) for y in range(30)}
+    assert wanted in seen  # the chevron, in the colour of a caption
+    left = {image.pixel(x, y) for x in range(30) for y in range(30)}
+    assert wanted not in left

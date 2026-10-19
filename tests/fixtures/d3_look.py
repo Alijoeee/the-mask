@@ -60,3 +60,18 @@ def d3_shot() -> Callable[[QWidget, str, str], QImage]:
         return image
 
     return shot
+
+
+def appears_in(image: QImage, colour: str, where: QWidget, around: QWidget) -> bool:
+    """Whether ``colour`` is the colour of a pixel of ``image`` (a picture of ``around``) inside
+    the widget ``where``: a screen is drawn in the colours of its appearance.
+    """
+    from PySide6.QtGui import QColor
+
+    top_left = where.mapTo(around, where.rect().topLeft())
+    wanted = QColor(colour).rgb()
+    for dx in range(0, where.width(), 2):
+        for dy in range(0, where.height(), 2):
+            if image.pixel(top_left.x() + dx, top_left.y() + dy) == wanted:
+                return True
+    return False

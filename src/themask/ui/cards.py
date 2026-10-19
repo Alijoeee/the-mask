@@ -8,8 +8,9 @@ sheet is filled with: the tokens, and the few colours of the mockups that no tok
 
 The rest draws itself from the tokens of its own palette (``theme.tokens_of``), so it follows the
 appearance without any wiring: ``MarkBadge`` (the round check or exclamation mark of a result),
-``DocGlyph`` (the little document of a file card) and ``TickLabel`` (a line of text that starts
-with a tick). ``FlowLayout`` lays cards out side by side and wraps them onto the next row when the
+``DocGlyph`` (the little document of a file card), ``TickLabel`` (a line of text that starts
+with a tick), ``Box`` (a text box as tall as it needs to be) and ``ChevronCombo`` (a combo box
+with a chevron that is the same on every platform). ``FlowLayout`` lays cards out side by side and wraps them onto the next row when the
 window is narrow. ``folder_trail`` writes a folder the way the mockups do: Documents › The MASK.
 """
 
@@ -22,7 +23,15 @@ from typing import Literal
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPaintEvent, QPen
-from PySide6.QtWidgets import QLabel, QLayout, QLayoutItem, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QLabel,
+    QLayout,
+    QLayoutItem,
+    QPlainTextEdit,
+    QWidget,
+)
 
 from themask.ui.theme import Appearance, Tokens, appearance_of, tokens, tokens_of
 
@@ -48,6 +57,14 @@ _EXTRAS: dict[str, dict[str, str]] = {
         "glyph_fold": "#3A3733",
     },
 }
+
+
+def tokens_for(widget: QWidget | None) -> Tokens:
+    """The tokens of the appearance ``widget`` is shown in, or of the application's when there is
+    no widget (what an item delegate has to go by).
+    """
+    palette = widget.palette() if widget is not None else QApplication.palette()
+    return tokens(appearance_of(palette))
 
 
 def appearance_name(t: Tokens) -> Appearance:
@@ -250,6 +267,42 @@ class TickLabel(QLabel):
         painter.end()
 
 
+class Box(QPlainTextEdit):
+    """A text box that asks for ``height`` points, as tall as it needs to be and no taller (a
+    plain text box asks for 192 whatever is in it), and grows with the room it is given.
+    """
+
+    def __init__(self, height: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._height = height
+        self.setMinimumHeight(height)
+
+    def sizeHint(self) -> QSize:
+        return QSize(super().sizeHint().width(), self._height)
+
+
+class ChevronCombo(QComboBox):
+    """A combo box that draws its own chevron. The style sheet takes the platform's arrow away
+    (``QComboBox::down-arrow { image: none; }``), because how that arrow looks, and whether it
+    stays once the box has a border of its own, depends on the platform's style.
+    """
+
+    def paintEvent(self, e: QPaintEvent) -> None:
+        super().paintEvent(e)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(tokens_of(self).secondary), 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        x, y = self.width() - 17.0, self.height() / 2.0
+        path = QPainterPath(QPointF(x - 3.5, y - 1.8))
+        path.lineTo(x, y + 1.8)
+        path.lineTo(x + 3.5, y - 1.8)
+        painter.drawPath(path)
+        painter.end()
+
+
 # ---- the layout ----------------------------------------------------------------------------------
 
 
@@ -299,10 +352,16 @@ class FlowLayout(QLayout):
         return QSize(width, self.heightForWidth(width))
 
     def minimumSize(self) -> QSize:
+        # Not the height of the cards one under the other: that is what a narrow window needs, and
+        # a scroll area that took it for the least the cards need would scroll on a wide one too.
+        # What the cards need at the width they have is ``heightForWidth``.
         margins = self.contentsMargins()
-        width = max([self._min_width, *(item.minimumSize().width() for item in self._shown())])
-        width += margins.left() + margins.right()
-        return QSize(width, self.heightForWidth(width))
+        shown = self._shown()
+        width = max([self._min_width, *(item.minimumSize().width() for item in shown)])
+        height = max([0, *(item.minimumSize().height() for item in shown)])
+        return QSize(
+            width + margins.left() + margins.right(), height + margins.top() + margins.bottom()
+        )
 
     def _shown(self) -> list[QLayoutItem]:
         return [item for item in self._items if not item.isEmpty()]

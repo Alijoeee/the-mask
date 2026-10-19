@@ -76,6 +76,45 @@ def format_expiry(moment: datetime) -> str:
     return moment.astimezone().strftime("%Y-%m-%d")
 
 
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def format_date(moment: datetime) -> str:
+    """The day ``moment`` falls on, on the owner's clock, as the screens say it: 18 Nov 2026
+    (the month is the same three English letters in every language, as in ``format_moment``).
+    """
+    local = moment.astimezone()
+    return f"{local.day} {_MONTHS[local.month - 1]} {local.year}"
+
+
+def _days_ago(moment: datetime, now: datetime | None) -> int:
+    """How many calendar days before ``now`` (by default the time it is) ``moment`` falls, on the
+    owner's clock: 0 for today, 1 for yesterday.
+    """
+    here = (now or datetime.now().astimezone()).astimezone().date()
+    return (here - moment.astimezone().date()).days
+
+
+def format_when(moment: datetime, now: datetime | None = None) -> str:
+    """When ``moment`` was, for a line of a list: "today 14:02", "yesterday 09:41", and for
+    anything older the day, "12 Oct 2026".
+    """
+    clock = moment.astimezone().strftime("%H:%M")
+    return {0: f"today {clock}", 1: f"yesterday {clock}"}.get(
+        _days_ago(moment, now), format_date(moment)
+    )
+
+
+def format_exported(moment: datetime, now: datetime | None = None) -> str:
+    """When a case was exported, for the Exported column: "Today, 14:02", "Yesterday, 09:41",
+    and for anything older the day, "12 Oct 2026".
+    """
+    clock = moment.astimezone().strftime("%H:%M")
+    return {0: f"Today, {clock}", 1: f"Yesterday, {clock}"}.get(
+        _days_ago(moment, now), format_date(moment)
+    )
+
+
 def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 

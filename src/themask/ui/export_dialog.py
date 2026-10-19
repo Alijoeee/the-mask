@@ -70,8 +70,8 @@ from themask.errors import MaskError
 from themask.export import ExportOptions, ExportResult, export_case
 from themask.instruction import AI_INSTRUCTION
 from themask.leakcheck import LeakHit
-from themask.ui.cards import DocGlyph, MarkBadge, Themed, folder_trail, style_vars
-from themask.ui.theme import Tokens, tokens_of
+from themask.ui.cards import DocGlyph, MarkBadge, Themed, folder_trail, style_vars, tokens_for
+from themask.ui.theme import Tokens
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
@@ -247,8 +247,7 @@ class _HitDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index: QModelIndex | QPersistentModelIndex,
     ) -> None:
-        widget = option.widget
-        t = tokens_of(widget if widget is not None else QWidget())
+        t = tokens_for(option.widget)
         rect = option.rect.adjusted(12, 0, -12, 0)
         painter.save()
         painter.setPen(QColor(t.border))

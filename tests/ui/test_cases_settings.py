@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import errno
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,7 +27,14 @@ from themask.model import Case, KeyEntry, MaskedFile, PlaceholderType
 from themask.paths import lists_path
 from themask.ui import cases_screen
 from themask.ui.app import RETENTION_DAYS, Settings, settings_path
-from themask.ui.cases_screen import CasesScreen, format_expiry, format_moment
+from themask.ui.cases_screen import (
+    CasesScreen,
+    format_date,
+    format_expiry,
+    format_exported,
+    format_moment,
+    format_when,
+)
 from themask.ui.settings_screen import SettingsScreen
 
 if TYPE_CHECKING:
@@ -146,6 +153,35 @@ def test_the_dates_are_written_the_same_way_in_every_language() -> None:
     local = OCT_17.astimezone()
     assert format_moment(OCT_17) == local.strftime("%Y-%m-%d %H:%M")
     assert format_expiry(OCT_17) == local.strftime("%Y-%m-%d")
+
+
+def test_a_moment_is_said_as_today_yesterday_or_the_day() -> None:
+    now = datetime(2026, 10, 19, 15, 30).astimezone()  # the owner's clock
+    earlier_today = now.replace(hour=14, minute=2)
+    yesterday = (now - timedelta(days=1)).replace(hour=9, minute=41)
+    last_week = (now - timedelta(days=7)).replace(hour=23, minute=59)
+    assert format_when(earlier_today, now) == "today 14:02"
+    assert format_when(yesterday, now) == "yesterday 09:41"
+    assert format_when(last_week, now) == "12 Oct 2026"
+    assert format_exported(earlier_today, now) == "Today, 14:02"
+    assert format_exported(yesterday, now) == "Yesterday, 09:41"
+    assert format_exported(last_week, now) == "12 Oct 2026"
+    assert format_date(now) == "19 Oct 2026"
+
+
+def test_a_day_is_the_calendar_day_not_a_span_of_24_hours() -> None:
+    now = datetime(2026, 10, 19, 0, 10).astimezone()
+    just_before_midnight = datetime(2026, 10, 18, 23, 50).astimezone()  # 20 minutes ago
+    assert format_when(just_before_midnight, now) == "yesterday 23:50"
+    assert format_when(datetime(2026, 10, 17, 23, 55).astimezone(), now) == "17 Oct 2026"
+
+
+@pytest.mark.parametrize(
+    ("month", "name"),
+    [(1, "Jan"), (3, "Mar"), (5, "May"), (8, "Aug"), (11, "Nov"), (12, "Dec")],
+)
+def test_the_month_is_three_english_letters_in_every_language(month: int, name: str) -> None:
+    assert format_date(datetime(2026, month, 5, 12, 0).astimezone()) == f"5 {name} 2026"
 
 
 def test_an_empty_store_says_so_and_offers_nothing(qtbot: QtBot, app_ctx: AppContext) -> None:

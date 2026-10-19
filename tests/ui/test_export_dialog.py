@@ -26,6 +26,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import QApplication, QToolButton, QWidget
 
+from tests.fixtures.d3_look import appears_in
 from tests.helpers import analysed
 from themask.detect.lists import CaseLists, UserLists
 from themask.errors import KeyStoreError, MaskError
@@ -40,7 +41,6 @@ from themask.ui.export_dialog import ExportDialog
 from themask.ui.main_window import MainWindow
 
 if TYPE_CHECKING:
-    from PySide6.QtGui import QImage
     from pytestqt.qtbot import QtBot
 
     from themask.ui.app import AppContext
@@ -947,19 +947,6 @@ def test_done_accepts_and_back_to_review_rejects(
 
 
 # ---- the look ------------------------------------------------------------------------------------
-
-
-def appears_in(image: QImage, colour: str, where: QWidget, around: QWidget) -> bool:
-    """Whether ``colour`` is the colour of a pixel of the picture inside ``where``, which is a
-    widget of ``around``: the sheet is drawn in the colours of its appearance.
-    """
-    top_left = where.mapTo(around, where.rect().topLeft())
-    wanted = QColor(colour).rgb()
-    for dx in range(0, where.width(), 2):
-        for dy in range(0, where.height(), 2):
-            if image.pixel(top_left.x() + dx, top_left.y() + dy) == wanted:
-                return True
-    return False
 
 
 def test_the_sheet_is_drawn_in_the_colours_of_its_appearance_when_saved(
