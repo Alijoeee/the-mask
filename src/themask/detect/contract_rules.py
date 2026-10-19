@@ -869,11 +869,11 @@ _ENGLISH_STREET = re.compile(
     r"(?<![\w.,/])" + _HOUSE_NUMBER + _SP + "+"
     r"(?=(?P<name>(?:" + _NAME_WORD_RE + _SP + "+){1,4})(?:" + _ENGLISH_STREET_WORDS + r")\b)"
 )
-# "Keizersgracht 123", "Friedrichstraße 12", "Berliner Straße 12": a street word ends the street's
-# name or follows it, then the house number.
+# "Keizersgracht 123", "Friedrichstraße 12", "Berliner Straße 12", "Hauptstr. 12": a street word
+# ends the street's name or follows it, then the house number.
 _STREET_SUFFIXES = (
     "straat|weg|laan|plein|gracht|kade|dijk|singel|steeg|markt|stra\N{LATIN SMALL LETTER SHARP S}e"
-    "|strasse|allee|gasse|platz|damm|ufer"
+    "|strasse|str\\.|allee|gasse|platz|damm|ufer"
 )
 _CONTINENTAL_STREET = re.compile(
     r"(?<![\w\-])[^\W\d_][\w'\N{RIGHT SINGLE QUOTATION MARK}\-]*(?:(?i:" + _STREET_SUFFIXES + ")"
@@ -981,6 +981,14 @@ def _is_address_word(doc: _Document, k: int, first: bool) -> bool:
     )
 
 
+def _is_address_abbreviation(word: str) -> bool:
+    """Whether ``word``, without its full stop, is an address word's abbreviation: "St", "Rd", and
+    a German street's name shortened to "str" ("Hauptstr").
+    """
+    folded = word.casefold()
+    return folded in _ADDRESS_ABBREVIATIONS or (folded.endswith("str") and len(folded) > 3)
+
+
 def _address_joined(doc: _Document, k: int) -> bool:
     """Whether word ``k`` goes on the part of an address that word ``k - 1`` is in."""
     before = doc.word(k - 1)
@@ -991,13 +999,13 @@ def _address_joined(doc: _Document, k: int) -> bool:
         return False
     # A full stop ends the sentence, unless it ends an abbreviation or an initial.
     bare = before.rstrip(".")
-    return before == bare or bare.casefold() in _ADDRESS_ABBREVIATIONS or len(_letters(bare)) <= 1
+    return before == bare or _is_address_abbreviation(bare) or len(_letters(bare)) <= 1
 
 
 def _address_word_end(doc: _Document, k: int) -> int:
     word = doc.words[k]
     bare = word.text.rstrip(".")
-    if bare.casefold() in _ADDRESS_ABBREVIATIONS:
+    if _is_address_abbreviation(bare):
         return word.end
     return word.start + len(bare)
 

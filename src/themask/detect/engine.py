@@ -43,6 +43,7 @@ from presidio_analyzer.predefined_recognizers import (
 )
 
 from themask.detect.contract_rules import apply_rules, is_contract_wording, is_job_title
+from themask.detect.lists import is_default_term
 from themask.detect.patterns import (
     AccountNumberRecognizer,
     RegistrationNumberRecognizer,
@@ -191,6 +192,9 @@ _COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 _LEADING_THE = re.compile(r"\A(?i:the)\s+")
 # A colon straight after a word: the word labels its line ("Country: Netherlands").
 _LABELS_ITS_LINE = re.compile(r"[ \t]*:")
+# Up to three words and a colon at the start of a model finding, before its value: "Country:
+# Netherlands", "SUPPLIER: Northwind Trading B.V.".
+_LEADING_LABEL = re.compile(r"(?:[^\W\d_][\w\-]*[ \t]+){0,2}[^\W\d_][\w\-]*[ \t]*:[ \t]*(?=\S)")
 # A label and its value in one part: "BIC: DEUTDEBB".
 _LABEL_AND_VALUE = re.compile(r"[^\W\d_][\w\-]*[ \t]*:[ \t]*(?P<value>\S.*)")
 # What comes before the place of a law or a court: "the laws of", "the courts of", "court in".
@@ -333,14 +337,17 @@ def _checked_by_rules(
 
 def _lines_of(text: str, finding: Finding) -> list[Finding]:
     """A model finding cut at its line breaks, its tabs and the separators of a running header
-    (``_PART_BREAK``), keeping each part with at least two visible characters that names
-    somebody: the model can swallow the heading on the next line ("Northwind Trading
-    B.V.\\nCUSTOMER"), the label of the next line ("...\\nAttention:"), the start of a job title
-    ("JANE SMITH\\nManaging"), across a tab the next field of a form ("Smith\\tTitle:", ruling
-    R58), and a running header whole: both parties and the title ("Northwind / Thamesgate -
-    Supply Agreement", with an em dash).
+    (``_PART_BREAK``), each part without a label it starts with (``_label_end``), keeping each
+    part with at least two visible characters that names somebody: the model can swallow the
+    heading on the next line ("Northwind Trading B.V.\\nCUSTOMER"), the label of the next line
+    ("...\\nAttention:"), the start of a job title ("JANE SMITH\\nManaging"), across a tab the
+    next field of a form ("Smith\\tTitle:", ruling R58), a running header whole: both parties
+    and the title ("Northwind / Thamesgate - Supply Agreement", with an em dash), and a label with
+    its value ("Country: Netherlands").
     """
-    if finding.source != "model" or _PART_BREAK.search(finding.text) is None:
+    if finding.source != "model":
+        return [finding]
+    if _PART_BREAK.search(finding.text) is None and not _label_end(finding.text):
         return [finding]
     parts = []
     piece_start = 0
@@ -350,13 +357,29 @@ def _lines_of(text: str, finding: Finding) -> list[Finding]:
     ]:
         line = finding.text[piece_start:piece_end]
         stripped = line.strip()
-        start = finding.start + piece_start + line.find(stripped)
+        label = _label_end(stripped)
+        start = finding.start + piece_start + line.find(stripped) + label
+        stripped = stripped[label:]
         end = start + len(stripped)
         piece_start = next_start
+        if label and _is_a_code(stripped):
+            continue  # a label with its code: "BIC: DEUTDEBB"
         visible = sum(not character.isspace() for character in stripped)
         if visible >= _MIN_PART_CHARACTERS and not _names_nobody(text, start, end):
             parts.append(replace(finding, start=start, end=end, text=stripped))
     return parts
+
+
+def _label_end(text: str) -> int:
+    """Where the label that ``text`` starts with ends, after its colon and the spaces after it,
+    or 0 when it starts with none. A label is made of the contract's own words or is a never-hide
+    term ("Country:", "Name:", "SUPPLIER:"); "John Smith: Director" starts with a name.
+    """
+    label = _LEADING_LABEL.match(text)
+    if label is None:
+        return 0
+    words = label.group().strip().rstrip(":").strip()
+    return label.end() if is_contract_wording(words) or is_default_term(words) else 0
 
 
 def _names_nobody(text: str, start: int, end: int) -> bool:

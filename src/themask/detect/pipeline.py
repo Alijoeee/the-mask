@@ -121,6 +121,8 @@ _EDGE_MARKS = frozenset(
     "\N{BULLET}\N{MIDDLE DOT}-\N{EN DASH}\N{EM DASH}"
 )
 _BRACKETS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+# The word after a finding, on its line.
+_NEXT_WORD = re.compile(r"[ \t]+([^\W\d_][\w\-']*)")
 _CLOSING = {closing: opening for opening, closing in _BRACKETS.items()}
 
 
@@ -193,7 +195,8 @@ def analyze(
     found = [
         f
         for f in found
-        if (f.start, f.end) in surnames or not (never_hidden(f.text) or _names_nobody(f))
+        if (f.start, f.end) in surnames
+        or not (never_hidden(f.text) or _names_nobody(f) or _starts_a_term(text, f))
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
@@ -303,6 +306,17 @@ def _loose(text: str, start: int, end: int, mark: str, partners: dict[str, str])
 
 
 # --- Never-hide terms and the names that beat them ----------------------------------------------
+
+
+def _starts_a_term(text: str, finding: Finding) -> bool:
+    """Whether a person or company of one word that the engine found is the first word of a
+    default never-hide term with the word after it: "Disclosing" in "(1) The Disclosing Party",
+    which the parties clause reads as a party's name.
+    """
+    if finding.type not in _NAMES or finding.source == "list" or len(finding.text.split()) != 1:
+        return False
+    following = _NEXT_WORD.match(text, finding.end)
+    return following is not None and is_default_term(f"{finding.text} {following[1]}")
 
 
 def _names_nobody(finding: Finding) -> bool:

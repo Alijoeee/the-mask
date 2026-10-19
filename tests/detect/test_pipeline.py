@@ -108,6 +108,24 @@ def test_units_taxes_and_terms_defined_mid_line_stay_visible(engine, lists, t):
     assert analyze(one(t), engine, lists).groups == []
 
 
+def test_a_word_that_makes_a_role_with_the_next_stays_visible(engine, lists):
+    # The parties clause reads "Disclosing" after "(1) The" as a party's name; with "Party" after
+    # it, it is a default never-hide term.
+    t = (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The Disclosing Party, Acme Supplies Ltd; and\n"
+        "(2) The Receiving Party, Northwind Trading B.V."
+    )
+    assert masked(analyze(one(t), engine, lists)) == (
+        "THIS AGREEMENT is made BETWEEN:\n(1) The Disclosing Party, [COMPANY_1]; and\n"
+        "(2) The Receiving Party, [COMPANY_2]"
+    )
+
+
+def test_a_label_the_model_takes_with_its_value_stays_visible(engine, lists):
+    t = "City: Amsterdam\nAPPENDIX 1A\nCountry: Netherlands"
+    assert analyze(one(t), engine, lists).groups == []
+
+
 def test_an_address_ends_with_its_country(engine, lists):
     t = "Registered office: 10 Downing Street, London SW1A 2AA, United Kingdom, Company Secretary"
     a = analyze(one(t), engine, lists)

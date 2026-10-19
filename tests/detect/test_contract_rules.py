@@ -679,6 +679,9 @@ def test_names_and_bare_references_are_not_contract_wording(text):
             "Keizersgracht 123, 1015 CJ Amsterdam",
         ),
         ("Address:\nKeizersgracht 123, 1015 CJ Amsterdam", "Keizersgracht 123, 1015 CJ Amsterdam"),
+        # A German street name shortened to "str.".
+        ("Deliveries go to Hauptstr. 12, 10115 Berlin.", "Hauptstr. 12, 10115 Berlin"),
+        ("Ship to Bahnhofstr. 5 today.", "Bahnhofstr. 5"),
         # An address ends with its country: what follows on the line is no part of it.
         (
             "Address: Keizersgracht 123, 1015 CJ Amsterdam, the Netherlands, Attention Finance",
@@ -1030,6 +1033,13 @@ def test_model_findings_never_cross_a_running_header_separator(engine):
         (COMPANY, "Thamesgate"),
     ]
     assert not [f for f in fs if {"/", "\N{EM DASH}", "\N{MIDDLE DOT}"} & set(f.text)]
+
+
+def test_a_model_finding_loses_the_label_it_starts_with(engine):
+    t = "City: Amsterdam\nAPPENDIX 1A\nCountry: Netherlands\nName: John Carter"
+    fs = engine.analyze(t)
+    assert not [f for f in fs if ":" in f.text]
+    assert "John Carter" in texts(fs, t)
 
 
 def test_the_title_in_a_running_header_stays_visible(engine):
