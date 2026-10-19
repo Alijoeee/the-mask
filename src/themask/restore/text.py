@@ -42,15 +42,20 @@ class TextRestorer:
         """The changes that restore ``text``, as ``(start, end, new text)``, in text order.
 
         Each of The MASK's own lines is cut out, and each placeholder dealt with as
-        ``restore_text`` says, the report counting it; no two changes overlap. A placeholder
-        that overlaps a stretch of ``keep`` is left as it is and not reported.
+        ``restore_text`` says, the report counting it; no two changes overlap. A placeholder or
+        one of The MASK's own lines that overlaps a stretch of ``keep`` is left as it is and not
+        reported.
         """
-        banners = banner_spans(text)
+
+        def kept(start: int, end: int) -> bool:
+            return any(start < keep_end and keep_start < end for keep_start, keep_end in keep)
+
+        banners = [(start, end) for start, end in banner_spans(text) if not kept(start, end)]
         self.report.banner_removed = self.report.banner_removed or bool(banners)
         edits = [(start, end, "") for start, end in banners]
         for item in plan_restore(text, self.case):
             match = item.match
-            if any(match.start < end and start < match.end for start, end in keep):
+            if kept(match.start, match.end):
                 continue
             if item.entry is None:
                 if match.raw not in self.report.unknown:  # each once, as it first appears

@@ -11,6 +11,12 @@ first run, also where Word split the placeholder across runs, and a tab or line 
 becomes a ``w:tab`` or ``w:br`` as Word writes them. A text box's fallback copy, which Word keeps
 for old readers, is restored the same way but not counted again.
 
+The AI's tracked changes are restored too (ruling R88), so that neither accepting nor rejecting
+one brings a placeholder back. A paragraph is restored first with every change accepted, its
+insertions with it, then with every change rejected, for the text only that view holds: what the
+AI deleted (``w:del``) or moved away (``w:moveFrom``). Each is counted like any other, and the
+text the two views share is restored and reported once.
+
 The MASK's banner and its instruction for the AI are taken out (``banner_spans``). A paragraph
 of the body that holds nothing but one of them is deleted, with an empty paragraph right after
 it; elsewhere (a table cell, a header, a note, a comment) the paragraph stays, emptied, since
@@ -19,8 +25,6 @@ A paragraph that ends a section is never deleted, as its section would go with i
 
 Not restored: placeholders in field instructions, link addresses and bookmark names. The AI
 reads and writes the text, not those, and changing them could break the field or the link.
-Text that a tracked change of the AI took out is left as it is: the paragraphs are read with
-every change accepted.
 """
 
 from __future__ import annotations
@@ -46,6 +50,8 @@ _R = f"{_W}r"
 _RPR = f"{_W}rPr"
 _SECT_PR = f"{_W}sectPr"
 _FALLBACK = f"{{{NS['mc']}}}Fallback"
+# What a tracked change took out: deleted text, and text moved away from here.
+_TAKEN_OUT = (f"{_W}del", f"{_W}moveFrom")
 
 
 def restore_docx(
@@ -96,11 +102,28 @@ def _restore_paragraph(p: etree._Element, restorer: TextRestorer) -> list[etree.
     edits = restorer.edits(text, keep=instructions)
     if edits:
         replace_in_paragraph(p, "accepted", edits, breaks=True)
+    if next(p.iter(*_TAKEN_OUT), None) is not None:
+        _restore_taken_out(p, restorer)
     own_line = bool(text) and banner_spans(text) == [(0, len(text))]
     if not (own_line and p.getparent().tag == _BODY and _is_empty(p)):
         return []
     after = p.getnext()
     return [p, after] if after is not None and _is_empty(after) else [p]
+
+
+def _restore_taken_out(p: etree._Element, restorer: TextRestorer) -> None:
+    """Restores the text that the AI's tracked changes took out of paragraph ``p``.
+
+    The paragraph is read with every change rejected, and only the text that view alone holds is
+    planned: the rest was restored, and reported, with every change accepted. Field instructions
+    stay, as they do there.
+    """
+    accepted = {node.elem for node in paragraph_nodes(p, "accepted")[1]}
+    text, nodes = paragraph_nodes(p, "rejected")
+    keep = [(n.start, n.end) for n in nodes if n.elem in accepted or n.kind == "instr"]
+    edits = restorer.edits(text, keep=keep)
+    if edits:
+        replace_in_paragraph(p, "rejected", edits, breaks=True)
 
 
 def _is_empty(element: etree._Element) -> bool:

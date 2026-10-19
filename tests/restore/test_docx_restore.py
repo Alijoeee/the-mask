@@ -11,7 +11,9 @@ paragraph has to stay, and a paragraph that ends a section never deleted; a valu
 break and a tab written as Word writes them (decision 2); field instructions left as they are
 (decision 3); a text box's fallback copy restored and counted once; changed placeholders waiting
 for the owner, a one-sided bracket kept (R79); the AI's file never changed, and no file ever
-written over.
+written over. Ruling R88: placeholders in the AI's tracked changes are restored too, in what it
+deleted or moved away as in what it inserted, by the same rules and counted the same way, and
+nothing in unchanged text is reported twice.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from tests.fixtures.docx import MakeDocx
 from tests.fixtures.restore import CASE, NOW
 from tests.helpers import SPLIT_RSID, simulate_ai
 from themask.docx.package import NS, DocxPackage
-from themask.docx.reader import extract_text
+from themask.docx.reader import View, extract_text
 from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
 from themask.placeholders import find_placeholders
@@ -47,9 +49,14 @@ TEXT_BOX = (
 )
 
 
+def run(text: str) -> str:
+    """A run holding ``text``."""
+    return f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+
+
 def p(text: str) -> str:
     """A paragraph of one run holding ``text``."""
-    return f'<w:p><w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+    return f"<w:p>{run(text)}</w:p>"
 
 
 def italic(text: str) -> str:
@@ -57,8 +64,15 @@ def italic(text: str) -> str:
     return f"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>{escape(text)}</w:t></w:r></w:p>"
 
 
-def text_of(path: Path) -> str:
-    return extract_text(DocxPackage.open(path)).text
+def text_of(path: Path, view: View = "accepted") -> str:
+    return extract_text(DocxPackage.open(path), view).text
+
+
+def tracked(kind: str, content: str) -> str:
+    """A tracked change of the AI's: ``w:ins``, ``w:del``, ``w:moveFrom`` or ``w:moveTo``."""
+    return (
+        f'<w:{kind} w:id="9" w:author="AI tool" w:date="2026-10-17T09:00:00Z">{content}</w:{kind}>'
+    )
 
 
 def paragraphs_of(path: Path) -> list[str]:
@@ -316,3 +330,95 @@ def test_the_restored_file_goes_into_the_folder_asked_for(
     folder = tmp_path / "restored" / "here"
     out, _ = restore_docx(path, CASE, confirm_altered=True, out_dir=folder)
     assert out == folder / f"{path.stem} {DASH} restored.docx" and text_of(out) == "John Smith"
+
+
+def test_tracked_changes_of_the_ai_are_restored_in_both_views(make_docx: MakeDocx) -> None:
+    # R88: rejecting the AI's deletion must not bring a placeholder back, and accepting its
+    # insertion must not either. Each keeps its run's formatting; the report counts both.
+    deleted = "<w:r><w:rPr><w:b/></w:rPr><w:delText>[PERSON_1]</w:delText></w:r>"
+    inserted = "<w:r><w:rPr><w:i/></w:rPr><w:t>[COMPANY_1]</w:t></w:r>"
+    path = make_docx(
+        f"<w:p>{run('Signed by ')}{tracked('del', deleted)}{tracked('ins', inserted)}"
+        f"{run(' today.')}</w:p>"
+    )
+    out, rep = restore_docx(path, CASE, confirm_altered=False)
+    assert text_of(out, "accepted") == "Signed by Acme Supplies Ltd today."
+    assert text_of(out, "rejected") == "Signed by John Smith today."
+    root = DocxPackage.open(out).xml("word/document.xml")
+    (gone,) = root.iter(f"{W}delText")
+    assert gone.text == "John Smith" and gone.getparent().find("w:rPr/w:b", NS) is not None
+    (put_in,) = root.findall(".//w:ins/w:r", NS)
+    assert put_in.findtext("w:t", namespaces=NS) == "Acme Supplies Ltd"
+    assert put_in.find("w:rPr/w:i", NS) is not None
+    assert rep.summary() == "2 placeholders restored, 0 need your check."
+
+
+def test_a_move_is_restored_where_it_went_and_where_it_came_from(make_docx: MakeDocx) -> None:
+    moved = "<w:r><w:t>[AMOUNT_1]</w:t></w:r>"
+    path = make_docx(
+        f"<w:p>{tracked('moveFrom', moved)}{run(' is due.')}</w:p>"
+        f"<w:p>{run('Due: ')}{tracked('moveTo', moved)}</w:p>"
+    )
+    out, rep = restore_docx(path, CASE, confirm_altered=True)
+    assert text_of(out, "accepted") == " is due.\nDue: EUR 1,250,000"
+    assert text_of(out, "rejected") == "EUR 1,250,000 is due.\nDue: "
+    assert rep.restored == 2
+
+
+@pytest.mark.parametrize("confirm_altered", [False, True])
+def test_a_deletion_follows_the_same_rules_and_nothing_is_reported_twice(
+    make_docx: MakeDocx, confirm_altered: bool
+) -> None:
+    # The unchanged "person_1" is read in both views but planned once; in the deletion an exact,
+    # a changed and an unknown placeholder are dealt with as anywhere else.
+    deleted = "<w:r><w:delText>[PERSON_1], person_1 and [PERSON_9]</w:delText></w:r>"
+    path = make_docx(f"<w:p>{run('person_1 met ')}{tracked('del', deleted)}</w:p>")
+    out, rep = restore_docx(path, CASE, confirm_altered)
+    assert rep.unknown == ["[PERSON_9]"]
+    if confirm_altered:
+        assert text_of(out, "rejected") == "John Smith met John Smith, John Smith and [PERSON_9]"
+        assert (rep.restored, rep.altered_restored, rep.needs_check) == (3, 2, [])
+    else:
+        assert text_of(out, "rejected") == "person_1 met John Smith, person_1 and [PERSON_9]"
+        assert [item.match.raw for item in rep.needs_check] == ["person_1", "person_1"]
+        assert (rep.restored, rep.altered_restored) == (1, 0)
+
+
+def test_a_banner_the_ai_deleted_goes_and_is_not_restored(make_docx: MakeDocx) -> None:
+    # The AI took the banner out as a tracked change: rejecting that must not bring it back
+    # with a real value in it, so it is cut out of the deletion too.
+    banner = f"<w:r><w:delText>{BANNER_TEXT}</w:delText></w:r>"
+    path = make_docx(f"<w:p>{tracked('del', banner)}</w:p>{p('Hello [PERSON_1]')}")
+    out, rep = restore_docx(path, CASE, confirm_altered=True)
+    assert text_of(out, "rejected") == "\nHello John Smith"
+    assert rep.banner_removed and (rep.restored, rep.unknown) == (1, [])
+
+
+def test_restoring_what_the_ai_took_out_never_changes_the_text_both_views_share(
+    make_docx: MakeDocx,
+) -> None:
+    # The AI changed only the banner's example, as a tracked change. Read with the change
+    # rejected, the line is the banner again; it is not cut there, as most of it is text the
+    # file shows either way, and nothing in it is restored.
+    before, after = BANNER_TEXT.split("[COMPANY_1]")
+    path = make_docx(
+        f"<w:p>{run(before)}{tracked('del', '<w:r><w:delText>[COMPANY_1]</w:delText></w:r>')}"
+        f"{tracked('ins', '<w:r><w:t>[COMPANY_2]</w:t></w:r>')}{run(after)}</w:p>"
+    )
+    out, rep = restore_docx(path, CASE, confirm_altered=True)
+    assert text_of(out, "accepted") == f"{before}[COMPANY_2]{after}"
+    assert text_of(out, "rejected") == BANNER_TEXT
+    assert not rep.banner_removed and (rep.restored, rep.unknown) == (0, ["[COMPANY_2]"])
+
+
+def test_a_line_break_in_a_value_the_ai_deleted_is_written_as_word_writes_it(
+    make_docx: MakeDocx,
+) -> None:
+    case = Case(
+        "BRK", NOW, [], [], [KeyEntry("[ADDRESS_1]", PlaceholderType.ADDRESS, "Line 1\nLine 2", [])]
+    )
+    deleted = tracked("del", "<w:r><w:delText>[ADDRESS_1]</w:delText></w:r>")
+    out, rep = restore_docx(make_docx(f"<w:p>{run('To ')}{deleted}</w:p>"), case, False)
+    assert text_of(out, "rejected") == "To Line 1\nLine 2" and rep.restored == 1
+    (gone,) = DocxPackage.open(out).xml("word/document.xml").findall(".//w:del/w:r", NS)
+    assert [etree.QName(child).localname for child in gone] == ["delText", "br", "delText"]
