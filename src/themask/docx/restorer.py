@@ -7,12 +7,15 @@ hold it. The new text goes into the first node that holds part of the stretch, s
 run's formatting (its ``w:rPr``). The rest of the stretch is cut out of the nodes after it, and a
 node left empty is deleted, with its run when nothing but formatting is left in the run. Tabs,
 breaks and hyphens, which the text map reads as characters without a node of their own, are
-deleted when they lie inside the stretch.
+deleted when they lie inside the stretch. A tab or line break in the new text can be written the
+way Word writes one, as a ``w:tab`` or ``w:br`` of the run (``breaks``), which the restore needs
+for a value that has one.
 """
 
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 
 from lxml import etree
@@ -23,6 +26,9 @@ from themask.docx.reader import _CHARACTERS, View, paragraph_nodes
 _R = f"{{{NS['w']}}}r"
 _RPR = f"{{{NS['w']}}}rPr"
 _T = f"{{{NS['w']}}}t"
+# How Word writes a tab and a line break in a run: as elements of their own, not as characters.
+_MARKS = {"\t": f"{{{NS['w']}}}tab", "\n": f"{{{NS['w']}}}br"}
+_MARK = re.compile("([\t\n])")
 _XML_SPACE = f"{{{NS['xml']}}}space"
 # The spaces XML drops at either end of a w:t's text unless the w:t says xml:space="preserve".
 _XML_WHITESPACE = " \t\r\n"
@@ -53,7 +59,7 @@ class _Piece:
 
 
 def replace_in_paragraph(
-    p: etree._Element, view: View, replacements: list[tuple[int, int, str]]
+    p: etree._Element, view: View, replacements: list[tuple[int, int, str]], *, breaks: bool = False
 ) -> int:
     """Replaces stretches of paragraph ``p``'s text, as ``view`` reads it; returns how many.
 
@@ -62,7 +68,8 @@ def replace_in_paragraph(
     replacements must be in order and must not overlap, though two may touch. Text outside the
     view (deleted text in the accepted view) is never changed. A stretch that holds no character
     of a ``w:t`` or ``w:instrText`` (an empty one, a tab alone) is skipped and not counted: there
-    is no node to put its text in.
+    is no node to put its text in. With ``breaks``, each "\t" and "\n" of a new text becomes a
+    ``w:tab`` or ``w:br`` in the run, and the text after it a node of its own after that.
 
     Raises ValueError for replacements out of order, overlapping or outside the text, before
     anything changes.
@@ -90,7 +97,10 @@ def replace_in_paragraph(
             old = piece.elem.text or ""
             cut_from = max(start - piece.start, 0)
             cut_to = min(end, piece.end) - piece.start
-            piece.elem.text = old[:cut_from] + (new if piece is first else "") + old[cut_to:]
+            if piece is first and breaks and _MARK.search(new):
+                _write_with_marks(piece.elem, old[:cut_from], new, old[cut_to:], edited)
+            else:
+                piece.elem.text = old[:cut_from] + (new if piece is first else "") + old[cut_to:]
             edited[piece.elem] = None
         made += 1
     for node in edited:
@@ -139,6 +149,30 @@ def _characters(p: etree._Element, view: View) -> list[_Piece]:
         for n in nodes
         if n.elem in original_of
     ]
+
+
+def _write_with_marks(
+    node: etree._Element, head: str, new: str, tail: str, edited: dict[etree._Element, None]
+) -> None:
+    """Writes ``head + new + tail`` into ``node``, each tab or line break of ``new`` as Word does.
+
+    The text up to the first mark stays in ``node``. Each mark becomes a ``w:tab`` or ``w:br``
+    after it in the run, followed by a node of ``node``'s kind with the text up to the next mark;
+    ``tail`` ends the last one. The new nodes join ``edited``, so that an empty one is deleted
+    and one with spaces at an end keeps them. The nodes after ``node`` are not part of the text
+    map's positions, so the replacements still to come, all before this one, are not moved.
+    """
+    pieces = _MARK.split(new)
+    node.text = head + pieces[0]
+    last = node
+    for mark, text in zip(pieces[1::2], pieces[2::2], strict=True):
+        element = etree.Element(_MARKS[mark])
+        last.addnext(element)
+        last = etree.Element(node.tag)
+        last.text = text
+        element.addnext(last)
+        edited[last] = None
+    last.text = (last.text or "") + tail
 
 
 def _keep_spaces(node: etree._Element) -> None:
