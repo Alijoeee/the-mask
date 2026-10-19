@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import pytest
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication, QFrame, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QLabel, QTableWidget, QWidget
 
 from themask.ui import theme
 from themask.ui.cards import (
@@ -20,6 +20,7 @@ from themask.ui.cards import (
     DocGlyph,
     FlowLayout,
     MarkBadge,
+    TableHead,
     Themed,
     TickLabel,
     appearance_name,
@@ -343,6 +344,37 @@ def test_an_empty_flow_has_no_height_and_items_can_be_taken_out(qtbot: QtBot) ->
     assert isinstance(layout.sizeHint().width(), int) and QRect(0, 0, 1, 1).isValid()
 
 
+# ---- the head of a table ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_a_table_head_is_painted_from_the_tokens_and_keeps_the_words_it_was_given(
+    qtbot: QtBot, appearance: str
+) -> None:
+    t = theme.tokens(appearance)
+    table = QTableWidget(1, 3)
+    qtbot.addWidget(table)
+    table.setHorizontalHeader(TableHead(table))
+    table.setHorizontalHeaderLabels(["Code", "Files", "Values"])
+    table.horizontalHeaderItem(2).setTextAlignment(  # type: ignore[union-attr]
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    )
+    head = table.horizontalHeader()
+    head.setPalette(theme.palette(appearance))
+    head.setFixedHeight(32)
+    table.resize(400, 120)
+    table.show()
+    image = head.grab().toImage()
+    colours = {image.pixel(x, y) for x in range(image.width()) for y in range(image.height())}
+    assert QColor(t.table_head).rgb() in colours  # the ground of the head
+    assert QColor(t.border).rgb() in colours  # the line under it
+    assert QColor(t.secondary).rgb() in colours or any(  # the words: a little blurred by the edges
+        QColor(c).lightness() != QColor(t.table_head).lightness() for c in colours
+    )
+    assert [table.horizontalHeaderItem(n).text() for n in range(3)] == ["Code", "Files", "Values"]
+    assert head.defaultAlignment() & Qt.AlignmentFlag.AlignLeft
+
+
 # ---- the boxes ------------------------------------------------------------------------------------
 
 
@@ -389,6 +421,8 @@ def test_a_screen_names_no_colour_but_the_tokens(module: str) -> None:
     source = (Path(themask.ui.__file__).parent / f"{module}.py").read_text(encoding="utf-8")
     assert re.findall(r"#[0-9A-Fa-f]{6}\b", source) == []  # not a literal colour
     assert not re.search(r"Qt\.GlobalColor\.(white|black)|\"white\"|\"black\"", source)
-    # ``tertiary`` is for what stands in a field and for what is off (the application's palette
-    # and style sheet say where); the words of these screens are ``secondary`` at the palest.
-    assert not re.search(r"\.tertiary\b|\$tertiary\b", source)
+    # ``tertiary`` is for what stands in a field and for what is switched off (the application's
+    # palette and style sheet say where, and a rule for ``:disabled`` may); the words of these
+    # screens are ``secondary`` at the palest.
+    without_disabled = re.sub(r"[^{}\n]*:disabled[^{}]*\{[^}]*\}", "", source)
+    assert not re.search(r"\.tertiary\b|\$tertiary\b", without_disabled)

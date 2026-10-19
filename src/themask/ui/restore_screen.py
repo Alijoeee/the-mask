@@ -552,18 +552,14 @@ class RestoreScreen(QWidget):
         """
         case_label = QLabel(CASE_LABEL)
         case_label.setProperty("role", "label")
-        self.case_combo = ChevronCombo()
+        self.case_combo = ChevronCombo(preferred_width=360, minimum_width=180)
         self.case_combo.setObjectName("caseCombo")
-        self.case_combo.setMinimumWidth(360)
-        self.case_combo.setSizeAdjustPolicy(
-            ChevronCombo.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
-        )
-        self.case_combo.setMinimumContentsLength(44)
         self.case_combo.activated.connect(self._owner_chose_case)
         self.case_combo.currentIndexChanged.connect(self._case_changed)
         case_label.setBuddy(self.case_combo)
         self.chosen_label = TickLabel(CHOSEN)
         self.chosen_label.setObjectName("chosen")
+        self.chosen_label.setWordWrap(True)
         self.chosen_label.hide()
         self.restore_button = QPushButton("Restore")
         self.restore_button.setObjectName("primary")

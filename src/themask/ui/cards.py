@@ -13,10 +13,10 @@ for what is off), and the accent as text is ``accent_text_on_soft`` where it sta
 The rest draws itself from the tokens of its own palette (``theme.tokens_of``), so it follows the
 appearance without any wiring: ``MarkBadge`` (the round check or exclamation mark of a result),
 ``DocGlyph`` (the little document of a file card), ``TickLabel`` (a line of text that starts
-with a tick), ``Box`` (a text box as tall as it needs to be) and ``ChevronCombo`` (a combo box
-with a chevron that is the same on every platform). ``FlowLayout`` lays cards out side by side
-and wraps them onto the next row when the window is narrow. ``folder_trail`` writes a folder the
-way the mockups do: Documents › The MASK.
+with a tick), ``TableHead`` (the head of a table, in capitals), ``Box`` (a text box as tall as
+it needs to be) and ``ChevronCombo`` (a combo box with a chevron that is the same on every
+platform). ``FlowLayout`` lays cards out side by side and wraps them onto the next row when the
+window is narrow. ``folder_trail`` writes a folder the way the mockups do: Documents › The MASK.
 """
 
 from __future__ import annotations
@@ -27,10 +27,11 @@ from pathlib import Path
 from typing import Literal
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QHeaderView,
     QLabel,
     QLayout,
     QLayoutItem,
@@ -249,6 +250,54 @@ class TickLabel(QLabel):
         painter.end()
 
 
+class TableHead(QHeaderView):
+    """The head of a table, painted from the tokens: the labels in small capitals-style type
+    (11 points, weight 600, upper case, a little spaced, secondary) on the table-head colour with
+    a line under it, and the top corners round to fit the card the table stands in. The text of
+    the headers stays as it was given ("Code"): the style sheet of a header cannot set capitals,
+    and a font that does is lost when it sets the size.
+    """
+
+    RADIUS = 11.0
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.setHighlightSections(False)
+        self.setSectionsClickable(False)
+
+    def paintSection(self, painter: QPainter, rect: QRect, logicalIndex: int) -> None:
+        t = tokens_for(self)
+        model = self.model()
+        text = str(model.headerData(logicalIndex, Qt.Orientation.Horizontal) or "")
+        align = model.headerData(
+            logicalIndex, Qt.Orientation.Horizontal, Qt.ItemDataRole.TextAlignmentRole
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        shape = QPainterPath()  # the head of the table: round at the top, square under it
+        shape.setFillRule(Qt.FillRule.WindingFill)  # (the two parts overlap, and both count)
+        whole = QRectF(0, 0, self.length(), self.height())
+        shape.addRoundedRect(whole, self.RADIUS, self.RADIUS)
+        shape.addRect(whole.adjusted(0, self.RADIUS, 0, 0))
+        painter.setClipPath(shape.translated(-self.offset(), 0))
+        painter.fillRect(rect, QColor(t.table_head))
+        painter.fillRect(QRect(rect.left(), rect.bottom(), rect.width(), 1), QColor(t.border))
+        font = QFont(self.font())
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.DemiBold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
+        painter.setFont(font)
+        painter.setPen(QColor(t.secondary))
+        alignment = (
+            Qt.AlignmentFlag(int(align))
+            if isinstance(align, int)
+            else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        painter.drawText(rect.adjusted(10, 0, -10, 0), alignment, text.upper())
+        painter.restore()
+
+
 class Box(QPlainTextEdit):
     """A text box that asks for ``height`` points, as tall as it needs to be and no taller (a
     plain text box asks for 192 whatever is in it), and grows with the room it is given.
@@ -267,7 +316,26 @@ class ChevronCombo(QComboBox):
     """A combo box that draws its own chevron. The style sheet takes the platform's arrow away
     (``QComboBox::down-arrow { image: none; }``), because how that arrow looks, and whether it
     stays once the box has a border of its own, depends on the platform's style.
+
+    It asks for ``preferred_width`` points and gives way to as little as ``minimum_width`` when
+    the window is narrow, whatever its longest line says.
     """
+
+    def __init__(
+        self, preferred_width: int = 0, minimum_width: int = 120, parent: QWidget | None = None
+    ) -> None:
+        super().__init__(parent)
+        self._preferred = preferred_width
+        self._least = minimum_width
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(1)
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(max(self._preferred, self._least), hint.height())
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(self._least, super().minimumSizeHint().height())
 
     def paintEvent(self, e: QPaintEvent) -> None:
         super().paintEvent(e)

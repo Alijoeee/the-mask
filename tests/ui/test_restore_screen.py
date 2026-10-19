@@ -1786,7 +1786,8 @@ def test_the_paste_card_has_a_label_for_its_box_and_the_mockup_s_hint(
 def test_the_case_card_has_a_label_for_its_box(screen: RestoreScreen) -> None:
     labels = [label for label in screen.findChildren(QLabel) if label.buddy() is screen.case_combo]
     assert [label.text() for label in labels] == ["Case"]
-    assert screen.case_combo.minimumWidth() >= 360
+    assert screen.case_combo.sizeHint().width() >= 360  # it asks for the mockup's width ...
+    assert screen.case_combo.minimumSizeHint().width() <= 200  # ... and gives way when narrow
 
 
 # ---- the values the case would put back --------------------------------------------------------------
@@ -2186,6 +2187,28 @@ def test_the_restore_screen_is_drawn_in_the_colours_of_its_appearance(
         assert appears_in(image, t.success, s.result_panel, s) and appears_in(
             image, t.success_bg, s.result_panel, s
         )
+
+
+def test_the_restore_screen_fits_the_narrowest_window_of_the_app(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    d3_appearance: str,
+    d3_shot: Callable[[QWidget, str, str], QImage],
+) -> None:
+    s = mockup_screen(qtbot, app_ctx, make_docx, tmp_path, restored=True)
+    s.set_primary_in_toolbar(False)
+    s.resize(660, 760)  # a 880-point window less the 220 of its sidebar
+    s.show()
+    qtbot.waitExposed(s)
+    qtbot.wait(50)
+    d3_shot(s, "restore-narrow", d3_appearance)
+    content = s.scroll_area.widget()
+    assert content is not None and content.minimumSizeHint().width() <= 660
+    assert not s.scroll_area.horizontalScrollBar().isVisible()  # nothing is cut off at the side
+    for part in (s.case_combo, s.chosen_label, s.restore_button, s.drop_zone):
+        assert part.mapTo(s, part.rect().bottomRight()).x() <= 660 - 32 + 1, part.objectName()
 
 
 def test_the_restore_screen_is_drawn_for_a_text_and_for_a_narrow_window_too(
