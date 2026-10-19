@@ -82,6 +82,20 @@ def test_never_hide_terms_stay(engine, lists):
     assert a.groups == []
 
 
+@pytest.mark.parametrize(
+    "t",
+    [
+        "The Supplier shall maintain ISO 9001 and EN 1090 certification.",
+        "Regulation (EU) No 1169/2011 applies to the labels.",
+        "Prices agreed on 21 July 2026.3 This Agreement is signed.",  # a PDF's footnote mark
+        "Deliveries arrive by 1700 CET.",
+        "The licence runs for ten thousand (10,000) days.",
+    ],
+)
+def test_references_standards_dates_and_times_stay_visible(engine, lists, t):
+    assert analyze(one(t), engine, lists).groups == []
+
+
 def test_always_hide_list(engine, lists):
     lists.add_always("Project Falcon")
     t = "Project Falcon starts in May; PROJECT FALCON ends in June."

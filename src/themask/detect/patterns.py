@@ -145,10 +145,10 @@ _UNIT_WORDS = (
 _UNIT = "(?:(?i:" + _UNIT_WORDS + r")|t|l|L|m)(?!\w)"
 
 # What makes a figure a duration, which stays visible: "1,000 days", "2,500 working days",
-# "a 1,000-day period".
+# "a 1,000-day period", "ten thousand (10,000) days".
 _DAY_KIND = "(?i:(?:business|working|calendar|banking)" + _SPACE + "+)?"
 _TIME_UNIT = r"(?i:day|week|month|year|hour)s?\b"
-_DURATION_AFTER = re.compile("(?:" + _SPACE + "|-)*" + _DAY_KIND + _TIME_UNIT)
+_DURATION_AFTER = re.compile("(?:" + _SPACE + r"|-|\))*" + _DAY_KIND + _TIME_UNIT)
 
 # What may stand between a label such as "number" and the value after it.
 _LABEL_TO_VALUE = _SPACE + "*[:#]?" + _SPACE + "*"
@@ -579,6 +579,25 @@ _BARE_AFTER = r"(?![\w%]|[.," + _APOSTROPHES + r"]\d)"
 _BARE_FIGURE = _BARE_BEFORE + _BARE_INTEGER + r"(?P<decimals>[.,]\d+)?" + _BARE_AFTER
 
 _THOUSANDS_WORD = re.compile(r"(?i:thousand|million|billion)")
+# A standard a number is the reference of: "ISO 9001", "EN 1090", "ISO/IEC 27001", "BS EN 1176".
+_STANDARD_BEFORE = re.compile(
+    r"\b(?:ISO|EN|IEC|DIN|BS|NEN|ASTM|ANSI|IEEE)(?:[/ ](?:IEC|EN|ISO|TS|TR|PAS))*" + _SPACE + r"*\Z"
+)
+# A number with a slash and a number after it is the reference of a law or a case: "Regulation
+# (EU) No 1169/2011".
+_SLASH_AND_NUMBER = re.compile(r"/\d")
+# The month before a year makes the year a date's: "21 July 2026", "July 21, 2026"; a PDF's text
+# may glue a footnote mark to it ("21 July 2026.3").
+_MONTH_NAMES = (
+    "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    "|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_DAY_AND_COMMA = r"\d{1,2}(?i:st|nd|rd|th)?,"
+_MONTH_BEFORE = re.compile(
+    r"\b(?i:" + _MONTH_NAMES + r")\.?" + _SPACE + "+(?:" + _DAY_AND_COMMA + _SPACE + r"*)?\Z"
+)
+# A time of day in four figures, before its time zone: "by 1700 CET".
+_TIME_ZONE_AFTER = re.compile(_SPACE + r"*(?:CET|CEST|GMT|BST|UTC|EET|EEST|WET|WEST)\b")
 # Words that make a bare number a likely amount when they come shortly before it.
 _PRICE_WORDS = ("price", "fee", "amount", "total", "value", "charge", "consideration", "sum")
 
@@ -588,9 +607,11 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
 
     48,000 · 1.250.000,00 · 1 250 000 · 48000 · "ten thousand (10,000)". They are amounts for the
     owner to check: 0.4, which Presidio raises to 0.75 when a word such as "price" or "fee" comes
-    shortly before. Years (1900 to 2099), durations ("1,000 days") and references ("section 1159")
-    stay visible. A clause number such as 10.2, at the start of a line or after "clause", is never
-    one of these numbers: it is below 1,000, and its digits are not in groups of three.
+    shortly before. Years (1900 to 2099, and the year of a date with something glued to it,
+    "21 July 2026.3"), durations ("1,000 days"), times of day ("1700 CET") and references
+    ("section 1159", "ISO 9001", "Regulation (EU) No 1169/2011") stay visible. A clause number such
+    as 10.2, at the start of a line or after "clause", is never one of these numbers: it is below
+    1,000, and its digits are not in groups of three.
     """
 
     def __init__(self) -> None:
@@ -611,14 +632,30 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
         if words is not None:
             return pattern.score if _THOUSANDS_WORD.search(words) else 0.0
         integer = match["integer"]
-        value = int(re.sub(r"\D", "", integer))
+        digits = re.sub(r"\D", "", integer).lstrip("0")
+        # Only four digits or fewer can be below 1,000 or a year. A longer run is never turned into
+        # a number: Python refuses to for more than 4,300 digits.
+        value = int(digits or "0") if len(digits) <= 4 else 10_000
         if value < 1000:
             return 0.0
-        if match["decimals"] is None and integer.isdigit() and 1900 <= value <= 2099:
+        before = max(0, start - 24)
+        is_a_year = integer.isdigit() and 1900 <= value <= 2099
+        if is_a_year and (match["decimals"] is None or _MONTH_BEFORE.search(text, before, start)):
             return 0.0  # a year
-        if _REFERENCE_BEFORE.search(text, max(0, start - 24), start):
+        if integer.isdigit() and _is_a_time_of_day(value) and _TIME_ZONE_AFTER.match(text, end):
+            return 0.0
+        if _SLASH_AND_NUMBER.match(text, end):
+            return 0.0
+        if _REFERENCE_BEFORE.search(text, before, start):
+            return 0.0
+        if _STANDARD_BEFORE.search(text, before, start):
             return 0.0
         return pattern.score
+
+
+def _is_a_time_of_day(value: int) -> bool:
+    """Whether four figures ``value`` read as hours and minutes: 1700 is five in the afternoon."""
+    return value // 100 < 24 and value % 100 < 60
 
 
 # --- E-mail and web addresses ---------------------------------------------------------------------

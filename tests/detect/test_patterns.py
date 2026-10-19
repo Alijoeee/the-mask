@@ -562,10 +562,29 @@ def test_bare_numbers(engine, text, needle, score):
         "twenty",
         "five hundred",
         "one thousand days",
+        # A year with a footnote mark glued to it, as a PDF's text gives it.
+        "agreed on 21 July 2026.3 This Agreement",
+        "agreed on July 21, 2026.3",
+        # References to a law and to a standard.
+        "Regulation (EU) No 1169/2011",
+        "certified to ISO 9001",
+        "to EN 1090 and ISO/IEC 27001",
+        # A duration with its figure in brackets, and a time of day.
+        "for ten thousand (10,000) days",
+        "by 1700 CET each day",
+        "after 1730 hours",
     ],
 )
 def test_bare_number_exclusions(text):
     assert found_by(BareNumberRecognizer(), text) == {}
+
+
+def test_a_very_long_run_of_digits_is_read_without_error():
+    # Python refuses to turn more than 4,300 digits into a number; the check never needs to.
+    digits = "1" * 5000
+    assert found_by(BareNumberRecognizer(), f"Total: {digits}") == {digits: 0.4}
+    zeros = "0" * 5000 + "12"
+    assert found_by(BareNumberRecognizer(), f"Total: {zeros}") == {}
 
 
 # --- E-mail, phone, web addresses ----------------------------------------------------------------
