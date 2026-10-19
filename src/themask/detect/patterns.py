@@ -135,10 +135,12 @@ _CURRENCY_AFTER = _any_of(_CURRENCY_MARK, _CURRENCY_WORD)
 
 # The units a quantity is counted or measured in; never a unit of time, so that "30 days" stays
 # visible. Single letters are case-sensitive (t, l, L, m) so that they do not match a stray capital.
+# "records" is how a data processing agreement counts the personal data it covers ("up to 350,000
+# records"); one record is no volume.
 _UNIT_WORDS = (
     "units?|pieces?|pcs|pc|items?|cartons?|cases?|boxes|box|pallets?|packs?|rolls?|bags?"
     "|containers?|kilograms?|kilos?|kgs?|tonnes?|tons?|litres?|liters?|ml|sqm|cbm|metres?|meters?"
-    r"|km|m\N{SUPERSCRIPT TWO}|m2|m\N{SUPERSCRIPT THREE}|m3"
+    r"|km|m\N{SUPERSCRIPT TWO}|m2|m\N{SUPERSCRIPT THREE}|m3|records"
 )
 _UNIT = "(?:(?i:" + _UNIT_WORDS + r")|t|l|L|m)(?!\w)"
 
@@ -150,6 +152,15 @@ _DURATION_AFTER = re.compile("(?:" + _SPACE + "|-)*" + _DAY_KIND + _TIME_UNIT)
 
 # What may stand between a label such as "number" and the value after it.
 _LABEL_TO_VALUE = _SPACE + "*[:#]?" + _SPACE + "*"
+
+# The words that make the number after them a reference into the contract or a law, which stays
+# visible: "section 1159", "Article 1101", "§ 1004".
+_REFERENCE_WORDS = (
+    "clauses?|sections?|sec|articles?|art|schedules?|annex(?:es)?|appendix|appendices|exhibits?"
+    "|paragraphs?|para|parts?"
+)
+_REFERENCE = r"(?:\b(?i:" + _REFERENCE_WORDS + r")\.?|\N{SECTION SIGN})"
+_REFERENCE_BEFORE = re.compile(_REFERENCE + _SPACE + r"*\Z")
 
 # A figure that is not part of a longer number or word.
 _ALONE_BEFORE = r"(?<![\w.,])"
@@ -298,8 +309,9 @@ class QuantityRecognizer(CheckedPatternRecognizer):
     """Quantities: a figure or a number in words with a unit that is not a unit of time.
 
     10,000 units · 48 pallets · 2.5 tonnes · 500kg · 1 250 m² · 2.5 million units · "ten (10)
-    pallets". A number in words counts only with a scale word or figures after it, so that "in two
-    cases" and "one item" stay prose.
+    pallets" · 350,000 records. A number in words counts only with a scale word or figures after
+    it, so that "in two cases" and "one item" stay prose. A figure that is a reference ("the Article
+    30 records", "clause 12 records") is none.
     """
 
     def __init__(self) -> None:
@@ -321,6 +333,8 @@ class QuantityRecognizer(CheckedPatternRecognizer):
             spelled_out = _SCALE_WORD.search(words) or "(" in match.group()
             return pattern.score if spelled_out else 0.0
         if _CURRENCY_BEFORE.search(text, max(0, match.start() - 8), match.start()):
+            return 0.0
+        if _REFERENCE_BEFORE.search(text, max(0, match.start() - 24), match.start()):
             return 0.0
         return pattern.score
 
@@ -564,14 +578,6 @@ _BARE_BEFORE = r"(?<![\w.,/" + _APOSTROPHES + "])"
 _BARE_AFTER = r"(?![\w%]|[.," + _APOSTROPHES + r"]\d)"
 _BARE_FIGURE = _BARE_BEFORE + _BARE_INTEGER + r"(?P<decimals>[.,]\d+)?" + _BARE_AFTER
 
-# The words that make the number after them a reference into the contract or a law, which stays
-# visible: "section 1159", "Article 1101", "§ 1004".
-_REFERENCE_WORDS = (
-    "clauses?|sections?|sec|articles?|art|schedules?|annex(?:es)?|appendix|appendices|exhibits?"
-    "|paragraphs?|para|parts?"
-)
-_REFERENCE = r"(?:\b(?i:" + _REFERENCE_WORDS + r")\.?|\N{SECTION SIGN})"
-_REFERENCE_BEFORE = re.compile(_REFERENCE + _SPACE + r"*\Z")
 _THOUSANDS_WORD = re.compile(r"(?i:thousand|million|billion)")
 # Words that make a bare number a likely amount when they come shortly before it.
 _PRICE_WORDS = ("price", "fee", "amount", "total", "value", "charge", "consideration", "sum")

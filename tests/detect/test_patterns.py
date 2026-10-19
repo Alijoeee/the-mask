@@ -235,6 +235,33 @@ def test_quantity_in_more_forms(engine, text, needle):
     assert QUANTITY in types_at(engine, text, needle)
 
 
+# The volume of personal data a data processing agreement covers is a quantity too.
+@pytest.mark.parametrize(
+    "text,needle",
+    [
+        ("The processing concerns up to 350,000 records about", "350,000 records"),
+        ("up to 400.000 records", "400.000 records"),
+        (f"up to 90{NBSP}000 records", f"90{NBSP}000 records"),
+    ],
+)
+def test_records_are_a_quantity(text, needle):
+    assert found_by(QuantityRecognizer(), text) == {needle: 0.8}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the Article 30 records of processing activities",
+        "under clause 12 records shall be kept",
+        "Section 5 pallets",
+        "keep 1 record of each order",
+        "the records of the Supplier",
+    ],
+)
+def test_a_reference_or_a_single_record_is_no_quantity(text):
+    assert found_by(QuantityRecognizer(), text) == {}
+
+
 @pytest.mark.parametrize(
     "text",
     [
