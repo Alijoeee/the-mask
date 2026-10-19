@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton
 
 from themask.ui.settings_screen import SettingsScreen, SettingsWindow
 
@@ -146,3 +146,30 @@ def test_a_window_that_becomes_active_with_nothing_new_leaves_its_message_alone(
     assert window.settings_screen.status_label.text() == "Saved."
     activate(window)
     assert window.settings_screen.status_label.text() == "Saved."
+
+
+# ---- the keyboard -------------------------------------------------------------------------------
+
+
+def test_return_saves_and_presses_no_other_button(
+    qtbot: QtBot, window: SettingsWindow, app_ctx: AppContext, data_dir: Path
+) -> None:
+    screen = window.settings_screen
+    window.show()
+    qtbot.waitExposed(window)
+    assert screen.save_button.isDefault()
+    assert not any(b.autoDefault() for b in screen.findChildren(QPushButton))
+    screen.retention_spin.setValue(14)
+    screen.retention_spin.setFocus()
+    # The folder dialog would fail the test (tests/ui/conftest.py): Return must not open it.
+    QTest.keyClick(screen.retention_spin, Qt.Key.Key_Return)
+    assert app_ctx.settings.retention_days == 14 and screen.status_label.text() == "Saved."
+
+
+def test_return_in_the_folder_field_does_not_open_the_folder_dialog(
+    qtbot: QtBot, window: SettingsWindow
+) -> None:
+    window.show()
+    qtbot.waitExposed(window)
+    window.settings_screen.folder_edit.setFocus()
+    QTest.keyClick(window.settings_screen.folder_edit, Qt.Key.Key_Return)  # would raise if it did

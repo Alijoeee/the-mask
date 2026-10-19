@@ -291,7 +291,7 @@ class SettingsWindow(QDialog):
 
     It shows what is kept each time it opens, and again when it becomes the active window after
     what is kept changed meanwhile, unless the owner has typed something that is not saved: that
-    is never thrown away.
+    is never thrown away. Return saves (and does nothing else, whatever button has the focus).
     """
 
     def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
@@ -303,6 +303,11 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(self.settings_screen)
+        # A dialog presses its default button on Return. That is Save here, and no other button:
+        # Return in the folder field must not open the folder dialog.
+        for button in self.settings_screen.findChildren(QPushButton):
+            button.setAutoDefault(False)
+        self.settings_screen.save_button.setDefault(True)
         self.resize(680, 640)
 
     def showEvent(self, event: QShowEvent) -> None:
