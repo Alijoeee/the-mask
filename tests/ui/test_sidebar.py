@@ -18,6 +18,7 @@ from themask.ui.sidebar import Sidebar, SidebarItem
 from themask.ui.theme import TYPE_COLOURS
 
 if TYPE_CHECKING:
+    from PySide6.QtGui import QImage
     from pytestqt.qtbot import QtBot
 
 
@@ -141,29 +142,36 @@ def item_image(sidebar: Sidebar, name: str):  # type: ignore[no-untyped-def]
     return item.grab().toImage()
 
 
-def near_white_pixels(image) -> int:  # type: ignore[no-untyped-def]
+def pixels_near(image: QImage, colour: str, x_from: int, x_to: int) -> int:
+    """How many pixels of ``image`` between the columns ``x_from`` and ``x_to`` are (within a few
+    levels of) ``colour``: the ink of an icon or a word, not its anti-aliased edge."""
+    ink = QColor(colour)
     return sum(
         1
         for y in range(image.height())
-        for x in range(image.width())
-        if min(
-            image.pixelColor(x, y).red(),
-            image.pixelColor(x, y).green(),
-            image.pixelColor(x, y).blue(),
+        for x in range(max(0, x_from), min(image.width(), x_to))
+        if max(
+            abs(image.pixelColor(x, y).red() - ink.red()),
+            abs(image.pixelColor(x, y).green() - ink.green()),
+            abs(image.pixelColor(x, y).blue() - ink.blue()),
         )
-        > 235
+        <= 12
     )
 
 
 @pytest.mark.parametrize("appearance", ["light", "dark"])
-def test_the_chosen_item_is_on_the_accent_with_white_text_and_icon(
+def test_the_chosen_item_is_on_the_accent_with_its_icon_and_word_in_the_text_on_the_accent(
     sidebar: Sidebar, appearance: str
 ) -> None:
+    """White on the light accent, the dark text colour on the dark one (ruling R124): the item is
+    drawn in ``on_accent``, whatever that is, and nothing of it is white by assumption."""
     sidebar.setPalette(theme.palette(appearance))
     t = theme.tokens(appearance)
     image = item_image(sidebar, "mask")  # chosen at first
     assert image.pixelColor(150, 4) == QColor(t.accent)
-    assert near_white_pixels(image) > 30  # the icon and the word are white on it
+    text_x = 10 + 18 + 10  # the word starts after the icon of 18 points and a gap of 10
+    assert pixels_near(image, t.on_accent, 0, text_x) > 8  # the icon
+    assert pixels_near(image, t.on_accent, text_x, 200) > 20  # the word
 
 
 @pytest.mark.parametrize("appearance", ["light", "dark"])

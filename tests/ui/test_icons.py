@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage, QPainter
 
 from themask.ui import icons
 
-ACCENT = "#B5642A"
+ACCENT = "#A85A24"
 
 
 def opaque_pixels(image: QImage) -> list[tuple[int, int]]:

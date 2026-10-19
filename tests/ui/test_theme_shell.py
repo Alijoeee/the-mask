@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QLabel, QToolBar, QToolButton, QWidget
+from PySide6.QtWidgets import QLabel, QPushButton, QToolBar, QToolButton, QWidget
 
 from themask.keystore.cases import CaseSummary
 from themask.ui import theme
@@ -20,6 +20,7 @@ from themask.ui.sidebar import Sidebar
 from themask.ui.widgets import LinkButton
 
 if TYPE_CHECKING:
+    from PySide6.QtGui import QImage
     from pytestqt.qtbot import QtBot
 
 APPEARANCES = ["light", "dark"]
@@ -33,6 +34,13 @@ def styled(qtbot: QtBot, widget: QWidget, appearance: str) -> QWidget:
     widget.show()
     qtbot.waitExposed(widget)
     return widget
+
+
+def inks(image: QImage) -> set[str]:
+    """The colours (as ``#rrggbb``) that are in ``image``."""
+    return {
+        image.pixelColor(x, y).name() for x in range(image.width()) for y in range(image.height())
+    }
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
@@ -84,6 +92,7 @@ def test_the_primary_action_is_an_accent_button_and_a_grey_one_when_it_is_off(
     styled(qtbot, bar, appearance)
     edge = button.grab().toImage()
     assert edge.pixelColor(4, button.height() // 2) == QColor(t.accent)
+    assert QColor(t.on_accent).name() in inks(edge)  # the words: white, or dark on the dark accent
     action.setEnabled(False)
     qtbot.wait(20)
     off = button.grab().toImage()
@@ -116,9 +125,11 @@ def test_a_notice_is_drawn_in_the_notice_colours(qtbot: QtBot, appearance: str) 
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
-def test_the_code_of_a_case_is_an_accent_chip_on_the_soft_accent(
+def test_the_code_of_a_case_is_a_chip_on_the_soft_accent_with_the_text_for_it(
     qtbot: QtBot, appearance: str
 ) -> None:
+    """The letters of the chip are the dark brown (light) or the pale sand (dark) made for the soft
+    accent, not the accent itself, which is under 4.5:1 there (ruling R124)."""
     t = theme.tokens(appearance)
     created = datetime.now(UTC)
     summary = CaseSummary("K4F7", created, created + timedelta(days=30), ["supply-01.docx"], 14)
@@ -130,7 +141,37 @@ def test_the_code_of_a_case_is_an_accent_chip_on_the_soft_accent(
     text_colours = {
         chip.pixelColor(x, y).name() for x in range(chip.width()) for y in range(chip.height())
     }
-    assert QColor(t.accent).name() in text_colours  # the letters are in the accent
+    assert QColor(t.accent_text_on_soft).name() in text_colours  # the letters
+    assert QColor(t.accent).name() not in text_colours
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_a_primary_button_has_the_text_for_the_accent_on_the_accent(
+    qtbot: QtBot, appearance: str
+) -> None:
+    t = theme.tokens(appearance)
+    button = QPushButton("Copy instruction")
+    button.setObjectName("primary")
+    button.resize(180, 34)
+    styled(qtbot, button, appearance)
+    image = button.grab().toImage()
+    assert image.pixelColor(5, button.height() // 2) == QColor(t.accent)
+    assert QColor(t.on_accent).name() in inks(image)  # the words
+    assert QColor(t.accent).name() in inks(image)
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_hint_beside_the_choose_button_is_drawn_in_the_secondary_colour(
+    qtbot: QtBot, appearance: str
+) -> None:
+    """ "or press ⌘O" is a hint on a card: the tertiary colour is for what is switched off (R124)."""
+    t = theme.tokens(appearance)
+    zone = DropZone(art="mask", shortcut_hint="or press ⌘O")
+    zone.resize(500, 300)
+    styled(qtbot, zone, appearance)
+    colours = inks(zone.shortcut_label.grab().toImage())
+    assert QColor(t.secondary).name() in colours
+    assert QColor(t.tertiary).name() not in colours
 
 
 @pytest.mark.parametrize("appearance", APPEARANCES)
