@@ -7,16 +7,18 @@ case is another person in the next, so a wrong case writes another contract's va
 file and nothing looks amiss. The screen therefore never guesses between cases (ruling R103). The
 cases come best fit first (``suggest_cases``: the code of a case in the name of the file, then the
 one that holds most of the placeholders of the file or the text). If one case fits best it is
-preselected, unless the owner chose a case and it fits as well. If another case holds as many of
-the placeholders as the best and the name of the file does not decide, no case is selected, the
-screen says "Several cases fit this file — choose one." and nothing can be restored until the
-owner chooses (a case holding none of the placeholders is no fit: nothing would be written, and
-the newest is selected). A choice of the owner's is for the file or text it was made for: it
-stands while that is edited and the screen is visited, and ends with a restore, or when another
-file is dropped (the case asked for in the Cases screen counts for the next file). Under the case
-the screen shows the values the selected case would put back for the placeholders it found, so
-that a wrong case is seen before anything is written, and under each source how many of its
-placeholders the chosen case holds.
+preselected. If another case holds as many of the placeholders as the best and the name of the
+file does not decide, no case is selected, the screen says "Several cases fit this file — choose
+one." and nothing can be restored until the owner chooses (a case holding none of the
+placeholders is no fit: nothing would be written, and the newest is selected). A case the owner
+chose, in the box or by asking for it in the Cases screen, is never replaced by the screen,
+whatever fits better: when another case holds more of the placeholders the screen says "Another
+case fits this file better — check the case." and leaves the choice, and Restore, alone. The
+choice is for the file or text it was made for: it stands while that is edited and the screen is
+visited, and ends with a restore, or when another file is dropped (the case asked for in the Cases
+screen counts for the next file). Under the case the screen shows the values the selected case
+would put back for the placeholders it found, so that a wrong case is seen before anything is
+written, and under each source how many of its placeholders the chosen case holds.
 
 What the AI changed ("[PERSON 1]" for [PERSON_1]: no brackets, lower case, spaces) is listed under
 its source with a check box for each place, and put back only when the owner confirms it. The plan
@@ -84,6 +86,7 @@ _T = TypeVar("_T")
 
 CHANGED = "These placeholders were changed by the AI — restore them?"
 CHOOSE_CASE = "Several cases fit this file — choose one."
+BETTER_FIT = "Another case fits this file better — check the case."
 CHOOSE_PLACEHOLDER = "Choose a case"
 NO_CASES = (
     "There is no saved case to restore with. A case is made each time you export a masked file."
@@ -152,17 +155,6 @@ def _preview(plans: Iterable[list[RestoreItem]]) -> str:
         f"{placeholder} → {_short(value)}"
         for placeholder, value in islice(values.items(), PREVIEW_LINES)
     )
-
-
-def _is_a_guess(ranked: list[Case], text: str, file_name: str | None) -> bool:
-    """Whether choosing the first of ``ranked``, the best fit for ``text``, would be a guess:
-    another case holds as many of its placeholders, and the name of the file does not point to
-    the first. Cases that hold none of the placeholders are no fit, so nothing is a guess then.
-    """
-    if len(ranked) < 2 or (file_name and case_in_file_name(file_name, ranked)):
-        return False
-    best = _held(ranked[0], text)
-    return best > 0 and _held(ranked[1], text) == best
 
 
 def _written(items: list[RestoreItem]) -> str:
@@ -246,8 +238,9 @@ class RestoreScreen(QWidget):
     """Restore a Word file or pasted text with the key of a saved case.
 
     ``case_combo`` holds the cases, best fit first, with the case's id as the data of each line;
-    no line is selected (index -1) while ``choose_label`` asks the owner to choose, and
-    ``preview_label`` shows the values the selected case would put back.
+    no line is selected (index -1) while ``choose_label`` asks the owner to choose,
+    ``better_fit_label`` says that another case fits better than the selected one (which stays),
+    and ``preview_label`` shows the values the selected case would put back.
     ``load_file`` takes the AI's Word file; ``paste_box`` takes text. ``altered_list`` (for the
     file) and ``text_altered_list`` (for the text) list what the AI changed, with a check box for
     each. ``restore_button`` restores the file, ``restore_text_button`` the text. The result is
@@ -272,6 +265,7 @@ class RestoreScreen(QWidget):
         self._manual = False  # the owner chose the case that is selected, for what is on screen
         self._for_next_file = False  # ... or asked for it in the Cases screen, for the next file
         self._unclear = False  # several cases fit alike, so none was selected for the owner
+        self._fits: dict[str, int] = {}  # placeholders each case holds of the text ranked on
         self._folder: Path | None = None  # where the restored file was written
 
         heading = QLabel("Restore")
@@ -289,6 +283,10 @@ class RestoreScreen(QWidget):
         self.choose_label.setObjectName("notice")
         self.choose_label.setWordWrap(True)
         self.choose_label.hide()
+        self.better_fit_label = QLabel(BETTER_FIT)
+        self.better_fit_label.setObjectName("notice")
+        self.better_fit_label.setWordWrap(True)
+        self.better_fit_label.hide()
         self.preview_label = QLabel()
         self.preview_label.setObjectName("preview")
         self.preview_label.setTextFormat(Qt.TextFormat.PlainText)  # a value may hold < > or &
@@ -395,6 +393,7 @@ class RestoreScreen(QWidget):
         layout.addWidget(explanation)
         layout.addLayout(top)
         layout.addWidget(self.choose_label)
+        layout.addWidget(self.better_fit_label)
         layout.addWidget(self.preview_label)
         layout.addWidget(self.no_cases_label)
         layout.addWidget(self.status_label)
@@ -428,10 +427,9 @@ class RestoreScreen(QWidget):
         """Load the saved cases again and put them in order for what is on the screen.
 
         When no case has changed, what is on the screen stands: a visit changes nothing. A case
-        the owner chose stays selected, however it fits what is on the screen: only a new file or
-        text that another case fits better takes the choice back. ``select`` is the case the
-        owner asked for in the Cases screen; when it is there it counts as chosen, for the next
-        file even if one is loaded already.
+        the owner chose stays selected, however it fits what is on the screen. ``select`` is the
+        case the owner asked for in the Cases screen; when it is there it counts as chosen, for
+        the next file even if one is loaded already.
         """
         unreadable = True
         try:
@@ -454,7 +452,7 @@ class RestoreScreen(QWidget):
         )
         if wanted is not None and wanted == select:
             self._for_next_file = True
-        self._order_cases(wanted, insist=True)
+        self._order_cases(wanted)
         if unreadable:
             self.no_cases_label.hide()  # not that there are none: they cannot be read
         self._case_changed()  # the cases may have changed under the same id
@@ -494,28 +492,22 @@ class RestoreScreen(QWidget):
         self._manual = True
         self._for_next_file = False  # chosen for what is on the screen now
 
-    def _order_cases(self, chosen: str | None, insist: bool = False) -> bool:
+    def _order_cases(self, chosen: str | None) -> bool:
         """Put the cases in order of fit for the text (and the file name) they were last asked
-        about, and select one: ``chosen`` when it holds as many of the text's placeholders as the
-        best fit (or however many it holds, with ``insist``), else the best fit. When another case
-        fits as well as the best and the name of the file does not decide, none is selected and
-        the owner is asked to choose (ruling R103). Returns whether that is another case than the
-        one that was selected.
+        about, and select one. ``chosen``, the case the owner picked by hand or came for from the
+        Cases screen, is always the one: the screen never replaces it, whatever fits better (the
+        hint under the case box says when another case does). Without one the best fit is
+        selected, but when another case fits as well and the name of the file does not decide,
+        none is selected and the owner is asked to choose (ruling R103). Returns whether that is
+        another case than the one that was selected.
         """
         before = self._selected_id()
-        text = self._ranked_on
-        ranked = suggest_cases(text, list(self._cases.values()), self._ranked_name)
+        self._fits = {}  # the text or the cases are new: nothing is known of how they fit
+        ranked = suggest_cases(self._ranked_on, list(self._cases.values()), self._ranked_name)
         best = ranked[0] if ranked else None
         keep = chosen if chosen in self._cases else None
-        if (
-            keep is not None
-            and not insist
-            and best is not None
-            and _held(self._cases[keep], text) < _held(best, text)
-        ):
-            keep = None  # the owner's case fits worse than another: the better fit is offered
         self._manual = keep is not None
-        self._unclear = keep is None and _is_a_guess(ranked, text, self._ranked_name)
+        self._unclear = keep is None and self._is_a_guess(ranked)
         if keep is not None:
             target = keep
         elif best is not None and not self._unclear:
@@ -534,6 +526,34 @@ class RestoreScreen(QWidget):
         self.case_combo.blockSignals(False)
         self.no_cases_label.setVisible(not ranked)
         return self._selected_id() != before
+
+    def _fit_of(self, case: Case) -> int:
+        """How many of the placeholders in the text the cases were last put in order for ``case``
+        holds. Each case is looked at once for each ranking: the text may be long.
+        """
+        if case.id not in self._fits:
+            self._fits[case.id] = _held(case, self._ranked_on)
+        return self._fits[case.id]
+
+    def _is_a_guess(self, ranked: list[Case]) -> bool:
+        """Whether choosing the first of ``ranked``, the best fit, would be a guess: another case
+        holds as many of the placeholders, and the name of the file does not point to the first.
+        Cases that hold none of the placeholders are no fit, so nothing is a guess then.
+        """
+        name = self._ranked_name
+        if len(ranked) < 2 or (name and case_in_file_name(name, ranked)):
+            return False
+        best = self._fit_of(ranked[0])
+        return best > 0 and self._fit_of(ranked[1]) == best
+
+    def _another_fits_better(self, chosen: Case) -> bool:
+        """Whether another case holds more of the placeholders in the text the cases were last put
+        in order for than ``chosen`` does.
+        """
+        held = self._fit_of(chosen)
+        return any(
+            self._fit_of(other) > held for other in self._cases.values() if other.id != chosen.id
+        )
 
     def _show_choice_notice(self) -> None:
         """Ask the owner to choose while several cases fit alike and none is selected."""
@@ -566,10 +586,12 @@ class RestoreScreen(QWidget):
 
     def _update_state(self) -> None:
         """Show what the selected case would put back, and offer to restore what there is to
-        restore with it (nothing is offered while no case is selected).
+        restore with it (nothing is offered while no case is selected). Another case that fits
+        better is pointed out, never put in the place of the selected one.
         """
         case = self._selected_case()
         self._show_choice_notice()
+        self.better_fit_label.setVisible(case is not None and self._another_fits_better(case))
         shown = _preview([self._file_plan, self._text_plan]) if case else ""
         self.preview_label.setText(shown)
         self.preview_label.setVisible(bool(shown))

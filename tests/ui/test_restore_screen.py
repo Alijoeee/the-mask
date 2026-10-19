@@ -7,8 +7,9 @@ is confirmed or left as the AI wrote it (by the ordinals of the plan, ruling R91
 every one is confirmed), what the result panel shows, a file that changes under the plan (the
 restore is given its fingerprint, ruling R96), and that whatever goes wrong is said in words and
 never ends in a trace. Ruling R103: two cases that hold the same placeholder names are never
-guessed between (the code in the name of the file decides, else the owner is asked), and the
-screen shows which values the selected case would put back.
+guessed between (the code in the name of the file decides, else the owner is asked), a case the
+owner chose is never replaced by the screen (a case that fits better is only pointed out), and
+the screen shows which values the selected case would put back.
 """
 
 from __future__ import annotations
@@ -402,7 +403,7 @@ def test_typing_in_the_paste_box_leaves_the_ticks_of_the_file_alone(
     assert screen.text_altered_list.count() == 1 and ticks(screen.text_altered_list) == [False]
 
 
-def test_a_text_that_makes_another_case_the_best_fit_reads_the_file_again_for_it(
+def test_a_text_that_another_case_fits_better_does_not_take_the_owner_s_case_away(
     qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
 ) -> None:
     app_ctx.case_store.save(a_case("A1A1", NOW - timedelta(days=3), entries=2))
@@ -415,8 +416,12 @@ def test_a_text_that_makes_another_case_the_best_fit_reads_the_file_again_for_it
     s.case_combo.activated.emit(s.case_combo.currentIndex())  # the owner chose B2B2 ...
     assert s.altered_list.count() == 1
     s.altered_list.item(0).setCheckState(Qt.CheckState.Checked)
-    s.paste_box.setPlainText("[COMPANY_1] only A1A1 holds")  # ... but only A1A1 holds this
-    assert s.case_combo.currentData() == "A1A1"
+    s.paste_box.setPlainText("[COMPANY_1] only A1A1 holds")  # ... and only A1A1 holds this
+    assert s.case_combo.currentData() == "B2B2"  # the screen does not choose for the owner
+    assert ticks(s.altered_list) == [True]  # the file is read as before: nothing changed for B2B2
+    assert s.better_fit_label.isVisibleTo(s) and s.restore_button.isEnabled()
+    pick(s, "A1A1")  # the owner takes the hint
+    assert not s.better_fit_label.isVisibleTo(s)
     assert s.altered_list.count() == 2 and ticks(s.altered_list) == [False, False]
 
 
@@ -675,9 +680,7 @@ def test_a_file_puts_the_cases_in_order_too(
     assert combo_ids(s) == ["A1A1", "B2B2"] and s.case_combo.currentData() == "A1A1"
 
 
-def test_the_owner_s_case_is_kept_while_it_fits_as_well_as_the_best(
-    qtbot: QtBot, app_ctx: AppContext
-) -> None:
+def test_the_owner_s_case_is_kept_whatever_the_text_says(qtbot: QtBot, app_ctx: AppContext) -> None:
     two_cases(app_ctx)
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
@@ -687,12 +690,20 @@ def test_the_owner_s_case_is_kept_while_it_fits_as_well_as_the_best(
     s.case_combo.activated.emit(s.case_combo.currentIndex())  # the owner chose it
     s.paste_box.setPlainText("[PERSON_1] again")
     assert s.case_combo.currentData() == "A1A1"  # still the owner's: it fits as well
-    s.paste_box.setPlainText("[PERSON_1] and [COMPANY_1]")  # ... but B2B2 never holds the company
-    assert s.case_combo.currentData() == "A1A1"
+    assert not s.better_fit_label.isVisibleTo(s)
+    s.paste_box.setPlainText("[PERSON_1] and [COMPANY_1]")  # A1A1 holds both: the best fit
+    assert s.case_combo.currentData() == "A1A1" and not s.better_fit_label.isVisibleTo(s)
     s.case_combo.setCurrentIndex(s.case_combo.findData("B2B2"))
-    s.case_combo.activated.emit(s.case_combo.currentIndex())
-    s.paste_box.setPlainText("[PERSON_1] and [COMPANY_1] too")  # now the chosen case fits worse
-    assert s.case_combo.currentData() == "A1A1"  # the better fit is offered again
+    s.case_combo.activated.emit(s.case_combo.currentIndex())  # now the owner chose B2B2 ...
+    s.paste_box.setPlainText("[PERSON_1] and [COMPANY_1] too")  # ... which never holds the company
+    assert s.case_combo.currentData() == "B2B2"  # it is still the owner's: the screen only says so
+    assert (
+        s.better_fit_label.text()
+        == "Another case fits this file better \N{EM DASH} check the case."
+    )
+    assert s.better_fit_label.isVisibleTo(s) and s.restore_text_button.isEnabled()
+    s.paste_box.setPlainText("[PERSON_1] only")  # B2B2 fits as well as any case again
+    assert s.case_combo.currentData() == "B2B2" and not s.better_fit_label.isVisibleTo(s)
 
 
 def test_the_case_asked_for_in_the_cases_screen_is_selected(
@@ -719,6 +730,10 @@ def test_the_case_asked_for_in_the_cases_screen_wins_over_a_better_fit(
     assert s.case_combo.currentData() == "A1A1" and s.altered_list.count() == 2
     s.refresh_cases("B2B2")  # "Restore from this case": the owner asked for this one
     assert s.case_combo.currentData() == "B2B2"
+    assert s.better_fit_label.isVisibleTo(s)  # A1A1 holds both placeholders: said, not forced
+    assert (
+        s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"
+    )  # B2B2's pair only
     assert s.altered_list.count() == 1  # the file is read again for it
     assert s.file_fit_label.text() == "1 of 2 placeholders found in this case."
     s.refresh_cases()  # a visit to the screen later keeps the owner's choice
@@ -778,17 +793,17 @@ def test_a_store_that_cannot_be_read_is_said_in_the_screen(
 # ---- two cases that fit a file alike (ruling R103) ---------------------------------------------------
 
 
-def alice_and_bob(ctx: AppContext) -> None:
+def alice_and_bob(ctx: AppContext, company: bool = False) -> None:
     """The cases of two contracts, both holding [PERSON_1]: K4F7, the older, where it is Alice
-    Smith, and M5N6, the newer, where it is Bob Jones.
+    Smith, and M5N6, the newer, where it is Bob Jones. With ``company`` K4F7 holds [COMPANY_1] as
+    well, so that a file with the person and the company fits it better than M5N6.
     """
     person = PlaceholderType.PERSON
     older, newer = NOW - timedelta(days=5), NOW
-    ctx.case_store.save(
-        Case(
-            "K4F7", older, ["Supply.docx"], [], [KeyEntry("[PERSON_1]", person, "Alice Smith", [])]
-        )
-    )
+    alice = [KeyEntry("[PERSON_1]", person, "Alice Smith", [])]
+    if company:
+        alice.append(KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Northwind Trading B.V.", []))
+    ctx.case_store.save(Case("K4F7", older, ["Supply.docx"], [], alice))
     ctx.case_store.save(
         Case(
             "M5N6", newer, ["Services.docx"], [], [KeyEntry("[PERSON_1]", person, "Bob Jones", [])]
@@ -809,8 +824,10 @@ def pick(s: RestoreScreen, case_id: str) -> None:
     s.case_combo.activated.emit(s.case_combo.currentIndex())
 
 
-def screen_with_alice_and_bob(qtbot: QtBot, ctx: AppContext) -> RestoreScreen:
-    alice_and_bob(ctx)
+def screen_with_alice_and_bob(
+    qtbot: QtBot, ctx: AppContext, company: bool = False
+) -> RestoreScreen:
+    alice_and_bob(ctx, company)
     s = RestoreScreen(ctx)
     qtbot.addWidget(s)
     return s
@@ -1074,6 +1091,143 @@ def test_when_the_case_chosen_is_deleted_the_one_that_is_left_is_selected(
     app_ctx.case_store.delete("K4F7")  # deleted in the Cases screen
     s.refresh_cases()
     assert combo_ids(s) == ["M5N6"] and s.case_combo.currentData() == "M5N6"  # now the only one
+    assert not s.choose_label.isVisibleTo(s)
+
+
+# ---- a case the owner chose is never replaced by the screen (R103 b, fix round 1) --------------------
+
+BETTER_FIT = "Another case fits this file better \N{EM DASH} check the case."
+
+
+def test_the_case_asked_for_in_the_cases_screen_stays_though_the_file_fits_another_better(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)  # K4F7: person and company
+    s.refresh_cases("M5N6")  # "Restore from this case": the owner asked for Bob Jones's case
+    s.load_file(make_docx(body("[PERSON_1] signs for [COMPANY_1].")))  # K4F7 fits this better
+    assert s.case_combo.currentData() == "M5N6"  # the screen does not replace it
+    assert s.better_fit_label.isVisibleTo(s) and s.better_fit_label.text() == BETTER_FIT
+    assert not s.choose_label.isVisibleTo(s)
+    assert s.restore_button.isEnabled()  # the owner chose: nothing is taken away
+    arrow = "\N{RIGHTWARDS ARROW}"
+    assert s.preview_label.text() == f"[PERSON_1] {arrow} Bob Jones"  # what M5N6 would write
+    assert s.file_fit_label.text() == "1 of 2 placeholders found in this case."
+
+
+@pytest.mark.parametrize("asked_first", [True, False], ids=["asked for first", "file loaded first"])
+def test_the_case_asked_for_stays_whichever_comes_first(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, asked_first: bool
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    ai = make_docx(body("[PERSON_1] signs for [COMPANY_1]."))
+    if asked_first:
+        s.refresh_cases("M5N6")
+        s.load_file(ai)
+    else:
+        s.load_file(ai)
+        assert s.case_combo.currentData() == "K4F7"  # the best fit, before anyone asked
+        s.refresh_cases("M5N6")
+    assert s.case_combo.currentData() == "M5N6" and s.better_fit_label.isVisibleTo(s)
+
+
+def test_a_case_picked_by_hand_stays_when_the_text_is_edited_and_another_fits_better(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    s.paste_box.setPlainText("[PERSON_1] and [COMPANY_1]")
+    assert s.case_combo.currentData() == "K4F7" and not s.better_fit_label.isVisibleTo(s)
+    pick(s, "M5N6")  # the owner prefers Bob's
+    assert s.better_fit_label.isVisibleTo(s)
+    s.paste_box.appendPlainText("one more line")  # an edit re-ranks the cases ...
+    assert s.case_combo.currentData() == "M5N6"  # ... and does not take the choice away
+    assert s.better_fit_label.isVisibleTo(s) and s.restore_text_button.isEnabled()
+    qtbot.mouseClick(s.restore_text_button, CLICK)  # and the restore uses the owner's case
+    assert s.result_box.toPlainText() == "Bob Jones and [COMPANY_1]\none more line"
+
+
+def test_a_chosen_case_is_used_for_the_restore_whatever_fits_better(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    ai = make_docx(body("[PERSON_1] signs for [COMPANY_1]."))
+    s.refresh_cases("M5N6")
+    s.load_file(ai)
+    click_restore(qtbot, s)
+    assert text_of(restored_beside(ai)) == "Bob Jones signs for [COMPANY_1]."  # M5N6 has no company
+    assert s.report_label.text() == "1 placeholders restored, 0 need your check."
+    assert "[COMPANY_1]" in s.unknown_label.text()
+
+
+def test_the_hint_goes_when_the_owner_picks_the_better_case(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    s.load_file(make_docx(body("PERSON_1 signs for COMPANY_1.")))
+    assert s.case_combo.currentData() == "K4F7"  # the best fit: nothing to point out
+    assert not s.better_fit_label.isVisibleTo(s)
+    pick(s, "M5N6")
+    assert s.better_fit_label.isVisibleTo(s) and s.altered_list.count() == 1
+    pick(s, "K4F7")  # the owner takes the hint
+    assert not s.better_fit_label.isVisibleTo(s) and s.altered_list.count() == 2
+
+
+def test_the_hint_follows_the_cases_the_store_holds(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)  # both hold the person only
+    s.load_file(make_docx(body("[PERSON_1] signs for [COMPANY_1].")))
+    pick(s, "M5N6")
+    assert not s.better_fit_label.isVisibleTo(s)  # K4F7 does not fit better
+    person_and_company = [
+        KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "Carol White", []),
+        KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Fabrikam Ltd", []),
+    ]
+    app_ctx.case_store.save(Case("B2C3", NOW, ["Third.docx"], [], person_and_company))
+    s.refresh_cases()  # a case that does fit better was made meanwhile
+    assert s.case_combo.currentData() == "M5N6" and s.better_fit_label.isVisibleTo(s)
+    app_ctx.case_store.delete("B2C3")
+    s.refresh_cases()  # and is gone again
+    assert s.case_combo.currentData() == "M5N6" and not s.better_fit_label.isVisibleTo(s)
+
+
+def test_the_hint_follows_the_selection_however_it_changed(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    s.load_file(make_docx(body("[PERSON_1] signs for [COMPANY_1].")))
+    s.case_combo.setCurrentIndex(s.case_combo.findData("M5N6"))  # no click: the combo's own change
+    assert s.better_fit_label.isVisibleTo(s)
+    s.case_combo.setCurrentIndex(s.case_combo.findData("K4F7"))
+    assert not s.better_fit_label.isVisibleTo(s)
+    s.case_combo.setCurrentIndex(-1)  # nothing selected: nothing to say about the choice
+    assert not s.better_fit_label.isVisibleTo(s)
+
+
+def test_a_case_named_by_the_file_stays_and_a_better_fit_is_pointed_out(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    ai = named_file(make_docx, tmp_path, "MASKED-M5N6.docx", "[PERSON_1] signs for [COMPANY_1].")
+    s.load_file(ai)
+    assert s.case_combo.currentData() == "M5N6"  # the name decides ...
+    assert s.better_fit_label.isVisibleTo(s)  # ... and the owner is told the placeholders fit K4F7
+
+
+@pytest.mark.parametrize(
+    "lines",
+    [("[PERSON_1] signs.",), ("[PERSON_9] and nothing else.",), ("Nothing masked here.",)],
+    ids=["fit alike", "nothing fits", "no placeholder"],
+)
+def test_there_is_no_hint_when_no_case_fits_better_than_the_one_selected(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, lines: tuple[str, ...]
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)  # both hold the person only
+    assert not s.better_fit_label.isVisibleTo(s)  # nothing on the screen yet
+    s.load_file(make_docx(body(*lines)))
+    if s.case_combo.currentIndex() == -1:  # alike: the owner is asked, not told
+        assert s.choose_label.isVisibleTo(s)
+        pick(s, "K4F7")
+    assert s.case_combo.currentIndex() != -1 and not s.better_fit_label.isVisibleTo(s)
     assert not s.choose_label.isVisibleTo(s)
 
 
