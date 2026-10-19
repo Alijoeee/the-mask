@@ -174,6 +174,9 @@ def test_the_cleanup_paths_drop_what_the_app_never_runs() -> None:
         "PySide6/Qt/plugins/platforminputcontexts/libqtvirtualkeyboardplugin.dylib",
     } <= set(inside)
     assert not any(".framework" in path for path in inside)  # Qt's frameworks stay
+    # These globs name what the macOS wheel holds (Designer.app, Qt/qml): only the Mac checks them.
+    if sys.platform != "darwin":
+        return
     pyside6 = package_dir("PySide6")
     for path in inside:
         if path.startswith("PySide6/"):
