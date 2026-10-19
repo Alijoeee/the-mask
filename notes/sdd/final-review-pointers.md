@@ -92,6 +92,7 @@ confirms. Everything else stays parked and is listed for the owner in notes/RULI
   takes the term back into the merged variants; add_* mutate the lists before save (an OSError leaves an
   unsaved entry in memory); review._canonical duplicates grouping._canonical with different tie-breaks.
   These are owner-visible review limits (the owner sees the text), not leaks — rate accordingly.
+- Tasks 22+23 (implementer's concern 1, 2026-10-19): a segmentation fault in the UI test suite that predates the task's changes (reproduces on 42c0b94): a core file shows PySide6 6.12 / Shiboken tearing a widget down without the GIL while a worker thread's garbage collection walks it; worked around in tests only (tests/ui/conftest.py disables GC during a UI test). Question for the final review: can the APP hit it (a Python wrapper of a Qt widget released from a worker thread — engine load at startup, analysis, export, restore workers)? If a realistic path exists, the fix wave adds an app-side mitigation (e.g. widgets never referenced from worker objects; worker results carried by signals only; `gc.freeze()` after startup or a GC guard around worker threads) with a test.
 - Task 6 (line 136, robustness): patterns.py `int()` on a run of ≥ 4,301 digits raises ValueError
   (Python's int-string limit) — a document with such a run would crash the analysis. Fix: short-circuit
   above ~18 digits. Status: check whether Task 24's tuning already guards it.
@@ -158,3 +159,4 @@ measure — a tuning item that is still wrong but inside the marks stays parked.
 2. Case key with a duplicate placeholder: validate in Case.from_json / CaseStore.save, or document?
 3. LeakBlockedError: keep (documented reserve) or remove.
 4. w14:conflictIns/conflictDel: cleaner drops them (and notes it) or documented limit.
+5. The PySide6 teardown race (Tasks 22+23 concern 1): app-side mitigation in the fix wave, or a documented test-only workaround.
