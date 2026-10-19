@@ -2,11 +2,13 @@
 
 A modal dialog that nobody can answer would hang the whole run. Every test here starts with the
 dialogs replaced by a function that fails the test; a test that expects a dialog replaces it with
-a recorder of its own (``monkeypatch``) and says what it expects.
+a recorder of its own (``monkeypatch``) and says what it expects. Python's garbage collector is
+kept out of the worker threads (``collect_in_the_main_thread_only``).
 """
 
 from __future__ import annotations
 
+import gc
 import logging
 from collections.abc import Iterator
 from typing import NoReturn
@@ -35,6 +37,23 @@ def no_real_finder(monkeypatch: pytest.MonkeyPatch) -> None:
     screen's ``reveal`` with a recorder.
     """
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(_refuse))
+
+
+@pytest.fixture(autouse=True)
+def collect_in_the_main_thread_only() -> Iterator[None]:
+    """No garbage collection while a test runs; it happens between the tests, in the main thread.
+
+    The collector runs in whichever thread allocates when its counts run out, a worker thread of
+    the app among them. PySide6 (6.12) takes the C++ side of a widget apart without holding the
+    interpreter lock, and the event loop of a test does that for the widgets of the tests before
+    (``deleteLater``): a collection in a worker thread then walks a wrapper that is half gone, and
+    the whole run ends in a segmentation fault, at a different test each time.
+    """
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.enable()  # the next allocation collects what the test left, here in the main thread
 
 
 @pytest.fixture(autouse=True)

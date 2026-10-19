@@ -8,6 +8,7 @@ a file name, and a file name tells who the parties are (logging_setup.py has the
 from __future__ import annotations
 
 import errno
+import gc
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -31,6 +32,13 @@ if TYPE_CHECKING:
 SECRET = "Secret Client Ltd"
 GENERIC = "Something went wrong while analysing the file."
 ENGINE_FAILED = "The MASK could not load its detection engine."
+
+
+def test_the_garbage_collector_is_off_while_a_test_runs() -> None:
+    # tests/ui/conftest.py: a collection in a worker thread, while the main thread takes the
+    # widgets of an earlier test apart, crashes PySide6 (a segmentation fault in the middle of
+    # the run), so the collector runs between the tests only.
+    assert not gc.isenabled()
 
 
 def run_analysis(
