@@ -29,7 +29,8 @@ confirms. Everything else stays parked and is listed for the owner in notes/RULI
 6. R102 — scan namespace declarations and non-standard element/attribute names; strip unused declarations. src/themask/leakcheck.py `_element` (lxml nsmap), cleaner.
 7. R103 — (restore screen; sent to the Tasks 22+23 implementer first; the fix wave verifies) file-name code preference in suggest_cases, no preselection on ambiguity, case titles with file names, placeholder → value preview.
 8. R104 — zip limits in DocxPackage.open (entries, per-entry and total expanded size, capped inflate).
-9. README: no stale wording that export/restore are future work (the external review saw such wording on the packaging branch).
+9. Owner's instruction: set `OWNER_NAME = "Alican Yazdic"` in src/themask/about.py (the About panel shows it; the About test must still pass).
+10. README: no stale wording that export/restore are future work (the external review saw such wording on the packaging branch).
 
 ## B. Parked items with a leak, restore or crash angle (verify; fix if Important)
 

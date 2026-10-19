@@ -165,9 +165,8 @@ TODO (filled in after the final whole-branch review)
 
 1. In Terminal: `cd ~/Developer/the-mask && git fetch origin && git checkout mac-v1 && git pull`
    (mac-v1 must be at the head this file names at its end), then `uv sync --locked`.
-2. Set your name once in `src/themask/about.py` (`OWNER_NAME` is still the placeholder
-   "<owner name — set in about.py>"; the About box shows it) and commit it — or tell the controller the
-   name and it is done for you.
+2. The About panel shows your name, "Alican Yazdic" (set in `src/themask/about.py` during the final
+   fix wave, on your instruction); nothing to do here unless you want it spelt differently.
 3. Optional but worth it: `uv run pytest -q` — on the Mac the macOS-only tests (vtool, iconutil,
    codesign, the cleanup-glob check) run as well.
 4. `bash packaging/build_mac.sh` — it starts from scratch, downloads Briefcase's Python support
