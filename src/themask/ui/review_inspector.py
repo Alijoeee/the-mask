@@ -253,12 +253,18 @@ class FooterCounts:
     shown: int
 
     @classmethod
-    def of(cls, groups: Iterable[Group]) -> FooterCounts:
+    def of(cls, groups: Iterable[Group], answered: Collection[str] = ()) -> FooterCounts:
+        """The counts; a group the owner is still asked about (``asks_about``) is to check, not
+        shown on purpose.
+        """
         everything = list(groups)
+        asked = [asks_about(g, answered) for g in everything]
         return cls(
             hidden=sum(g.enabled and not g.needs_check for g in everything),
-            to_check=sum(g.enabled and g.needs_check for g in everything),
-            shown=sum(not g.enabled for g in everything),
+            to_check=sum(
+                (g.enabled and g.needs_check) or q for g, q in zip(everything, asked, strict=True)
+            ),
+            shown=sum(not g.enabled and not q for g, q in zip(everything, asked, strict=True)),
         )
 
     def text(self) -> str:

@@ -256,8 +256,15 @@ def test_the_footer_shares_the_groups_between_hidden_to_check_and_shown() -> Non
     assert counts == FooterCounts(hidden=12, to_check=2, shown=0)
     assert counts.text() == "12 hidden · 2 to check · 0 shown on purpose"  # the mockup's footer
     groups[0].enabled = False
-    groups[12].enabled = False  # a group to check that is off is shown, not to check
-    assert FooterCounts.of(groups) == FooterCounts(hidden=11, to_check=1, shown=2)
+    groups[12].enabled = False  # a group to check that is off is still asked about: to check
+    assert FooterCounts.of(groups) == FooterCounts(hidden=11, to_check=2, shown=1)
+
+
+def test_the_footer_counts_a_group_still_asked_about_as_to_check() -> None:
+    groups = [make_group(PERSON, "Fatma", check=True, ident="f"), make_group(COMPANY, "Acme")]
+    groups[0].enabled = False
+    assert FooterCounts.of(groups) == FooterCounts(hidden=1, to_check=1, shown=0)
+    assert FooterCounts.of(groups, {"f"}) == FooterCounts(hidden=1, to_check=0, shown=1)
 
 
 # ---- the switch ---------------------------------------------------------------------------------
