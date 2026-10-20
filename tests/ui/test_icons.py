@@ -121,6 +121,12 @@ def test_svg_paths_with_lines_and_a_close() -> None:
     assert path.elementCount() == 6  # five points, and the line back to the first
 
 
+@pytest.mark.parametrize("data", ["5 2.5 L 3 4", "M 5", "L1 2 C 1 2 3", "H"])
+def test_svg_paths_that_are_not_well_formed_are_a_value_error(data: str) -> None:
+    with pytest.raises(ValueError, match="path"):
+        icons.svg_path(data)
+
+
 def test_svg_relative_commands_continue_from_the_current_point() -> None:
     path = icons.svg_path("M10 9h6M13.5 9v2.5M15.5 9v2")
     assert path.boundingRect() == QRectF(10, 9, 6, 2.5)
