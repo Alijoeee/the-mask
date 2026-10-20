@@ -793,3 +793,39 @@ def test_the_toggle_shows_a_ring_when_the_keyboard_focuses_it_and_not_otherwise(
     toggle.setFocus(Qt.FocusReason.TabFocusReason)
     qtbot.waitUntil(toggle.hasFocus, timeout=2000)
     assert toggle.grab().toImage() != plain
+
+
+def test_cmd_o_means_the_screen_s_own_file(
+    qtbot: QtBot, window: MainWindow, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.ui import main_window
+
+    chosen: list[str] = []
+    monkeypatch.setattr(
+        window.home.drop_zone, "choose_files", lambda: chosen.append("mask")
+    )
+    monkeypatch.setattr(
+        window.restore_screen.drop_zone, "choose_files", lambda: chosen.append("restore")
+    )
+    window.show_restore()
+    window.choose_action.trigger()
+    assert chosen == ["restore"]  # the AI's file is never analysed for masking
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+    assert window.current_screen_name() == "review"
+    asked: list[bool] = []
+    answer = [False]
+    monkeypatch.setattr(
+        main_window, "ask_discard_review", lambda parent: asked.append(True) or answer[0]
+    )
+    window.choose_action.trigger()
+    assert asked == [True] and chosen == ["restore"]  # "Keep reviewing": nothing replaced
+    answer[0] = True
+    window.choose_action.trigger()
+    assert chosen == ["restore", "mask"]
+    window._review_exported = True  # saved: nothing left to lose
+    window.choose_action.trigger()
+    assert asked == [True, True] and chosen == ["restore", "mask", "mask"]
+    window.show_home()
+    window.choose_action.trigger()
+    assert chosen[-1] == "mask" and len(asked) == 2

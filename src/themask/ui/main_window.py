@@ -125,6 +125,22 @@ def ask_redline(parent: QWidget | None) -> bool:
     return answer == QMessageBox.StandardButton.Yes
 
 
+def ask_discard_review(parent: QWidget | None) -> bool:
+    """Ask whether to throw away the review that is open, for a new file. True for "Discard"."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(APP_NAME)
+    box.setText("Discard this review?")
+    box.setInformativeText(
+        "Choosing another file starts a new review. What you decided in this one is lost."
+    )
+    discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+    keep = box.addButton("Keep reviewing", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(keep)
+    box.exec()
+    return box.clickedButton() is discard
+
+
 def ask_unanswered(parent: QWidget | None, count: int) -> bool:
     """Ask whether to export although ``count`` guesses under "Not sure — hide?" were not
     answered: they stay visible in the masked files. True for "Export anyway".
@@ -287,6 +303,7 @@ class MainWindow(QMainWindow):
         self._engine_loader: EngineWorker | None = None
         self._engine_problem: str | None = None
         self._review_ready = False
+        self._review_exported = False  # the open review was saved as masked files
         self._closing = False
         self._fade: tuple[QPropertyAnimation, QLabel] | None = None
         self._titles = dict(DEFAULT_TITLES)
@@ -516,7 +533,18 @@ class MainWindow(QMainWindow):
             self._primary[self.current_screen_name()].run()
 
     def _choose_triggered(self) -> None:
-        if self.choose_action.isEnabled():
+        """Choose file…: on Restore it is the AI's returned file; on the review it is a new file
+        to mask, which replaces the review, so the owner is asked first unless it was exported.
+        """
+        if not self.choose_action.isEnabled():
+            return
+        screen = self.current_screen_name()
+        if screen == "restore":
+            self.restore_screen.drop_zone.choose_files()
+        elif screen == "review" and self._review_ready and not self._review_exported:
+            if ask_discard_review(self):
+                self.home.drop_zone.choose_files()
+        else:
             self.home.drop_zone.choose_files()
 
     def _settings_triggered(self) -> None:
@@ -583,6 +611,7 @@ class MainWindow(QMainWindow):
         self.redline_split = any(source.pkg_before is not None for source in sources)
         self.pending_case = case
         self._review_ready = True
+        self._review_exported = False
         self._review_title_changed(*self.review_screen.title())
         self._show("review")
 
@@ -631,6 +660,7 @@ class MainWindow(QMainWindow):
         )
         dialog = ExportDialog(self)
         dialog.finished.connect(self._export_closed)
+        dialog.finishedExport.connect(self._export_finished)
         self.export_dialog = dialog
         dialog.open()
         dialog.run(self.sources, self.review_screen.review, options, self.ctx)
@@ -642,6 +672,11 @@ class MainWindow(QMainWindow):
         store = self.ctx.case_store
         codes = [summary.id for summary in store.list()]  # also finds the files that do not open
         return codes + [path.stem for path in store.unreadable]
+
+    def _export_finished(self) -> None:
+        outcome = self.export_dialog.result if self.export_dialog is not None else None
+        if outcome is not None and not outcome.blocked:
+            self._review_exported = True
 
     def _export_closed(self) -> None:
         dialog, self.export_dialog = self.export_dialog, None
