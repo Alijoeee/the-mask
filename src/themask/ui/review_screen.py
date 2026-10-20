@@ -14,7 +14,7 @@ The ``ReviewState`` holds every decision. The screen shows it, passes the owner'
 and draws everything again after each change (the state re-sorts its groups and findings, so
 nothing is kept between two changes but the ids of the groups). The file name and the summary
 line are not on this screen: the window shows them in its tool bar (``title``, ``titleChanged``),
-with the button that goes on to the export (``exportRequested``).
+with the toolbar's "Export…" button that goes on to the export (``exportRequested``).
 
 The text pane shows the combined text as it is, with a header line before the text of each file.
 Positions in the pane count UTF-16 units from the start of the pane, and indexes in the text count
@@ -297,7 +297,7 @@ class ReviewScreen(QWidget):
             "Leave the text selected in the document, or the value of the selected group, visible"
             " in every document from now on."
         )
-        self.never_button.clicked.connect(self._never_hide)
+        self.never_button.clicked.connect(lambda: self._never_hide(from_text=True))
         self.always_action = self._action(
             "Hide always",
             "Hide the value of the selected group in every document from now on.",
@@ -306,7 +306,7 @@ class ReviewScreen(QWidget):
         self.never_action = self._action(
             "Show always",
             "Leave the value of the selected group visible in every document from now on.",
-            self._never_hide,
+            lambda: self._never_hide(from_text=False),
         )
         self.split_action = self._action(
             "Split", "Move the selected places into a group of their own.", self._split
@@ -940,7 +940,7 @@ class ReviewScreen(QWidget):
 
     def _refresh_summary(self) -> None:
         """Count the groups again (the footer), and tell the window if its title changed."""
-        self.inspector.set_counts(FooterCounts.of(self.review.groups))
+        self.inspector.set_counts(FooterCounts.of(self.review.groups, self._answered))
         title = self.title()
         if title != self._title:
             self._title = title
@@ -1083,12 +1083,13 @@ class ReviewScreen(QWidget):
         if group is not None:
             self._change_a_list(self.review.add_always_hide, group.canonical, group.id)
 
-    def _never_hide(self) -> None:
-        """Put the text selected in the document on the never-hide list, else the value of the
-        selected group.
+    def _never_hide(self, from_text: bool) -> None:
+        """Put the text selected in the document on the never-hide list (``from_text``, the
+        button), else the value of the selected group. The menu's action passes ``False``: it is
+        about the group that was clicked, whatever stays selected in the document.
         """
         cursor = self.text.textCursor()
-        if cursor.hasSelection():
+        if from_text and cursor.hasSelection():
             try:
                 start, end = self._map.selection(cursor.selectionStart(), cursor.selectionEnd())
             except ValueError as error:

@@ -990,7 +990,8 @@ def test_the_footer_counts_follow_every_change(qtbot: QtBot) -> None:
     )
     assert s.counts_label.text() == "5 hidden · 2 to check · 1 shown on purpose"
     s.row_for(group_named(st, "8 %").id).switch.click()
-    assert s.counts_label.text() == "5 hidden · 1 to check · 2 shown on purpose"
+    # a group to check that is off is still asked about, so it stays to check
+    assert s.counts_label.text() == "5 hidden · 2 to check · 1 shown on purpose"
 
 
 # ---- a group to check that is switched off: "Not sure — hide?" ----------------------------------------
@@ -1084,6 +1085,18 @@ def test_show_always_on_a_group_the_owner_is_asked_about_is_an_answer(qtbot: QtB
     assert st.user_lists.never_hide == ["Acme Supplies Ltd"] and not acme.enabled
     assert s.section_titles() == ["COMPANIES · 2", "OTHER · 1"]  # not asked about any more
     assert s.row_for(acme.id).switch is not None  # a row like the others, switched off
+
+
+def test_show_always_in_the_menu_ignores_a_stale_page_selection(qtbot: QtBot) -> None:
+    s, st = screen_of(qtbot, CONTRACT, UNSURE_SPECS)
+    acme = group_named(st, "Acme Supplies Ltd")
+    start = CONTRACT.index("Project Falcon")
+    select_text(s, start, start + len("Project Falcon"))  # left over from an earlier click
+    s.tree.setCurrentItem(s.tree_item_for(acme.id))
+    s.tree_item_for(acme.id).setSelected(True)
+    s.context_menu()
+    s.never_action.trigger()
+    assert st.user_lists.never_hide == ["Acme Supplies Ltd"]
 
 
 def test_hide_always_on_a_group_the_owner_is_asked_about_hides_it(qtbot: QtBot) -> None:
