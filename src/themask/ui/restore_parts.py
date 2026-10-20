@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
 )
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen, QResizeEvent
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QBoxLayout,
     QGridLayout,
@@ -30,10 +30,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from themask.ui.art import Illustration
 from themask.ui.cards import tokens_for
 from themask.ui.drop_zone import DropZone
 from themask.ui.theme import mono_font
+from themask.ui.widgets import ElidedLabel
 
 DROP_TITLE = "Drop the AI\N{RIGHT SINGLE QUOTATION MARK}s Word file here"
 DROP_HINT = "The .docx file the AI tool gave back, with the placeholders in it."
@@ -222,8 +222,6 @@ class FileCard(DropZone):
     takes and refuses files is the drop zone's.
     """
 
-    PICTURE_TOP = 22
-
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(
             parent,
@@ -232,31 +230,32 @@ class FileCard(DropZone):
             hint=DROP_HINT,
             dialog_title="Choose the AI's Word file",
             file_filter="Word files (*.docx)",
+            art="check",
+            choose_text=CHOOSE_FILE,
+            shortcut_hint=None,
         )
         self.setObjectName("fileCard")
         self.setMinimumHeight(0)
-        self.choose_button.setText(CHOOSE_FILE)
         self.choose_button.setProperty("small", True)
-        self.title_label.setObjectName("fileName")
-        self.title_label.setTextFormat(Qt.TextFormat.PlainText)  # a file name may hold < >
-        self.title_label.setWordWrap(True)
-        self.hint_label.setObjectName("fileCaption")
-        self.picture = Illustration("check", self)
+        # A name without a space in it cannot wrap: the title is cut in the middle instead.
+        old = self.title_label
+        title = ElidedLabel(old.text(), elide=Qt.TextElideMode.ElideMiddle)
+        title.setObjectName("fileName")
+        title.setTextFormat(Qt.TextFormat.PlainText)  # a file name may hold < >
+        title.setFont(old.font())
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = self.layout()
+        if isinstance(layout, QBoxLayout):
+            layout.replaceWidget(old, title)
+        old.deleteLater()
+        old.hide()
+        self.title_label = title
+        self.hint_label.setObjectName("fileCaption")
         if layout is not None:
-            layout.setContentsMargins(20, self.PICTURE_TOP + self.picture.height() + 8, 20, 22)
+            layout.setContentsMargins(20, 22, 20, 22)
             layout.setSpacing(8)
 
     def add_line(self, label: QLabel) -> None:
         """Put ``label`` under the caption, above the button."""
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout = self.layout()
-        if isinstance(layout, QBoxLayout):
-            layout.insertWidget(layout.indexOf(self.choose_button), label)
-            layout.addStretch(1)  # a card made taller than its words keeps them at the top
-        elif layout is not None:
-            layout.addWidget(label)
-
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.picture.move((self.width() - self.picture.width()) // 2, self.PICTURE_TOP)
+        self.status_layout.addWidget(label)

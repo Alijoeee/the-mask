@@ -1596,7 +1596,37 @@ def test_the_file_card_asks_for_a_file_until_there_is_one(screen: RestoreScreen)
     assert zone.title_label.text() == restore_screen.DROP_TITLE
     assert zone.hint_label.text() == restore_screen.DROP_HINT
     assert zone.choose_button.text() == "Choose file\N{HORIZONTAL ELLIPSIS}"
-    assert zone.picture.width() == zone.picture.height() == 64  # the document with a check
+    assert zone.illustration is not None
+    assert zone.illustration.width() == zone.illustration.height() == 64  # document with a check
+    assert zone.shortcut_label.isHidden()  # no key opens this card's dialog
+
+
+def test_the_file_card_shows_exactly_one_picture(screen: RestoreScreen) -> None:
+    from themask.ui.art import Illustration
+
+    screen.show()
+    zone = screen.drop_zone
+    assert len(zone.findChildren(Illustration)) == 1
+    assert not hasattr(zone, "picture")
+
+
+def test_a_very_long_file_name_does_not_stretch_the_screen(
+    screen: RestoreScreen, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    name = "A" * 140 + ".docx"
+    ai = named_file(make_docx, tmp_path, name, "[PERSON_1] [COMPANY_1] x")
+    screen.resize(700, 760)
+    screen.show()
+    screen.load_file(ai)
+    zone = screen.drop_zone
+    assert zone.title_label.text() == name  # the whole name is kept and read
+    assert zone.title_label.toolTip() == name
+    shown = zone.title_label.displayed_text()  # type: ignore[attr-defined]
+    assert "\N{HORIZONTAL ELLIPSIS}" in shown and shown.endswith(".docx")
+    assert zone.title_label.width() <= zone.width()
+    assert screen.scroll_area.horizontalScrollBar().maximum() == 0  # nothing to scroll sideways
+    content = screen.scroll_area.widget()
+    assert content.minimumSizeHint().width() <= screen.scroll_area.viewport().width()
 
 
 def test_the_file_card_names_the_file_and_what_is_known_of_it(
