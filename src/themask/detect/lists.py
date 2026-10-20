@@ -211,12 +211,25 @@ DEFAULT_NEVER_HIDE: frozenset[str] = (
 _REFERENCE_WORDS = _terms(
     """
     Schedule, Annex, Appendix, Exhibit, Attachment, Addendum, Clause, Sub-clause, Section,
-    Article, Paragraph, Recital, Part, Chapter, Page, Table, Item, Party
+    Article, Paragraph, Recital, Part, Chapter, Table, Item, Party, Annexure, Figure
     """
 )
 _REFERENCE = re.compile(
-    r"\(?(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[A-Za-z]|[IVXLC]{1,7}|[ivxlc]{1,7})\)?"
+    r"\(?(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[A-Za-z]|[IVXLCDM]{1,8}|[ivxlcdm]{1,8})\)?"
     r"(?:\([A-Za-z0-9]{1,4}\))*\.?"
+)
+
+# A page label as a footer or a field shows it: "Page 3", "Page 3 of 12", "Seite 2 von 5",
+# "Pagina 3 van 7", "Bladzijde 4", and a field's own code, which a PDF or a Word export may leave
+# as text: "Page PAGE1", "PAGE", "NUMPAGES", "Seite PAGE2 von NUMPAGES".
+_PAGE_FIELD = r"(?:NUM|SECTION)?PAGES?\d*|PAGEREF\w*"
+_PAGE_NUMBER = rf"(?:\d{{1,4}}|[IVX]{{2,4}}|[ivx]{{2,4}}|{_PAGE_FIELD})"
+_PAGE_LABEL = re.compile(
+    rf"(?i:(?:pages?|seiten?|pagina'?s?|p[aá]ginas?|bladzijden?|blz|pág)\.?[ \N{{NO-BREAK SPACE}}]+)"
+    rf"{_PAGE_NUMBER}(?:[ \N{{NO-BREAK SPACE}}]+(?i:of|von|van|de|sur|di|din|av|af)"
+    rf"[ \N{{NO-BREAK SPACE}}]+{_PAGE_NUMBER})?"
+    rf"|(?:{_PAGE_FIELD})(?:[ \N{{NO-BREAK SPACE}}]+(?i:of|von|van|de|sur)"
+    rf"[ \N{{NO-BREAK SPACE}}]+(?:{_PAGE_FIELD}|\d{{1,4}}))?"
 )
 
 _LEADING_THE = re.compile(r"(?i:the)\s+")
@@ -262,13 +275,29 @@ class _Terms:
 
 
 _DEFAULTS = _Terms(DEFAULT_NEVER_HIDE)
+# The single words the contract vocabulary is built of ("Confidential" and "Information" of
+# "Confidential Information"; "Receiving" of "Receiving Party"): roles, document words and legal
+# words only, never a place, a month or a body, which are names in other combinations.
+_VOCABULARY_KEYS = frozenset(
+    key
+    for term in _ROLES | _DOCUMENT_WORDS | _LEGAL_WORDS
+    for key in map(term_key, term.split())
+    if key
+)
+_PLACE_KEYS = frozenset(
+    map(term_key, _PUBLIC_BODIES | _MONTHS | _WEEKDAYS | _CURRENCIES | _COUNTRIES | _NATIONALITIES)
+)
 _REFERENCE_TERMS = _Terms(_REFERENCE_WORDS)
 
 
 def _is_reference(text: str) -> bool:
     """Whether ``text`` is a document word with its reference ("SCHEDULE 1", "Clause 4.2",
-    "Annex II"), or a clause number before the word ("1.2 Clause", as a heading may read).
+    "Annex II"), a clause number before the word ("1.2 Clause", as a heading may read), or a page
+    label ("Page 3 of 12", "Seite 2 von 5", "Page PAGE1", "NUMPAGES").
     """
+    stripped = text.strip().strip("-\N{EN DASH}\N{EM DASH}|.:,() ")
+    if _PAGE_LABEL.fullmatch(stripped):
+        return True
     words = text.split()
     if len(words) < 2:
         return False
@@ -491,3 +520,21 @@ def _same_entry(entry: str, kind: PlaceholderType, key: str) -> bool:
     """Whether the always-hide ``entry`` hides the value with term key ``key`` as ``kind``."""
     entry_kind, entry_text = always_hide_entry(entry)
     return entry_kind is kind and term_key(entry_text) == key
+
+
+def is_vocabulary_word(text: str) -> bool:
+    """Whether the single word ``text`` is one of the plain words contracts are written in: a
+    word of a default role, document word or legal term ("Personal", "Information", "Receiving").
+    A place, a month and a body are not (``Bank of Ireland`` is a name).
+    """
+    key = term_key(text)
+    if not key or " " in key:
+        return False
+    forms = _number_forms(key)
+    return _PLACE_KEYS.isdisjoint(forms) and not _VOCABULARY_KEYS.isdisjoint(forms)
+
+
+def is_place_term(text: str) -> bool:
+    """Whether ``text`` is a country, nationality, currency, month, weekday or public body."""
+    key = term_key(text)
+    return bool(key) and not _PLACE_KEYS.isdisjoint(_number_forms(key))
