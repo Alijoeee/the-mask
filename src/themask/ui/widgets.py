@@ -76,6 +76,55 @@ class ElidedLabel(QLabel):
         self.setToolTip(self.text() if self.displayed_text() != self.text() else "")
 
 
+class ElidedLines(QLabel):
+    """A label of several lines (one per ``\\n`` of its text), each cut short in the middle when it
+    has no room for all of it; the tooltip then says every line in full. It asks for no width.
+    """
+
+    def displayed_lines(self) -> list[str]:
+        metrics = self.fontMetrics()
+        width = self.contentsRect().width()
+        return [
+            metrics.elidedText(line, Qt.TextElideMode.ElideMiddle, width)
+            for line in self.text().split("\n")
+        ]
+
+    def setText(self, text: str) -> None:
+        super().setText(text)
+        self._update_tooltip()
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:
+        lines = len(self.text().split("\n"))
+        margins = self.contentsMargins()
+        height = lines * self.fontMetrics().lineSpacing() + margins.top() + margins.bottom()
+        return QSize(0, height)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_tooltip()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        area: QRect = self.contentsRect()
+        self.style().drawItemText(
+            painter,
+            area,
+            int(self.alignment() | Qt.AlignmentFlag.AlignTop),
+            self.palette(),
+            self.isEnabled(),
+            "\n".join(self.displayed_lines()),
+            QPalette.ColorRole.WindowText,
+        )
+
+    def _update_tooltip(self) -> None:
+        cut = self.displayed_lines() != self.text().split("\n")
+        self.setToolTip(self.text() if cut else "")
+
+
 class LinkButton(QPushButton):
     """A button that looks like a link (the accent's colour, no frame) and acts like a button:
     it can be reached with Tab and pressed with Space, which a link in a label cannot.

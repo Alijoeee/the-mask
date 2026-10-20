@@ -18,15 +18,18 @@ import errno
 import hashlib
 import logging
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.sax.saxutils import escape
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QListWidget
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QApplication, QLabel, QListWidget, QWidget
 
+from tests.fixtures.d3_look import appears_in
 from tests.helpers import simulate_ai
 from themask.docx.package import DocxPackage
 from themask.docx.reader import extract_text
@@ -35,11 +38,12 @@ from themask.instruction import BANNER_TEXT
 from themask.model import Case, KeyEntry, PlaceholderType
 from themask.restore.docx_restore import FILE_CHANGED_MESSAGE
 from themask.restore.report import TRACKED_CHANGE
-from themask.ui import restore_screen
-from themask.ui.cases_screen import format_moment
+from themask.ui import restore_screen, theme
+from themask.ui.cases_screen import format_when
 from themask.ui.restore_screen import RestoreScreen, file_text
 
 if TYPE_CHECKING:
+    from PySide6.QtGui import QImage
     from pytestqt.qtbot import QtBot
 
     from tests.fixtures.docx import MakeDocx
@@ -731,9 +735,7 @@ def test_the_case_asked_for_in_the_cases_screen_wins_over_a_better_fit(
     s.refresh_cases("B2B2")  # "Restore from this case": the owner asked for this one
     assert s.case_combo.currentData() == "B2B2"
     assert s.better_fit_label.isVisibleTo(s)  # A1A1 holds both placeholders: said, not forced
-    assert (
-        s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"
-    )  # B2B2's pair only
+    assert s.preview_grid.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"  # B2B2's pair only
     assert s.altered_list.count() == 1  # the file is read again for it
     assert s.file_fit_label.text() == "1 of 2 placeholders found in this case."
     s.refresh_cases()  # a visit to the screen later keeps the owner's choice
@@ -844,7 +846,7 @@ def test_two_cases_that_fit_a_file_alike_are_not_guessed_between(
     assert s.choose_label.text() == "Several cases fit this file \N{EM DASH} choose one."
     assert not s.restore_button.isEnabled()
     assert s.altered_list.count() == 0 and s.file_fit_label.text() == ""
-    assert not s.preview_label.isVisibleTo(s)  # no case, so no values to show
+    assert not s.preview_grid.isVisibleTo(s)  # no case, so no values to show
 
 
 def test_the_owner_s_choice_is_the_case_the_file_is_restored_with(
@@ -1110,7 +1112,7 @@ def test_the_case_asked_for_in_the_cases_screen_stays_though_the_file_fits_anoth
     assert not s.choose_label.isVisibleTo(s)
     assert s.restore_button.isEnabled()  # the owner chose: nothing is taken away
     arrow = "\N{RIGHTWARDS ARROW}"
-    assert s.preview_label.text() == f"[PERSON_1] {arrow} Bob Jones"  # what M5N6 would write
+    assert s.preview_grid.text() == f"[PERSON_1] {arrow} Bob Jones"  # what M5N6 would write
     assert s.file_fit_label.text() == "1 of 2 placeholders found in this case."
 
 
@@ -1239,31 +1241,31 @@ def test_the_preview_shows_the_values_the_selected_case_would_put_back(
 ) -> None:
     s = screen_with_alice_and_bob(qtbot, app_ctx)
     s.load_file(make_docx(body("Dear [PERSON_1],")))
-    assert not s.preview_label.isVisibleTo(s)
+    assert not s.preview_grid.isVisibleTo(s)
     pick(s, "K4F7")
-    assert s.preview_label.isVisibleTo(s)
-    assert s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Alice Smith"
+    assert s.preview_grid.isVisibleTo(s)
+    assert s.preview_grid.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Alice Smith"
     pick(s, "M5N6")
     assert (
-        s.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Bob Jones"
+        s.preview_grid.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} Bob Jones"
     )  # the wrong one shows
 
 
 def test_the_preview_follows_the_text_and_hides_when_there_is_nothing_to_show(
     qtbot: QtBot, screen: RestoreScreen
 ) -> None:
-    assert not screen.preview_label.isVisibleTo(screen)  # nothing loaded or pasted
+    assert not screen.preview_grid.isVisibleTo(screen)  # nothing loaded or pasted
     screen.paste_box.setPlainText("Dear [PERSON_1], [PERSON_9] too")
     assert (
-        screen.preview_label.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"
+        screen.preview_grid.text() == "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith"
     )  # not [PERSON_9]
     screen.paste_box.setPlainText("Dear [PERSON_1], [COMPANY_1] pays")
-    assert screen.preview_label.text().split("\n") == [
+    assert screen.preview_grid.text().split("\n") == [
         "[PERSON_1] \N{RIGHTWARDS ARROW} John Smith",
         "[COMPANY_1] \N{RIGHTWARDS ARROW} Acme Supplies Ltd",
     ]
     screen.paste_box.setPlainText("Nothing masked here, and [PERSON_9] is not in the case.")
-    assert not screen.preview_label.isVisibleTo(screen) and screen.preview_label.text() == ""
+    assert not screen.preview_grid.isVisibleTo(screen) and screen.preview_grid.text() == ""
 
 
 def test_the_preview_names_at_most_five_placeholders_in_the_order_they_stand(
@@ -1281,19 +1283,19 @@ def test_the_preview_names_at_most_five_placeholders_in_the_order_they_stand(
     )
     s.paste_box.setPlainText("[PERSON_7] [PERSON_1] [PERSON_4]")  # the text's come after the file's
     arrow = "\N{RIGHTWARDS ARROW}"
-    assert s.preview_label.text().split("\n") == [
+    assert s.preview_grid.text().split("\n") == [
         f"[PERSON_{n}] {arrow} Person {n} of K4F7" for n in (3, 1, 8, 2, 5)
     ]  # each once, five of the seven
     s.load_file(make_docx(body("[PERSON_2]")))
     s.paste_box.clear()
-    assert s.preview_label.text() == f"[PERSON_2] {arrow} Person 2 of K4F7"
+    assert s.preview_grid.text() == f"[PERSON_2] {arrow} Person 2 of K4F7"
 
 
 def test_the_preview_shows_a_placeholder_the_ai_changed_too(
     qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
 ) -> None:
     screen.load_file(make_docx(body("The fee is AMOUNT_1.")))  # changed: it waits for a tick
-    assert screen.preview_label.text() == "[AMOUNT_1] \N{RIGHTWARDS ARROW} EUR 1,250,000"
+    assert screen.preview_grid.text() == "[AMOUNT_1] \N{RIGHTWARDS ARROW} EUR 1,250,000"
 
 
 def test_the_preview_is_plain_text_and_keeps_a_long_value_short(
@@ -1309,8 +1311,14 @@ def test_the_preview_is_plain_text_and_keeps_a_long_value_short(
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
     s.load_file(make_docx(body("[COMPANY_1] at [ADDRESS_1]")))
-    first, second = s.preview_label.text().split("\n")
-    assert s.preview_label.textFormat() == Qt.TextFormat.PlainText
+    first, second = s.preview_grid.text().split("\n")
+    # The grid is made of labels: none of them reads what it is given as markup.
+    shown = [
+        label
+        for label in s.preview_grid.findChildren(QLabel)
+        if label.text().startswith("\N{RIGHTWARDS ARROW}")
+    ]
+    assert len(shown) == 2 and all(l.textFormat() == Qt.TextFormat.PlainText for l in shown)
     assert first == f"[COMPANY_1] \N{RIGHTWARDS ARROW} {markup}"  # shown as written, not as markup
     assert second.startswith("[ADDRESS_1] \N{RIGHTWARDS ARROW} Main Street 1, Brightwater")
     assert len(second) < 100 and second.endswith("\N{HORIZONTAL ELLIPSIS}")  # and on one line
@@ -1328,14 +1336,14 @@ def test_the_values_of_the_preview_are_never_logged(
         pick(s, "K4F7")
         s.paste_box.setPlainText("[PERSON_1] again")
         click_restore(qtbot, s)
-    assert "Alice Smith" in s.preview_label.text()
+    assert "Alice Smith" in s.preview_grid.text()
     assert "Alice" not in caplog.text and "Bob" not in caplog.text and "Smith" not in caplog.text
 
 
 # ---- what a line of the case list says ---------------------------------------------------------------
 
 
-def test_a_case_line_carries_the_code_the_date_and_the_original_files(
+def test_a_case_line_carries_the_code_the_files_the_day_and_the_number_of_values(
     qtbot: QtBot, app_ctx: AppContext
 ) -> None:
     case = Case("K4F7", NOW, ["Supply.docx", "Annex.pdf"], [], the_key())
@@ -1343,20 +1351,25 @@ def test_a_case_line_carries_the_code_the_date_and_the_original_files(
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
     line = s.case_combo.itemText(0)
-    assert "K4F7" in line and "Supply.docx" in line and "Annex.pdf" in line
-    assert format_moment(NOW) in line
+    # The line of the mockup: "K4F7 · supply-01.docx · today 14:02 · 14 values" (it said
+    # "K4F7 – Supply.docx, Annex.pdf (2026-10-17 09:00)").
+    assert (
+        line
+        == f"K4F7 \N{MIDDLE DOT} Supply.docx, Annex.pdf \N{MIDDLE DOT} {format_when(NOW)} \N{MIDDLE DOT} 3 values"
+    )
+    assert s.case_combo.itemData(0, Qt.ItemDataRole.ToolTipRole) == line  # long ones can be read
 
 
-@pytest.mark.parametrize(("entries", "words"), [(3, "3 entries"), (1, "1 entry")])
-def test_a_case_that_stores_no_file_names_is_told_by_its_code_date_and_entries(
+@pytest.mark.parametrize(("entries", "words"), [(3, "3 values"), (1, "1 value")])
+def test_a_case_that_stores_no_file_names_is_told_by_its_code_day_and_values(
     qtbot: QtBot, app_ctx: AppContext, entries: int, words: str
 ) -> None:
     app_ctx.case_store.save(Case("K4F7", NOW, [], [], the_key()[:entries]))
     s = RestoreScreen(app_ctx)
     qtbot.addWidget(s)
     line = s.case_combo.itemText(0)
-    assert "K4F7" in line and format_moment(NOW) in line and words in line
-    assert "()" not in line and "\N{EN DASH}  " not in line  # no empty list of files
+    assert line == f"K4F7 \N{MIDDLE DOT} {format_when(NOW)} \N{MIDDLE DOT} {words}"
+    assert "()" not in line and "\N{MIDDLE DOT}  " not in line  # no empty list of files
 
 
 # ---- the files that are dropped ----------------------------------------------------------------------
@@ -1382,7 +1395,7 @@ def test_a_file_that_is_not_word_is_refused_in_words(screen: RestoreScreen) -> N
     screen.drop_zone.filesRefused.emit([Path("/somewhere/answer.pdf"), Path("/somewhere/a.txt")])
     text = screen.status_label.text()
     assert restore_screen.ONLY_WORD in text and "answer.pdf" in text and "a.txt" in text
-    assert screen.file_label.text() == "No file chosen yet."
+    assert screen.file_label.text() == restore_screen.DROP_TITLE  # the card still asks for a file
 
 
 def test_the_zone_offers_only_word_files(screen: RestoreScreen) -> None:
@@ -1397,7 +1410,8 @@ def test_a_file_that_cannot_be_read_is_said_in_words(
     screen.load_file(fixtures / name)
     assert screen.status_label.text() and "Traceback" not in screen.status_label.text()
     assert (
-        not screen.restore_button.isEnabled() and screen.file_label.text() == "No file chosen yet."
+        not screen.restore_button.isEnabled()
+        and screen.file_label.text() == restore_screen.DROP_TITLE  # was "No file chosen yet."
     )
 
 
@@ -1504,3 +1518,746 @@ def test_a_restore_that_works_clears_the_message_of_one_that_did_not(
 def test_the_cases_are_put_in_order_for_the_text_of_the_file(make_docx: MakeDocx) -> None:
     ai = make_docx(body("Dear [PERSON_1],", "[COMPANY_1] pays."))
     assert file_text(ai) == "Dear [PERSON_1],\n[COMPANY_1] pays."
+
+
+# ---- the window's part: the title and the Restore button ------------------------------------------
+
+
+def test_the_screen_gives_the_window_its_title_and_caption(screen: RestoreScreen) -> None:
+    assert screen.title() == (
+        "Restore",
+        "Put the real values back into the file an AI tool returned",
+    )
+    heard: list[tuple[str, str]] = []
+    screen.titleChanged.connect(lambda title, caption: heard.append((title, caption)))
+    screen.titleChanged.emit(*screen.title())  # what the screen does if its words ever change
+    assert heard == [screen.title()]
+
+
+def test_the_windows_restore_button_does_what_the_screens_own_does(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    ai = make_docx(body("Dear [PERSON_1],"))
+    screen.load_file(ai)
+    with qtbot.waitSignal(screen.restoreFinished, timeout=30000):
+        screen.primary()
+    assert screen.report_label.text() == "1 placeholders restored, 0 need your check."
+    assert restored_beside(ai).exists() and screen.result_panel.isVisibleTo(screen)
+
+
+def test_the_windows_restore_button_does_nothing_while_there_is_no_file(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    screen.paste_box.setPlainText("Dear [PERSON_1],")  # a text is not what that button restores
+    with qtbot.assertNotEmitted(screen.restoreFinished):
+        screen.primary()
+    assert not screen.result_panel.isVisibleTo(screen)
+
+
+def test_the_screen_says_when_the_windows_restore_button_may_be_pressed(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = RestoreScreen(app_ctx)  # no case in the store yet
+    qtbot.addWidget(s)
+    heard: list[bool] = []
+    s.primaryEnabledChanged.connect(heard.append)
+    assert not s.primary_enabled()
+    app_ctx.case_store.save(a_case())
+    s.load_file(make_docx(body("Dear [PERSON_1],")))
+    s.refresh_cases()
+    assert s.primary_enabled() and heard == [True] and s.restore_button.isEnabled()
+    s.case_combo.setCurrentIndex(-1)  # no case selected: nothing can be restored
+    assert not s.primary_enabled() and heard == [True, False]
+    s.case_combo.setCurrentIndex(0)
+    assert heard == [True, False, True]
+
+
+def test_the_screens_own_restore_button_goes_when_the_window_has_one(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.show()
+    assert screen.restore_button.isVisibleTo(screen)  # alone, the screen can restore
+    assert screen.restore_button.objectName() == "primary"
+    screen.set_primary_in_toolbar(True)
+    assert not screen.restore_button.isVisibleTo(screen)
+    screen.load_file(make_docx(body("Dear [PERSON_1],")))
+    assert not screen.restore_button.isVisibleTo(screen) and screen.primary_enabled()
+    screen.set_primary_in_toolbar(False)
+    assert screen.restore_button.isVisibleTo(screen)
+
+
+# ---- the file card ---------------------------------------------------------------------------------
+
+
+def test_the_file_card_asks_for_a_file_until_there_is_one(screen: RestoreScreen) -> None:
+    zone = screen.drop_zone
+    assert zone.objectName() == "fileCard"  # the card of this screen, not the home screen's
+    assert screen.file_label is zone.title_label
+    assert zone.title_label.text() == restore_screen.DROP_TITLE
+    assert zone.hint_label.text() == restore_screen.DROP_HINT
+    assert zone.choose_button.text() == "Choose file\N{HORIZONTAL ELLIPSIS}"
+    assert zone.illustration is not None
+    assert zone.illustration.width() == zone.illustration.height() == 64  # document with a check
+    assert zone.shortcut_label.isHidden()  # no key opens this card's dialog
+
+
+def test_the_file_card_shows_exactly_one_picture(screen: RestoreScreen) -> None:
+    from themask.ui.art import Illustration
+
+    screen.show()
+    zone = screen.drop_zone
+    assert len(zone.findChildren(Illustration)) == 1
+    assert not hasattr(zone, "picture")
+
+
+def test_a_very_long_file_name_does_not_stretch_the_screen(
+    screen: RestoreScreen, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    name = "A" * 140 + ".docx"
+    ai = named_file(make_docx, tmp_path, name, "[PERSON_1] [COMPANY_1] x")
+    screen.resize(700, 760)
+    screen.show()
+    screen.load_file(ai)
+    zone = screen.drop_zone
+    assert zone.title_label.text() == name  # the whole name is kept and read
+    assert zone.title_label.toolTip() == name
+    shown = zone.title_label.displayed_text()  # type: ignore[attr-defined]
+    assert "\N{HORIZONTAL ELLIPSIS}" in shown and shown.endswith(".docx")
+    assert zone.title_label.width() <= zone.width()
+    assert screen.scroll_area.horizontalScrollBar().maximum() == 0  # nothing to scroll sideways
+    content = screen.scroll_area.widget()
+    assert content.minimumSizeHint().width() <= screen.scroll_area.viewport().width()
+
+
+def test_the_file_card_names_the_file_and_what_is_known_of_it(
+    screen: RestoreScreen, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    ai = named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "[PERSON_1] [COMPANY_1] [AMOUNT_1] x")
+    screen.load_file(ai)
+    zone = screen.drop_zone
+    assert zone.title_label.text() == "MASKED-K4F7.docx"
+    assert zone.title_label.toolTip() == "MASKED-K4F7.docx"
+    assert zone.hint_label.text() == (
+        "Dropped just now \N{MIDDLE DOT} 3 placeholders found \N{MIDDLE DOT} case K4F7 fits best"
+    )
+    assert zone.choose_button.text() == "Choose another file\N{HORIZONTAL ELLIPSIS}"
+    assert zone.title_label.textFormat() == Qt.TextFormat.PlainText  # a name may hold < >
+    assert not screen.file_fit_label.isVisibleTo(screen)  # the case holds all three: nothing to add
+
+
+def test_one_placeholder_is_not_written_in_the_plural(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("Dear [PERSON_1],")))
+    assert "1 placeholder found" in screen.drop_zone.hint_label.text()
+    assert "1 placeholders" not in screen.drop_zone.hint_label.text()
+
+
+def test_the_file_card_says_so_when_the_file_has_no_placeholders(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("Nothing masked here.")))
+    assert screen.drop_zone.hint_label.text() == (
+        "Dropped just now \N{MIDDLE DOT} No placeholders found"  # and no case fits best
+    )
+    assert not screen.file_fit_label.isVisibleTo(screen)
+
+
+def test_the_fit_line_shows_only_when_the_case_lacks_placeholders_of_the_file(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("[PERSON_1] [PERSON_8] [PERSON_9]")))
+    assert screen.file_fit_label.isVisibleTo(screen)
+    assert screen.file_fit_label.text() == "1 of 3 placeholders found in this case."
+    assert "3 placeholders found" in screen.drop_zone.hint_label.text()
+    screen.load_file(make_docx(body("[PERSON_1]")))
+    assert not screen.file_fit_label.isVisibleTo(screen)
+
+
+def test_the_card_does_not_say_a_case_fits_best_when_the_owner_chose_it(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    s.load_file(make_docx(body("[PERSON_1] and [COMPANY_1]")))  # K4F7 fits better
+    assert s.case_combo.currentData() == "K4F7"
+    assert "case K4F7 fits best" in s.drop_zone.hint_label.text()
+    pick(s, "M5N6")  # the owner's own choice, which does not
+    assert "fits best" not in s.drop_zone.hint_label.text()
+    assert s.better_fit_label.isVisibleTo(s)
+
+
+def test_the_card_says_nothing_of_the_best_fit_while_the_owner_has_to_choose(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(make_docx(body("Dear [PERSON_1],")))  # both cases fit alike: none is selected
+    assert s.case_combo.currentIndex() == -1
+    assert s.drop_zone.hint_label.text() == ("Dropped just now \N{MIDDLE DOT} 1 placeholder found")
+
+
+def test_a_file_dropped_on_the_card_is_taken_like_one_dropped_on_the_zone(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    ai = make_docx(body("[PERSON_1]"))
+    with qtbot.waitSignal(screen.drop_zone.filesDropped, timeout=1000):
+        screen.drop_zone._pass_on([ai, ai.with_name("answer.pdf")])  # what a drop does
+    assert screen.file_label.text() == ai.name  # the Word file; the PDF is refused in words
+    assert restore_screen.ONLY_WORD in screen.status_label.text()
+
+
+def test_a_drag_over_the_card_marks_it_for_the_style_sheet(screen: RestoreScreen) -> None:
+    screen.drop_zone._mark_drag_over(True)
+    assert screen.drop_zone.property("dragOver") is True  # `QFrame#fileCard[dragOver="true"]`
+
+
+# ---- the three state texts of the case card -------------------------------------------------------
+
+
+def test_a_case_chosen_from_the_name_of_the_file_says_so_in_green(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    assert not s.chosen_label.isVisibleTo(s)
+    s.load_file(named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "Dear [PERSON_1],"))
+    assert s.case_combo.currentData() == "K4F7"
+    assert s.chosen_label.isVisibleTo(s) and s.chosen_label.text() == "Chosen from the file name"
+    assert s.chosen_label.contentsMargins().left() > 0  # the room of its tick
+    s.load_file(named_file(make_docx, tmp_path, "answer.docx", "Dear [PERSON_1],"))
+    assert not s.chosen_label.isVisibleTo(s)  # the name says nothing: the owner is asked instead
+    assert s.choose_label.isVisibleTo(s)
+
+
+def test_a_case_the_owner_chose_is_not_said_to_come_from_the_file_name(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx)
+    s.load_file(named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "Dear [PERSON_1],"))
+    assert s.chosen_label.isVisibleTo(s)
+    pick(s, "K4F7")  # the same case, but now by hand
+    assert not s.chosen_label.isVisibleTo(s)
+
+
+def test_a_case_taken_for_the_pasted_text_is_not_said_to_come_from_the_file_name(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    s.load_file(named_file(make_docx, tmp_path, "MASKED-K4F7.docx", "Dear [PERSON_1],"))
+    assert s.chosen_label.isVisibleTo(s)
+    s.paste_box.setPlainText("[PERSON_1] [COMPANY_1]")  # now the text decides, not the name
+    assert not s.chosen_label.isVisibleTo(s)
+
+
+def test_the_three_state_texts_are_the_mockup_s(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = screen_with_alice_and_bob(qtbot, app_ctx, company=True)
+    assert s.choose_label.text() == "Several cases fit this file \N{EM DASH} choose one."
+    assert (
+        s.better_fit_label.text()
+        == "Another case fits this file better \N{EM DASH} check the case."
+    )
+    assert s.chosen_label.text() == "Chosen from the file name"
+    assert (s.choose_label.objectName(), s.better_fit_label.objectName()) == ("notice", "notice")
+
+
+# ---- the cards and how they wrap --------------------------------------------------------------------
+
+
+def corner(screen: RestoreScreen, widget: QWidget) -> tuple[int, int]:
+    point = widget.mapTo(screen, widget.rect().topLeft())
+    return point.x(), point.y()
+
+
+def test_the_file_card_and_the_paste_card_sit_side_by_side_on_a_wide_window(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    screen.resize(1180, 760)
+    screen.show()
+    qtbot.waitExposed(screen)
+    paste_card = screen.paste_box.parentWidget()
+    assert paste_card is not None
+    (file_x, file_y), (paste_x, paste_y) = (
+        corner(screen, screen.drop_zone),
+        corner(screen, paste_card),
+    )
+    assert file_y == paste_y and paste_x > file_x + screen.drop_zone.width()  # one row
+    assert abs(screen.drop_zone.width() - paste_card.width()) <= 1  # of two equal cards
+    assert screen.drop_zone.height() == paste_card.height()
+
+
+def test_the_cards_wrap_one_under_the_other_on_a_narrow_window(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    screen.resize(620, 760)
+    screen.show()
+    qtbot.waitExposed(screen)
+    paste_card = screen.paste_box.parentWidget()
+    assert paste_card is not None
+    (file_x, file_y), (paste_x, paste_y) = (
+        corner(screen, screen.drop_zone),
+        corner(screen, paste_card),
+    )
+    assert paste_x == file_x and paste_y >= file_y + screen.drop_zone.height()  # one column
+
+
+def test_the_paste_card_has_a_label_for_its_box_and_the_mockup_s_hint(
+    screen: RestoreScreen,
+) -> None:
+    assert screen.paste_label.text() == "Or paste the AI\N{RIGHT SINGLE QUOTATION MARK}s answer"
+    assert screen.paste_label.buddy() is screen.paste_box  # a label for every input
+    assert screen.paste_box.placeholderText() == (
+        "Paste text with placeholders such as [PERSON_1] here. It is restored on screen;"
+        " nothing is written to disk."
+    )
+    assert screen.restore_text_button.text() == "Restore text"
+    assert screen.restore_text_button.objectName() != "primary"  # one primary button per screen
+
+
+def test_the_case_card_has_a_label_for_its_box(screen: RestoreScreen) -> None:
+    labels = [label for label in screen.findChildren(QLabel) if label.buddy() is screen.case_combo]
+    assert [label.text() for label in labels] == ["Case"]
+    assert screen.case_combo.sizeHint().width() >= 360  # it asks for the mockup's width ...
+    assert screen.case_combo.minimumSizeHint().width() <= 200  # ... and gives way when narrow
+
+
+# ---- the values the case would put back --------------------------------------------------------------
+
+
+def preview_cells(s: RestoreScreen) -> list[QWidget]:
+    """The cells of the preview grid, in the order they stand (row by row)."""
+    grid = s.preview_grid
+    layout = grid.layout()
+    assert layout is not None
+    cells = [layout.itemAt(n).widget() for n in range(layout.count())]
+    return sorted(cells, key=lambda cell: (cell.pos().y(), cell.pos().x()))
+
+
+def test_the_preview_is_a_grid_of_three_columns(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    people = [
+        KeyEntry(f"[PERSON_{n}]", PlaceholderType.PERSON, f"Person {n}", []) for n in range(1, 6)
+    ]
+    app_ctx.case_store.save(Case("K4F7", NOW, ["K4F7.docx"], [], people))
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.resize(1180, 760)
+    s.show()
+    s.load_file(make_docx(body("[PERSON_1] [PERSON_2] [PERSON_3] [PERSON_4] [PERSON_5]")))
+    qtbot.waitExposed(s)
+    cells = preview_cells(s)
+    assert len(cells) == 5  # all five, and nothing more to say
+    columns = sorted({cell.mapTo(s, cell.rect().topLeft()).x() for cell in cells})
+    rows = sorted({cell.mapTo(s, cell.rect().topLeft()).y() for cell in cells})
+    assert len(columns) == 3 and len(rows) == 2  # three to a row: 3 + 2
+    assert s.preview_grid.more_text() == ""
+
+
+def test_the_preview_says_how_many_more_there_are(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    people = [
+        KeyEntry(f"[PERSON_{n}]", PlaceholderType.PERSON, f"Person {n}", []) for n in range(1, 15)
+    ]
+    app_ctx.case_store.save(Case("K4F7", NOW, ["K4F7.docx"], [], people))
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(make_docx(body(" ".join(f"[PERSON_{n}]" for n in range(1, 15)))))
+    assert len(s.preview_grid.lines()) == 5 and s.preview_grid.more_text() == "and 9 more"
+    more = [label for label in s.preview_grid.findChildren(QLabel) if label.text() == "and 9 more"]
+    assert len(more) == 1  # the sixth cell of the grid
+    assert len(preview_cells(s)) == 6
+    s.load_file(make_docx(body("[PERSON_1] [PERSON_2]")))
+    assert s.preview_grid.more_text() == "" and len(preview_cells(s)) == 2
+
+
+def test_the_preview_shows_each_placeholder_in_the_mono_font_and_each_value_beside_it(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("Dear [PERSON_1], [COMPANY_1] pays.")))
+    tokens = [
+        label
+        for label in screen.preview_grid.findChildren(QLabel)
+        if label.objectName() == "previewToken"
+    ]
+    values = [
+        label
+        for label in screen.preview_grid.findChildren(QLabel)
+        if label.objectName() == "previewValue"
+    ]
+    assert [t.text() for t in tokens] == ["[PERSON_1]", "[COMPANY_1]"]
+    assert [v.text() for v in values] == [
+        "\N{RIGHTWARDS ARROW} John Smith",
+        "\N{RIGHTWARDS ARROW} Acme Supplies Ltd",
+    ]
+    assert all(t.font().styleHint() == t.font().StyleHint.Monospace for t in tokens)
+
+
+def test_a_preview_that_has_not_changed_is_not_built_again(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("Dear [PERSON_1],")))
+    first = preview_cells(screen)[0]
+    screen.paste_box.setPlainText("nothing")  # the same case, the same values
+    assert preview_cells(screen)[0] is first
+
+
+# ---- what the AI changed -----------------------------------------------------------------------------
+
+
+def row_rect(choices: QListWidget, row: int) -> QRect:
+    item = choices.item(row)
+    assert item is not None
+    return choices.visualItemRect(item)
+
+
+def test_the_notice_card_shows_only_while_the_ai_changed_something(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.show()
+    assert not screen.altered_card.isVisibleTo(screen)
+    screen.load_file(make_docx(body("The fee is AMOUNT_1 and [PERSON_1].")))
+    assert (
+        screen.altered_card.isVisibleTo(screen) and screen.altered_card.objectName() == "noticeCard"
+    )
+    assert (
+        screen.altered_label.text()
+        == "These placeholders were changed by the AI \N{EM DASH} restore them?"
+    )
+    assert screen.altered_list.count() == 1
+    screen.load_file(make_docx(body("Nothing changed: [PERSON_1].")))
+    assert not screen.altered_card.isVisibleTo(screen) and screen.altered_list.count() == 0
+
+
+def test_a_row_is_ticked_by_a_click_anywhere_on_it_and_by_the_space_key(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.resize(1180, 760)
+    screen.show()
+    screen.load_file(make_docx(body("AMOUNT_1 and PERSON_1 and COMPANY_1")))
+    qtbot.waitExposed(screen)
+    choices = screen.altered_list
+    assert ticks(choices) == [False, False, False]
+    qtbot.mouseClick(
+        choices.viewport(), Qt.MouseButton.LeftButton, pos=row_rect(choices, 1).center()
+    )
+    assert ticks(choices) == [False, True, False]  # on the text, not only on the box
+    qtbot.mouseClick(
+        choices.viewport(), Qt.MouseButton.LeftButton, pos=row_rect(choices, 1).center()
+    )
+    assert ticks(choices) == [False, False, False]
+    choices.setFocus()
+    choices.setCurrentRow(2)
+    qtbot.keyClick(choices, Qt.Key.Key_Space)
+    assert ticks(choices) == [False, False, True]  # keyboard: the arrows move, Space ticks
+    qtbot.keyClick(choices, Qt.Key.Key_Up)
+    qtbot.keyClick(choices, Qt.Key.Key_Space)
+    assert ticks(choices) == [False, True, True]
+    qtbot.keyClick(choices, Qt.Key.Key_Space)
+    assert ticks(choices) == [False, False, True]
+
+
+def test_a_tick_is_what_the_restore_goes_by(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    ai = make_docx(body("The fee is AMOUNT_1."))
+    screen.resize(1180, 760)
+    screen.show()
+    screen.load_file(ai)
+    qtbot.waitExposed(screen)
+    qtbot.mouseClick(
+        screen.altered_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=row_rect(screen.altered_list, 0).center(),
+    )
+    with qtbot.waitSignal(screen.restoreFinished, timeout=30000):
+        screen.primary()
+    assert text_of(restored_beside(ai)) == "The fee is EUR 1,250,000."
+
+
+def test_a_row_keeps_its_words_for_a_reader_of_the_list(
+    screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.load_file(make_docx(body("The fee is AMOUNT_1.")))
+    item = screen.altered_list.item(0)
+    assert item is not None and item.text() == "AMOUNT_1  \N{RIGHTWARDS ARROW}  [AMOUNT_1]"
+    assert item.toolTip() == item.text()
+    assert screen.altered_list.accessibleName() == restore_screen.CHANGED
+
+
+def test_the_list_of_changes_is_as_tall_as_its_rows_up_to_six(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.show()
+    heights = []
+    for count in (1, 3, 6, 9):
+        screen.load_file(make_docx(body(*(f"AMOUNT_1 line {n}" for n in range(count)))))
+        heights.append(screen.altered_list.height())
+    row = restore_screen.CHANGE_ROW
+    assert heights == [row + 2, 3 * row + 2, 6 * row + 2, 6 * row + 2]  # nine scroll in six
+    bar = screen.altered_list.verticalScrollBar()
+    qtbot.waitUntil(lambda: bar.maximum() > 0, timeout=2000)  # the rest is a scroll away
+
+
+def test_the_changes_of_a_pasted_text_are_listed_in_the_paste_card(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    screen.show()
+    paste_card = screen.paste_box.parentWidget()
+    assert paste_card is not None and not screen.text_altered_card.isVisibleTo(screen)
+    screen.paste_box.setPlainText("Dear PERSON_1,")
+    assert screen.text_altered_card.isVisibleTo(screen)
+    assert screen.text_altered_card.parentWidget() is paste_card  # beside the text it is about
+    assert screen.text_altered_card.property("inner") is True
+    assert screen.text_altered_label.text() == restore_screen.CHANGED
+    assert not screen.altered_card.isVisibleTo(screen)  # the file has nothing to confirm
+    screen.paste_box.setPlainText("Dear [PERSON_1],")
+    assert not screen.text_altered_card.isVisibleTo(screen)
+
+
+# ---- the result ----------------------------------------------------------------------------------------
+
+
+def test_the_result_card_of_a_file_names_the_file_and_the_folder_button(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revealed: list[Path] = []
+    monkeypatch.setattr(restore_screen, "reveal", revealed.append)
+    ai = make_docx(body("Dear [PERSON_1]. Call [PERSON_9]."))
+    screen.show()
+    screen.load_file(ai)
+    assert not screen.result_panel.isVisibleTo(screen)
+    screen.primary()
+    assert screen.result_panel.isVisibleTo(screen)
+    assert screen.result_panel.property("card") is True
+    assert screen.report_label.text() == "1 placeholders restored, 0 need your check."
+    assert screen.saved_label.text() == (
+        f"Saved as \N{LEFT DOUBLE QUOTATION MARK}{restored_beside(ai).name}"
+        "\N{RIGHT DOUBLE QUOTATION MARK} next to the AI\N{RIGHT SINGLE QUOTATION MARK}s file."
+    )
+    assert screen.unknown_label.text() == "Unknown: [PERSON_9]."
+    assert (
+        screen.finder_button.isVisibleTo(screen) and screen.finder_button.text() == "Show in Finder"
+    )
+    assert not screen.copy_button.isVisibleTo(screen) and not screen.result_box.isVisibleTo(screen)
+    qtbot.mouseClick(screen.finder_button, CLICK)
+    assert revealed == [ai.parent]
+
+
+def test_the_result_of_a_pasted_text_is_the_box_with_a_copy_button(
+    qtbot: QtBot, screen: RestoreScreen
+) -> None:
+    screen.show()
+    screen.paste_box.setPlainText("Dear [PERSON_1], see [PERSON_9].")
+    qtbot.mouseClick(screen.restore_text_button, CLICK)
+    assert screen.result_panel.isVisibleTo(screen)
+    assert screen.result_box.isVisibleTo(screen) and screen.result_box.isReadOnly()
+    assert screen.result_box.toPlainText() == "Dear John Smith, see [PERSON_9]."
+    assert screen.copy_button.isVisibleTo(screen) and screen.copy_button.text() == "Copy"
+    assert not screen.finder_button.isVisibleTo(screen) and screen.saved_label.isHidden()
+    assert (
+        screen.report_label.text() == "1 placeholders restored, 0 need your check."
+    )  # the report too
+    assert screen.unknown_label.text() == "Unknown: [PERSON_9]."
+    QApplication.clipboard().setText("something else")
+    qtbot.mouseClick(screen.copy_button, CLICK)
+    assert QApplication.clipboard().text() == "Dear John Smith, see [PERSON_9]."
+
+
+def test_the_result_of_a_text_does_not_stay_for_a_file(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx
+) -> None:
+    screen.show()
+    screen.paste_box.setPlainText("Dear [PERSON_1],")
+    qtbot.mouseClick(screen.restore_text_button, CLICK)
+    assert screen.result_box.isVisibleTo(screen)
+    screen.load_file(make_docx(body("[PERSON_1]")))  # a new file clears the result
+    assert not screen.result_panel.isVisibleTo(screen) and screen.result_box.toPlainText() == ""
+    screen.primary()
+    assert screen.result_panel.isVisibleTo(screen) and not screen.result_box.isVisibleTo(screen)
+
+
+def test_a_status_message_scrolls_the_screen_to_its_top(
+    qtbot: QtBot, screen: RestoreScreen, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    screen.resize(900, 300)  # a window so short that the screen scrolls
+    screen.show()
+    screen.load_file(make_docx(body(*(f"AMOUNT_{n} x" for n in range(1, 4)), "[PERSON_1]")))
+    qtbot.waitExposed(screen)
+    bar = screen.scroll_area.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    assert bar.value() > 0
+    screen.drop_zone.filesRefused.emit([tmp_path / "answer.pdf"])
+    assert screen.status_label.isVisibleTo(screen) and bar.value() == 0
+
+
+# ---- the look ----------------------------------------------------------------------------------------
+
+
+def today_at(hour: int, minute: int) -> datetime:
+    """Today at ``hour``:``minute`` on the owner's clock."""
+    return datetime.now().astimezone().replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def mockup_key() -> list[KeyEntry]:
+    """The key of the case of the mockup: fourteen values."""
+    kinds = PlaceholderType
+    return [
+        KeyEntry("[COMPANY_1]", kinds.COMPANY, "Northwind Trading B.V.", ["Northwind"]),
+        KeyEntry("[COMPANY_2]", kinds.COMPANY, "Acme Supplies Ltd", []),
+        KeyEntry("[PERSON_1]", kinds.PERSON, "John Carter", ["Mr Carter"]),
+        KeyEntry("[AMOUNT_1]", kinds.AMOUNT, "EUR 1,250,000", []),
+        KeyEntry("[EMAIL_1]", kinds.EMAIL, "j.carter@acme-supplies.example", []),
+        KeyEntry("[IBAN_1]", kinds.IBAN, "NL91 ABNA 0417 1643 00", []),
+        KeyEntry("[ADDRESS_1]", kinds.ADDRESS, "Keizersgracht 123, 1015 CJ Amsterdam", []),
+        KeyEntry("[PERCENT_1]", kinds.PERCENT, "8 %", []),
+        KeyEntry("[QUANTITY_1]", kinds.QUANTITY, "12,000 units", []),
+        KeyEntry("[PHONE_1]", kinds.PHONE, "+31 20 555 0101", []),
+        KeyEntry("[ID_1]", kinds.ID, "NL853456789B01", []),
+        KeyEntry("[URL_1]", kinds.URL, "www.acme-supplies.example", []),
+        KeyEntry("[PERSON_2]", kinds.PERSON, "Jane Doe", []),
+        KeyEntry("[COMPANY_3]", kinds.COMPANY, "Falcon Freight", []),
+    ]
+
+
+def mockup_screen(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path, restored: bool = True
+) -> RestoreScreen:
+    """The screen as the Restore mockup shows it: the AI's file dropped (it keeps the code of the
+    case in its name, so the case is chosen from it), a second case in the box, the values the
+    case would put back, two placeholders the AI changed (one ticked) and, when ``restored``,
+    the result. The window's own Restore button is taken to be there.
+    """
+    first = Case("K4F7", today_at(14, 2), ["supply-01.docx"], [], mockup_key())
+    second = Case(
+        "Z8Q2",
+        today_at(9, 41) - timedelta(days=1),
+        ["nda-02.docx", "nda-02-annex.docx"],
+        [],
+        [
+            KeyEntry(f"[PERSON_{n}]", PlaceholderType.PERSON, f"Person {n}", [])
+            for n in range(1, 22)
+        ],
+    )
+    app_ctx.case_store.save(first)
+    app_ctx.case_store.save(second)
+    placeholders = " ".join(entry.placeholder for entry in mockup_key())
+    ai = named_file(
+        make_docx,
+        tmp_path,
+        "revised-supply-01-K4F7.docx",
+        f"Dear [PERSON 1], the fee is AMOUNT_1. {placeholders}",
+        "Please call [PERSON_9] about it.",
+    )
+    screen = RestoreScreen(app_ctx)
+    qtbot.addWidget(screen)
+    screen.set_primary_in_toolbar(True)
+    screen.resize(1180, 760)
+    screen.load_file(ai)
+    screen.altered_list.item(row_with(screen.altered_list, "[PERSON 1]")).setCheckState(
+        Qt.CheckState.Checked
+    )
+    if restored:
+        screen.primary()
+    return screen
+
+
+def test_the_mockup_screen_says_what_the_mockup_says(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    s = mockup_screen(qtbot, app_ctx, make_docx, tmp_path)
+    s.show()
+    assert s.file_label.text() == "revised-supply-01-K4F7.docx"
+    assert s.drop_zone.hint_label.text() == (
+        "Dropped just now \N{MIDDLE DOT} 15 placeholders found \N{MIDDLE DOT} case K4F7 fits best"
+    )
+    assert (
+        s.case_combo.currentText()
+        == "K4F7 \N{MIDDLE DOT} supply-01.docx \N{MIDDLE DOT} today 14:02 \N{MIDDLE DOT} 14 values"
+    )
+    assert s.case_combo.itemText(1).startswith(
+        "Z8Q2 \N{MIDDLE DOT} nda-02.docx, nda-02-annex.docx \N{MIDDLE DOT} yesterday"
+    )
+    assert s.case_combo.itemText(1).endswith("\N{MIDDLE DOT} 21 values")
+    assert s.chosen_label.isVisibleTo(s)
+    assert s.preview_grid.lines()[:2] == [
+        "[PERSON_1] \N{RIGHTWARDS ARROW} John Carter",
+        "[AMOUNT_1] \N{RIGHTWARDS ARROW} EUR 1,250,000",
+    ]
+    assert s.preview_grid.more_text() == "and 9 more"
+    assert s.report_label.text() == "15 placeholders restored, 1 need your check."
+
+
+@pytest.mark.parametrize("restored", [False, True], ids=["before", "after"])
+def test_the_restore_screen_is_drawn_in_the_colours_of_its_appearance(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    d3_appearance: str,
+    d3_shot: Callable[[QWidget, str, str], QImage],
+    restored: bool,
+) -> None:
+    t = theme.tokens(d3_appearance)
+    s = mockup_screen(qtbot, app_ctx, make_docx, tmp_path, restored=restored)
+    s.show()
+    qtbot.waitExposed(s)
+    qtbot.wait(50)  # the scroll area settles
+    image = d3_shot(s, "restore" if restored else "restore-before", d3_appearance)
+    assert (image.width(), image.height()) == (1180, 760)
+    assert image.pixelColor(2, 2) == QColor(t.ground)  # the screen's ground
+    assert not s.scroll_area.verticalScrollBar().isVisible()  # it all fits at 1180 by 760
+    assert appears_in(image, t.panel, s.drop_zone, s) and appears_in(
+        image, t.panel, s._case_card, s
+    )
+    assert appears_in(image, t.notice_card_bg, s.altered_card, s)  # the notice card
+    assert appears_in(image, t.success_text, s.chosen_label, s)  # "Chosen from the file name"
+    assert appears_in(image, t.accent, s.altered_list, s)  # the ticked box is in the accent colour
+    if restored:
+        assert appears_in(image, t.success, s.result_panel, s) and appears_in(
+            image, t.success_bg, s.result_panel, s
+        )
+
+
+def test_the_restore_screen_fits_the_narrowest_window_of_the_app(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    d3_appearance: str,
+    d3_shot: Callable[[QWidget, str, str], QImage],
+) -> None:
+    s = mockup_screen(qtbot, app_ctx, make_docx, tmp_path, restored=True)
+    s.set_primary_in_toolbar(False)
+    s.resize(660, 760)  # a 880-point window less the 220 of its sidebar
+    s.show()
+    qtbot.waitExposed(s)
+    qtbot.wait(50)
+    d3_shot(s, "restore-narrow", d3_appearance)
+    content = s.scroll_area.widget()
+    assert content is not None and content.minimumSizeHint().width() <= 660
+    assert not s.scroll_area.horizontalScrollBar().isVisible()  # nothing is cut off at the side
+    for part in (s.case_combo, s.chosen_label, s.restore_button, s.drop_zone):
+        assert part.mapTo(s, part.rect().bottomRight()).x() <= 660 - 32 + 1, part.objectName()
+
+
+def test_the_restore_screen_is_drawn_for_a_text_and_for_a_narrow_window_too(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    make_docx: MakeDocx,
+    tmp_path: Path,
+    d3_appearance: str,
+    d3_shot: Callable[[QWidget, str, str], QImage],
+) -> None:
+    s = mockup_screen(qtbot, app_ctx, make_docx, tmp_path, restored=False)
+    s.set_primary_in_toolbar(False)  # as the screen is without a window's Restore button
+    s.paste_box.setPlainText(
+        "Dear PERSON_1, the fee is [AMOUNT_1] to [COMPANY_2]. Call [COMPANY_9]."
+    )
+    s.show()
+    qtbot.waitExposed(s)
+    qtbot.mouseClick(s.restore_text_button, CLICK)
+    s.resize(640, 900)  # the cards wrap
+    qtbot.wait(50)
+    image = d3_shot(s, "restore-text-narrow", d3_appearance)
+    assert image.width() == 640 and s.result_box.isVisibleTo(s) and s.restore_button.isVisibleTo(s)
