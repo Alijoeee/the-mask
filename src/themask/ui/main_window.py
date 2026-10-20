@@ -51,6 +51,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPen,
     QPixmap,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
@@ -287,6 +288,7 @@ class MainWindow(QMainWindow):
         self.settings_screen = self.settings_window.settings_screen
         self.sidebar = Sidebar()
         self._stack = QStackedWidget()
+        self._stack.setObjectName("screenStack")
         self._screens: dict[str, QWidget] = {
             "home": self.home,
             "review": self.review_screen,
@@ -631,6 +633,12 @@ class MainWindow(QMainWindow):
         animation.finished.connect(self._end_fade)
         self._fade = (animation, overlay)
         animation.start()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """The picture of the old screen follows the stack while it fades."""
+        super().resizeEvent(event)
+        if self._fade is not None:
+            self._fade[1].setGeometry(self._stack.rect())
 
     def _end_fade(self) -> None:
         """Take the picture of the old screen away, at the end of the fade or when another begins."""
