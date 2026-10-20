@@ -720,7 +720,7 @@ def test_tab_goes_from_the_toggle_to_the_primary_action_and_then_the_sections(
     qtbot.waitExposed(window)
     order: list[QWidget] = []
     widget: QWidget = window.sidebar_toggle
-    for _ in range(60):
+    for _ in range(100_000):
         if focusable(widget) and widget not in order:
             order.append(widget)
         widget = widget.nextInFocusChain()
