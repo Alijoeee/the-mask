@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage, QPainter
 
 from themask.ui import icons
 
-ACCENT = "#B5642A"
+ACCENT = "#A85A24"
 
 
 def opaque_pixels(image: QImage) -> list[tuple[int, int]]:
@@ -119,6 +119,12 @@ def test_svg_paths_with_lines_and_a_close() -> None:
     path = icons.svg_path("M5 2.5h5.5L14 6v9.5H5z")
     assert path.boundingRect() == QRectF(5, 2.5, 9, 13)
     assert path.elementCount() == 6  # five points, and the line back to the first
+
+
+@pytest.mark.parametrize("data", ["5 2.5 L 3 4", "M 5", "L1 2 C 1 2 3", "H"])
+def test_svg_paths_that_are_not_well_formed_are_a_value_error(data: str) -> None:
+    with pytest.raises(ValueError, match="path"):
+        icons.svg_path(data)
 
 
 def test_svg_relative_commands_continue_from_the_current_point() -> None:

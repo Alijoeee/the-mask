@@ -6,6 +6,7 @@ readable with black text.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import fields
 from itertools import combinations
@@ -112,11 +113,13 @@ def test_the_light_tokens_are_the_briefs() -> None:
         "#6B655E",
         "#9B948B",
     )
+    # The brief's accent is #B5642A; ruling R124 made it #A85A24 so that white text on it is 5.1:1.
     assert (light.accent, light.accent_soft, light.accent_text_on_soft) == (
-        "#B5642A",
+        "#A85A24",
         "#F4E4D8",
         "#7A4019",
     )
+    assert light.on_accent == "#FFFFFF"
     assert (light.notice_bg, light.notice_card_bg, light.notice_border, light.notice_text) == (
         "#FFF4CE",
         "#FFF9E6",
@@ -151,6 +154,7 @@ def test_the_dark_tokens_are_the_briefs() -> None:
         "#3F2E24",
         "#F0C9A8",
     )
+    assert dark.on_accent == "#1F1D1A"  # R124: not white, which is 2.9:1 on this accent
     assert (dark.notice_bg, dark.notice_border, dark.notice_text) == (
         "#3D3320",
         "#5A4A1E",
@@ -188,10 +192,106 @@ def test_the_coloured_texts_are_easy_to_read_on_their_own_backgrounds(appearance
     assert contrast(t.text, t.accent_soft) >= 4.5  # the selected row of a list
 
 
-def test_dark_text_on_the_dark_accent_and_the_accent_as_text_are_readable() -> None:
-    dark = theme.tokens("dark")
-    assert contrast(dark.accent, dark.panel) >= 4.5  # a link on a card
-    assert contrast(dark.accent, dark.ground) >= 4.5
+# Ruling R124: every pair of text and ground is 4.5:1 or more, in both appearances.
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_text_on_the_accent_is_easy_to_read(appearance: str) -> None:
+    # White on the light accent, the dark text colour on the dark one: sidebar, primary buttons.
+    t = theme.tokens(appearance)
+    assert contrast(t.on_accent, t.accent) >= 4.5
+    assert contrast(t.on_accent, t.accent_hover) >= 4.5  # a primary button under the pointer
+
+
+def test_the_text_on_the_accent_is_white_in_the_light_appearance_and_dark_in_the_dark_one() -> None:
+    assert theme.tokens("light").on_accent == "#FFFFFF"
+    assert theme.tokens("dark").on_accent == "#1F1D1A"  # the text colour of the light appearance
+    assert theme.tokens("dark").accent == "#D9834A"  # the accent itself stays
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_accent_as_text_is_easy_to_read_where_a_link_stands(appearance: str) -> None:
+    t = theme.tokens(appearance)
+    for ground in (t.ground, t.panel, t.control):  # not on the chrome: 4.45:1 in the light one
+        assert contrast(t.accent, ground) >= 4.5, (appearance, ground)
+        assert contrast(t.accent_hover, ground) >= 4.5, (appearance, ground)
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_text_of_a_card_stays_easy_to_read_when_a_drag_makes_it_the_soft_accent(
+    appearance: str,
+) -> None:
+    t = theme.tokens(appearance)
+    assert contrast(t.secondary, t.accent_soft) >= 4.5  # the caption and the hint at the button
+    assert contrast(t.text, t.accent_soft) >= 4.5
+    assert contrast(t.accent_text_on_soft, t.accent_soft) >= 4.5  # the code chips
+
+
+def declarations(sheet: str) -> list[tuple[str, dict[str, str]]]:
+    """The rules of a stylesheet: each selector (as written, on one line) and its properties."""
+    rules = []
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", sheet):
+        properties = {}
+        for declaration in body.split(";"):
+            if ":" in declaration:
+                name, value = declaration.split(":", 1)
+                properties[name.strip()] = value.strip()
+        rules.append((" ".join(selector.split()), properties))
+    return rules
+
+
+def rule_of(sheet: str, selector: str) -> dict[str, str]:
+    return next(properties for found, properties in declarations(sheet) if found == selector)
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_hint_beside_the_button_and_the_code_chip_have_the_colours_of_r124(
+    appearance: str,
+) -> None:
+    t = theme.tokens(appearance)
+    sheet = theme.stylesheet(appearance)
+    assert rule_of(sheet, "QLabel#dropShortcut")["color"] == t.secondary  # "or press ⌘O"
+    assert rule_of(sheet, "QLabel#caseCode")["color"] == t.accent_text_on_soft
+    assert rule_of(sheet, "QLabel#caseCode")["background"] == t.accent_soft
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_tertiary_colour_is_only_the_text_of_what_is_switched_off(appearance: str) -> None:
+    t = theme.tokens(appearance)
+    for selector, properties in declarations(theme.stylesheet(appearance)):
+        if properties.get("color") == t.tertiary:
+            for part in selector.split(","):
+                assert ":disabled" in part, selector
+
+
+@pytest.mark.parametrize("appearance", APPEARANCES)
+def test_the_palette_has_the_tertiary_colour_for_placeholders_and_disabled_text_only(
+    appearance: str,
+) -> None:
+    t = theme.tokens(appearance)
+    palette = theme.palette(appearance)
+    text_roles = {
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+        QPalette.ColorRole.PlaceholderText,
+    }
+    found = set()
+    for group in (
+        QPalette.ColorGroup.Active,
+        QPalette.ColorGroup.Inactive,
+        QPalette.ColorGroup.Disabled,
+    ):
+        for role in QPalette.ColorRole:
+            if role in (QPalette.ColorRole.NoRole, QPalette.ColorRole.NColorRoles):
+                continue
+            if palette.color(group, role) == QColor(t.tertiary):
+                found.add((group, role))
+                assert role == QPalette.ColorRole.PlaceholderText or (
+                    group == QPalette.ColorGroup.Disabled and role in text_roles
+                ), (group, role)
+    assert (QPalette.ColorGroup.Active, QPalette.ColorRole.PlaceholderText) in found
+    assert (QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText) in found
 
 
 # ---- the palette --------------------------------------------------------------------------------

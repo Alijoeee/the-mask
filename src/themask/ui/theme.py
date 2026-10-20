@@ -56,12 +56,23 @@ class Tokens:
     the tool bar), ``panel`` (cards, the document, fields), ``control`` (buttons) and
     ``table_head``. ``border`` and ``border_strong`` draw the edge of a card and of a control;
     ``hairline`` the line between rows and the fill of a quiet control under the pointer.
-    ``text`` is for reading, ``secondary`` for captions and ``tertiary`` for hints and for what
-    is switched off. The accent is the brand: ``accent`` (buttons, links, the chosen item) with
-    ``on_accent`` for text on it, ``accent_hover``, ``accent_soft`` (a chosen row, a drag over a
-    drop zone) and ``accent_text_on_soft``. The notice colours are for a line that asks the owner
-    to look (``notice_card_bg`` is the paler one for a whole card); ``success`` and ``danger``
-    colour a mark, ``success_bg`` its background and ``success_text`` a sentence.
+    ``text`` is for reading, ``secondary`` for captions and hints, and ``tertiary`` only for the
+    placeholder inside a field and for text that is switched off (neither is held to a contrast).
+    The accent is the brand: ``accent`` (buttons, links, the chosen item) with ``on_accent`` for
+    text on it (white on the light accent, the dark text colour on the dark one), ``accent_hover``,
+    ``accent_soft`` (a chosen row, a drag over a drop zone) and ``accent_text_on_soft`` (text on
+    it, such as the code of a case). The notice colours are for a line that asks the owner to look
+    (``notice_card_bg`` is the paler one for a whole card); ``success`` and ``danger`` colour a
+    mark, ``success_bg`` its background and ``success_text`` a sentence.
+
+    Contrast (ruling R124): every pair of text and ground is 4.5:1 or more in both appearances,
+    and tests/ui/test_theme.py computes them: ``text`` and ``secondary`` on every ground and on
+    ``accent_soft``, ``on_accent`` on ``accent`` and ``accent_hover``, the accent and its hover as
+    text (a link) on ``ground``, ``panel`` and ``control`` (not on ``chrome``: 4.45:1 in the light
+    appearance), ``accent_text_on_soft`` on ``accent_soft``, ``notice_text`` on the notice
+    backgrounds, and ``danger`` and ``success_text`` on ``ground`` and ``panel``. The mockups'
+    light accent (#B5642A, 4.36:1 under white) and white text on the dark accent (2.88:1) gave way
+    to the light accent #A85A24 and, in the dark appearance, the dark text colour on the accent.
     """
 
     ground: str
@@ -101,7 +112,7 @@ _LIGHT = Tokens(
     text="#1F1D1A",
     secondary="#6B655E",
     tertiary="#9B948B",
-    accent="#B5642A",
+    accent="#A85A24",  # the mockups' #B5642A is 4.36:1 under white: R124
     accent_hover="#8F4C1D",
     accent_soft="#F4E4D8",
     accent_text_on_soft="#7A4019",
@@ -132,7 +143,7 @@ _DARK = Tokens(
     accent_hover="#F0A370",
     accent_soft="#3F2E24",
     accent_text_on_soft="#F0C9A8",
-    on_accent="#FFFFFF",
+    on_accent="#1F1D1A",  # white on #D9834A is 2.88:1, the dark text colour 5.8:1: R124
     notice_bg="#3D3320",
     notice_card_bg="#3D3320",
     notice_border="#5A4A1E",
@@ -227,7 +238,7 @@ QLabel#status { font-size: 13px; }
 QLabel#preview { font-size: 12px; }
 QLabel#dropTitle { font-size: 22px; font-weight: 600; }
 QLabel#dropHint { color: $secondary; }
-QLabel#dropShortcut { color: $tertiary; font-size: 12px; }
+QLabel#dropShortcut { color: $secondary; font-size: 12px; }
 QLabel#step { color: $secondary; font-size: 11px; }
 
 QLabel#notice, QLabel#warnings, QLabel#status[problem="true"] {
@@ -332,9 +343,81 @@ QProgressBar::chunk { background: $accent; border-radius: 3px; }
 """)
 
 
+# The parts of the window: the tool bar, the sidebar's notes, the home screen. The tool bar's
+# primary action is a button whose name is primaryAction; the sidebar's sections and the toggle
+# paint themselves from the palette.
+_SHELL = Template("""
+QToolBar#mainToolBar {
+    background: $chrome;
+    border: none;
+    border-bottom: 1px solid $border;
+    spacing: 12px;
+    padding: 0 16px;
+}
+QToolBar#mainToolBar QToolButton#primaryAction {
+    background: $accent;
+    color: $on_accent;
+    border: 1px solid $accent;
+    border-radius: 7px;
+    padding: 0 14px;
+    min-height: 26px;
+    font-weight: 600;
+}
+QToolBar#mainToolBar QToolButton#primaryAction:hover {
+    background: $accent_hover;
+    border-color: $accent_hover;
+}
+QToolBar#mainToolBar QToolButton#primaryAction:focus { border-color: $text; }
+QToolBar#mainToolBar QToolButton#primaryAction:disabled {
+    background: $border;
+    border-color: $border;
+    color: $tertiary;
+}
+QLabel#toolbarTitle { color: $text; font-size: 13px; font-weight: 600; }
+QLabel#toolbarCaption { color: $secondary; font-size: 11px; }
+
+QFrame#sidebar { background: $chrome; border: none; border-right: 1px solid $border; }
+QLabel#sidebarNote { color: $secondary; font-size: 11px; }
+QLabel#legendTitle { color: $text; font-size: 11px; font-weight: 600; }
+
+QStackedWidget#screenStack { background: $ground; border: none; }
+QScrollArea#homeScroll { background: $ground; border: none; }
+QWidget#homeContent { background: transparent; border: none; }
+QFrame#dropZone QLabel#dropHint:disabled { color: $tertiary; }
+QLabel#sectionTitle { color: $secondary; }
+QFrame#recentPanel { background: $panel; border: 1px solid $border; border-radius: 12px; }
+QFrame#recentRow { background: transparent; border: none; }
+QFrame#recentRow[last="false"] { border-bottom: 1px solid $hairline; }
+QLabel#caseCode {
+    color: $accent_text_on_soft;
+    background: $accent_soft;
+    border-radius: 6px;
+    padding: 3px 8px;
+}
+QLabel#caseFiles { font-weight: 600; }
+QLabel#caseCaption { color: $secondary; font-size: 12px; }
+
+QPushButton#link {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    min-height: 0;
+    color: $accent;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton#link:hover { background: transparent; color: $accent_hover; }
+QPushButton#link:pressed { background: transparent; color: $accent_hover; }
+QPushButton#link:focus { background: transparent; text-decoration: underline; }
+QPushButton#link:disabled { background: transparent; color: $tertiary; }
+""")
+
+
 def stylesheet(appearance: str) -> str:
     """The application stylesheet of ``appearance``."""
-    return _TEMPLATE.substitute(asdict(tokens(appearance)))
+    values = asdict(tokens(appearance))
+    return _TEMPLATE.substitute(values) + _SHELL.substitute(values)
 
 
 # ---- the fonts ----------------------------------------------------------------------------------

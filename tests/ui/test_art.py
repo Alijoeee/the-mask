@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtCore import QSize, QSizeF
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage
 
 from themask.ui import art, theme
 from tools import make_art
@@ -53,11 +53,16 @@ def test_a_picture_that_is_not_there_is_an_error(qapp: object) -> None:
         art.pixmap("no-such-picture")
 
 
-def test_make_art_draws_the_committed_files_again_byte_for_byte(tmp_path: Path) -> None:
+def test_make_art_draws_the_committed_files_again_pixel_for_pixel(tmp_path: Path) -> None:
     written = make_art.make_art(tmp_path)
     assert sorted(path.name for path in written) == sorted(EXPECTED)
     for path in written:
-        assert path.read_bytes() == (ART_FOLDER / path.name).read_bytes(), path.name
+        # The pixels, not the bytes: the PNG encoder differs from one Qt build to another.
+        drawn, committed = QImage(str(path)), QImage(str(ART_FOLDER / path.name))
+        assert not committed.isNull(), path.name
+        assert drawn.size() == committed.size(), path.name
+        assert drawn.format() == committed.format(), path.name
+        assert drawn == committed, path.name
 
 
 def test_make_art_draws_the_same_files_every_time(tmp_path: Path) -> None:
