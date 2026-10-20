@@ -54,7 +54,7 @@ from typing import TYPE_CHECKING
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
 from themask.detect.grouping import CHECK_BELOW, PersonName, SurnamePolicy, group_findings
 from themask.detect.identity import value_key
-from themask.detect.legal import legal_spans
+from themask.detect.legal import legal_spans, public_spans
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -186,12 +186,19 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
-    found = _without_legal_references(text, found)
-    found = _people_among_parties(found, text)
+    unlegal_source = found
+    legal = legal_spans(text)
+    unlegal = _without_legal_references(found, legal)
+    found = _people_among_parties(unlegal, text)
     seeds = [_seed(entry) for entry in seed_entries or []]
 
     is_term = never_hide_check(user_lists, case)  # what a person's bare name may be part of
     names = _names(found, seeds, is_term)
+    # A legal term that is part of a name of this document ("Data Act" of "Data Act Ltd") is the
+    # party's: what was dropped for it comes back, and the sweep takes it.
+    legal = public_spans(text, names)
+    if legal != legal_spans(text):
+        found = _people_among_parties(_without_legal_references(unlegal_source, legal), text)
     never_hidden = never_hide_check(user_lists, case, names=names)
 
     def keep(form: str) -> bool:
@@ -237,7 +244,7 @@ def analyze(
         group.variants = {
             v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
         }
-    sweep(text, groups, fixed=seeds, is_term=is_term, public=legal_spans(text))
+    sweep(text, groups, fixed=seeds, is_term=is_term, public=legal)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
@@ -273,12 +280,12 @@ def _detected(combined: CombinedText, engine: Engine, case: CaseLists) -> list[F
     return found
 
 
-def _without_legal_references(text: str, found: list[Finding]) -> list[Finding]:
+def _without_legal_references(found: list[Finding], spans: list[tuple[int, int]]) -> list[Finding]:
     """``found`` without what the model or a pattern took from inside a reference to a law, a
     regulation, a standard or a code ("6698" of "Law No. 6698", "GDPR", "Kanun No"): public text
-    (task D7). What the owner listed, a rule found or a person selected stays.
+    (task D7). What the owner listed, a rule found or a person selected stays, and so does a
+    finding that is longer than the reference ("Act No. 5237 Holdings Ltd").
     """
-    spans = legal_spans(text)
     if not spans:
         return found
     starts = [start for start, _ in spans]

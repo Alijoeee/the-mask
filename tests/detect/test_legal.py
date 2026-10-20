@@ -14,14 +14,13 @@ PUBLIC = [
     ("This complies with Law No. 6698 on the Protection of Personal Data.", ["Law No. 6698"]),
     ("Under Law no. 6698 the Processor shall act.", ["Law no. 6698"]),
     ("It follows Act No. 5237 in full.", ["Act No. 5237"]),
-    ("Pursuant to No. 6698 the data is protected.", ["No. 6698"]),
     ("6698 sayılı Kişisel Verilerin Korunması Kanunu hükümleri saklıdır.", ["6698 sayılı"]),
     ("Kanun No. 6098 applies to this Agreement.", ["Kanun No. 6098"]),
     ("Both KVKK and GDPR apply, as does UK GDPR.", ["KVKK", "GDPR", "UK GDPR"]),
     ("It follows Regulation (EU) 2016/679 closely.", ["Regulation (EU) 2016/679"]),
     ("It follows Directive 95/46/EC and Directive (EU) 2016/943.", ["Directive 95/46/EC"]),
     ("It follows Directive (EU) 2016/943 closely.", ["Directive (EU) 2016/943"]),
-    ("See 2016/679 for the rules.", ["2016/679"]),
+    ("See (EU) 2016/679 and 95/46/EC for the rules.", ["(EU) 2016/679", "95/46/EC"]),
     ("ePrivacy, CCPA, HIPAA, SOX, PSD2 and MiFID II apply.", ["ePrivacy", "CCPA", "HIPAA", "SOX"]),
     ("Certified to ISO 27001 and ISO/IEC 27001:2022.", ["ISO 27001", "ISO/IEC 27001:2022"]),
     ("Certified to TS EN ISO 9001 as well.", ["TS EN ISO 9001"]),
@@ -117,10 +116,9 @@ def test_short_abbreviations_are_case_sensitive():
     assert [s for s in legal_spans("the gdpr and Kvkk")]  # long ones ignore case
 
 
-def test_whole_text_check_and_never_hide_list():
+def test_whole_text_check():
     for term in ("GDPR", "KVKK", "Law No. 6698", "ISO/IEC 27001:2022", "Article 28(3)", "HIPAA"):
         assert is_legal_reference(term), term
-        assert is_never_hide(term, UserLists([], []), CaseLists([], [], set())), term
     for text in ("6698", "Agreement No. 6698", "Acme GDPR Consulting Ltd", "EUR 6,698.00"):
         assert not is_legal_reference(text), text
 
@@ -165,3 +163,128 @@ def test_a_rule_finding_inside_a_reference_is_kept():
         CombinedText.join([("x", text)]), engine, UserLists([], []), CaseLists([], [], set())
     )
     assert [f.text for g in a.groups for f in g.findings] == ["6698"]
+
+
+# --- Fix round 1: what must never become public ----------------------------------------------
+
+CONFIDENTIAL_MORE = [
+    ("Invoice: No. 6102 is payable by Acme Ltd within 30 days.", ["6102"]),
+    ("Invoice No.: 6102. Ref: No. 6098. Tel. No. 6698.", ["6102", "6098", "6698"]),
+    ("Our reference: No. 6698 / Smith.", ["6698"]),
+    ("Please quote our file (No. 5237) in all letters.", ["5237"]),
+    ("Of No. 6098 and the No. 2139 or No. 5510 we hold.", ["6098", "2139", "5510"]),
+    ("Act No. 5237 Holdings Ltd shall deliver the Goods.", ["5237"]),
+    ("Pay Law 1500 EUR to Acme.", ["1500"]),
+    ("Section 12 Ltd shall pay and Art 12345 is open.", ["12345"]),
+    ("Invoice 2016/679 is due.", ["2016/679"]),
+    (
+        "Acme Teknoloji Anonim Şirketi, 6698 sayılı Acme Teknoloji Anonim Şirketi Personel Yönetmeliği uyarınca işlem yapar.",
+        ["6698"],
+    ),
+]
+
+
+@pytest.mark.parametrize(("sentence", "values"), CONFIDENTIAL_MORE)
+def test_numbers_that_only_look_like_references_stay_found(engine, sentence, values):
+    _, spans = run(engine, sentence)
+    for value in values:
+        start = sentence.index(value)
+        assert any(s[0] <= start and start + len(value) <= s[1] for s in spans), (value, spans)
+
+
+def test_a_name_after_sayili_is_not_swallowed(engine):
+    text = "İşveren Mehmet Yılmaz, 1234 sayılı Mehmet Yılmaz Kanunu kapsamında değildir."
+    _, spans = run(engine, text)
+    second = text.rindex("Mehmet")
+    assert any(s[0] <= second < s[1] for s in spans), spans
+
+
+def test_account_number_beside_a_law_with_the_same_digits(engine):
+    text = "Account 6098 under Law 6098 Kanun; No. 6098 per the Act."
+    _, spans = run(engine, text)
+    law = text.index("Law 6098") + 4
+    for at in (text.index("6098"), text.rindex("6098")):
+        assert any(s[0] <= at < s[1] for s in spans), (at, spans)
+    assert not any(s[0] <= law < s[1] for s in spans)
+
+
+def hidden_texts(a):
+    return sorted((f.start, f.end) for g in a.groups for f in g.findings if g.enabled)
+
+
+@pytest.mark.parametrize(
+    ("entry", "text", "word", "count"),
+    [
+        ("DORA", "DORA shall pay the fee to the Buyer. DORA is a client.", "DORA", 2),
+        ("Data Act", "Data Act shall pay. The Data Act signs.", "Data Act", 2),
+        ("SOX", "Acme shall pay. SOX shall pay. Under SOX it signs.", "SOX", 2),
+    ],
+)
+def test_an_always_hide_entry_equal_to_a_legal_term_is_hidden(engine, entry, text, word, count):
+    a = analyze(
+        CombinedText.join([("x", text)]), engine, UserLists([entry], []), CaseLists([], [], set())
+    )
+    found = [(f.start, f.end) for g in a.groups if g.enabled for f in g.findings]
+    assert len([s for s in found if text[s[0] : s[1]] == word]) == count
+
+
+@pytest.mark.parametrize(
+    ("value", "variants", "text", "word", "count"),
+    [
+        ("DORA", [], "DORA shall pay the fee. DORA is a client.", "DORA", 2),
+        ("Data Act", [], "Data Act shall pay. The Data Act signs.", "Data Act", 2),
+        ("HGB Bank", ["HGB"], "HGB shall pay. Under § 823 BGB HGB is liable.", "HGB", 2),
+    ],
+)
+def test_a_key_value_equal_to_a_legal_term_is_hidden(engine, value, variants, text, word, count):
+    from themask.model import KeyEntry, PlaceholderType
+
+    seed = [KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, value, variants)]
+    a = analyze(
+        CombinedText.join([("x", text)]),
+        engine,
+        UserLists([], []),
+        CaseLists([], [], set()),
+        seed_entries=seed,
+    )
+    found = [(f.start, f.end) for g in a.groups if g.enabled for f in g.findings]
+    assert len([s for s in found if text[s[0] : s[1]] == word]) == count
+
+
+def test_a_party_whose_short_name_is_a_legal_term_stays_hidden(engine):
+    text = (
+        'Data Act Ltd (the "Data Act") is the Supplier. The Data Act shall deliver to HGB Bank. '
+        "HGB shall pay."
+    )
+    _, spans = run(engine, text)
+    for word in ("Data Act", "HGB"):
+        for at in [i for i in range(len(text)) if text.startswith(word, i)]:
+            assert any(s[0] <= at < s[1] for s in spans), (word, at)
+
+
+def test_the_sweep_takes_a_user_selection_inside_a_legal_reference():
+    from themask.detect.sweep import sweep
+    from themask.model import Finding, Group, PlaceholderType
+
+    text = "Agreement 6698 and Law No. 6698."
+    first = text.index("6698")
+    group = Group(
+        id="g",
+        type=PlaceholderType.CUSTOM,
+        canonical="6698",
+        placeholder="[CUSTOM_1]",
+        variants={"6698"},
+        findings=[Finding(PlaceholderType.CUSTOM, first, first + 4, "6698", 1.0, "user")],
+    )
+    sweep(text, [group], public=legal_spans(text))
+    assert len(group.findings) == 2
+    plain = Group(
+        id="h",
+        type=PlaceholderType.CUSTOM,
+        canonical="6698",
+        placeholder="[CUSTOM_1]",
+        variants={"6698"},
+        findings=[Finding(PlaceholderType.CUSTOM, first, first + 4, "6698", 0.4, "pattern")],
+    )
+    sweep(text, [plain], public=legal_spans(text))
+    assert len(plain.findings) == 1

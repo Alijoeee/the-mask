@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 
 from themask.detect.grouping import PersonName
 from themask.detect.identity import value_key
+from themask.detect.legal import public_spans
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -728,7 +729,14 @@ class ReviewState:
         """
         is_term = never_hide_check(self.user_lists, self.case_lists)
         keyed = [g for g in self.groups if g.placeholder in self.reserved]
-        sweep(self.text, self.groups, fixed=[*fixed, *keyed], is_term=is_term)
+        names = [
+            form
+            for g in self.groups
+            if g.type in (PlaceholderType.PERSON, PlaceholderType.COMPANY)
+            for form in (g.canonical, *g.variants)
+        ]
+        public = public_spans(self.text, names)  # laws and standards are not swept (task D7)
+        sweep(self.text, self.groups, fixed=[*fixed, *keyed], is_term=is_term, public=public)
 
     def _tidy(self) -> None:
         """Drop the groups a sweep left with no finding, and put each group's findings and the

@@ -33,7 +33,6 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from themask.detect.legal import is_legal_reference
 from themask.errors import MaskError
 from themask.model import PlaceholderType
 from themask.textnorm import normalize
@@ -372,7 +371,7 @@ def never_hide_check(
             return False
         if _DEFAULTS.has(key) or explicit.has(key) or _is_reference(text) or _is_date(text):
             return True
-        if _is_standard(text) or is_legal_reference(text):
+        if _is_standard(text):
             return True
         return defined.has(key) and key not in name_keys
 

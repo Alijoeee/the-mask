@@ -11,17 +11,24 @@ a cue word or a law number there and nothing else changes.
 
 A number is part of a reference only after a legal-instrument cue (``cues``: "Law", "Act",
 "Kanun", "Regulation", "Directive", "Verordnung", "Richtlinie", "Decree", "Yönetmelik", "KHK" ...),
-after "sayılı" with a legal title (or a known law number), after an article word ("Article",
-"Section", "Art.", "§"), or as "No. 6698" for a known law number when nothing but a preposition
-comes before. A bare "6698", "Agreement No. 6698", "Invoice No. 6698", "KvK 12345678" and an
-amount are not references and stay as they were.
+after "sayılı" with a legal title (or a known law number), or after an article word ("Article",
+"Section", "Art.", "§"). A bare "No. 6698" is never a reference (it may follow "Invoice:",
+"Ref:" ...), nor is a number followed by a currency, a unit or a company form ("Law 1500 EUR",
+"Act No. 5237 Holdings Ltd"). A bare "6698", "Agreement No. 6698", "Invoice No. 6698", "KvK
+12345678" and an amount are not references and stay as they were.
+
+A name found in the document that holds a legal term ("Data Act Ltd", "HGB Bank") makes that
+term a name there, not public: ``public_spans`` leaves such spans out.
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
+
+from themask.textnorm import normalize
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,9 @@ class LegalTerms:
     known_numbers: frozenset[str]
     # The title that may follow a law number: "Law No. 6698 on the Protection of Personal Data".
     titles: frozenset[str]
+    # A number followed by one of these (a currency, a unit, a company form or word) is not the
+    # number of a law: "Law 1500 EUR", "Act No. 5237 Holdings Ltd".
+    not_after_number: frozenset[str]
 
 
 def _set(text: str) -> frozenset[str]:
@@ -62,7 +72,10 @@ LEGAL_TERMS = LegalTerms(
         Health Insurance Portability and Accountability Act, Sarbanes-Oxley Act, Sarbanes-Oxley,
         Digital Services Act, Digital Markets Act, Data Act, AI Act,
         Standard Contractual Clauses, Standard Contractual Clause, Model Clauses,
-        2016/679, 95/46/EC, 95/46/EG, 2016/943, 2002/58/EC, 2022/2065, 2023/2854, 2024/1689
+        İş Kanunu, Borçlar Kanunu, Medeni Kanun, Ticaret Kanunu, Ceza Kanunu, Vergi Usul Kanunu,
+        Gelir Vergisi Kanunu, Kurumlar Vergisi Kanunu, Katma Değer Vergisi Kanunu,
+        Fikir ve Sanat Eserleri Kanunu, Sınai Mülkiyet Kanunu, Tüketicinin Korunması Hakkında Kanun,
+        Elektronik Ticaretin Düzenlenmesi Hakkında Kanun
         """
     ),
     abbreviations=_set(
@@ -84,11 +97,24 @@ LEGAL_TERMS = LegalTerms(
     titles=_set(
         "Protection of Personal Data, Personal Data Protection, Protection of Personal Data Law"
     ),
+    not_after_number=_set(
+        """
+        EUR, USD, GBP, TRY, TL, CHF, euro, euros, dollar, dollars, pound, pounds, lira, percent,
+        shares, share, units, unit, pieces, pcs, days, day, months, month, years, year, hours,
+        hour, weeks, week, kg, tons, tonnes, pallets, licences, licenses, users, employees,
+        Ltd, Limited, LLC, LLP, Inc, Corp, plc, AG, SA, SAS, SARL, NV, BV, N.V., B.V., GmbH, KG,
+        GmbH & Co, A.Ş., AŞ, A.S., Anonim, Holding, Holdings, Group, Bank, Capital, Partners,
+        Industries, Trading, Logistics, Services, Solutions, Technologies, Foods, Insurance
+        """
+    ),
 )
 
 _EU = r"(?:\((?:EU|EC|EEC|EG|EWG|EU/EEA)\)[ \t]*)?"
 _NO = r"(?:(?i:no|nr|n°|number|numara)\.?[ \t]*)?"
 _NUMBER = r"\d{1,5}(?:/\d{1,4})?(?:/[A-Z]{2,3})?(?![\d]|[.,]\d)"
+# Bare, with no cue: a number with a slash and an EU suffix ("95/46/EC"), or after "(EU)".
+_EU_NUMBER = r"\d{2,4}/\d{1,4}/(?:EC|EU|EEC|EG|EWG)"
+_EU_BRACKET = r"\((?:EU|EC|EEC|EG|EWG)\)[ \t]*" + _NO + r"\d{1,4}/\d{1,4}"
 
 
 def _alternation(terms: frozenset[str]) -> str:
@@ -105,84 +131,81 @@ def _compile(terms: LegalTerms) -> re.Pattern[str]:
     title = _alternation(terms.titles)
     law_title = rf"(?:[ \t]+(?:(?i:on|concerning|regarding)[ \t]+)?(?i:the[ \t]+)?(?i:{title}))?"
     cue = _capitalised(terms.cues)
+    other = _alternation(terms.not_after_number)
+    # A number followed by a currency, a unit or a company form is not a law's.
+    not_a_law = rf"(?![ \t]*[%€$£]|[ \t]+(?i:{other})(?!\w))"
     # "Law No. 6698", "Act no 5237", "Regulation (EU) 2016/679", "Directive 95/46/EC", "Kanun 6098"
     cue_number = (
         rf"(?:(?:{cue})|(?i:{_alternation(terms.cues)})(?=\.?[ \t]*(?i:no|nr|n°)\b))"
-        rf"\.?[ \t]*{_EU}{_NO}{_NUMBER}{law_title}"
+        rf"\.?[ \t]*{_EU}{_NO}{_NUMBER}{not_a_law}{law_title}"
     )
-    # "6698 sayılı Kişisel Verilerin Korunması Kanunu": the number and, when it has one, its title
-    end = r"(?i:kanun\w*|khk|yönetmeli\w*|tüzü\w*|kararname\w*|tebliğ\w*)"
+    # "6698 sayılı Kanun", "6098 sayılı Türk Borçlar Kanunu": the number before "sayılı" and a law
+    # word or a known title after it; a known law number may also end a sentence. Nothing else is
+    # taken for the title, so a name after "sayılı" is never swallowed.
+    law_word = r"(?i:kanun\w*|khk|yönetmeli\w*|tüzü\w*|kararname\w*|tebliğ\w*)"
+    known = _alternation(terms.known_numbers)
+    names = _alternation(terms.names)
     sayili = (
-        rf"\d{{2,5}}[ \t]+sayılı(?=[ \t]+(?:[A-ZÇĞİÖŞÜ]\w*[ \t]+){{0,6}}?{end}\b)"
-        rf"(?:[ \t]+(?:[A-ZÇĞİÖŞÜ]\w*[ \t]+){{0,6}}?{end})?"
+        rf"(?:\d{{2,5}}[ \t]+sayılı(?=[ \t]+(?:{law_word}\b|(?i:{names})(?!\w)))"
+        rf"(?:[ \t]+{law_word}\b)?"
+        rf"|(?:{known})[ \t]+sayılı(?=[ \t]*(?:[.,;:)]|\Z)))"
     )
     article = _capitalised(terms.article_words)
-    names = _alternation(terms.names)
     abbreviations = _alternation(terms.abbreviations)
     abbreviation = rf"(?-i:{abbreviations})"
     article_number = (
-        rf"(?:{abbreviation}[ \t]+)?(?:(?:{article})\.?|§§?)[ \t]*\d+[a-z]?(?:\.\d+)*(?:[ \t]*\([A-Za-z0-9]{{1,3}}\))*"
+        rf"(?:{abbreviation}[ \t]+)?(?:(?:{article})\.?|§§?)[ \t]*\d{{1,3}}[a-z]?(?:\.\d+)*"
+        rf"(?![\d]){not_a_law}(?:[ \t]*\([A-Za-z0-9]{{1,3}}\))*"
         rf"(?:[ \t]+(?:{abbreviation}|(?i:{names})))?"
     )
     standard = (
         r"(?:(?:TS|BS|DIN|NEN|NF|UNE)[ \t]+)?(?:EN[ \t]+)?"
         r"(?:ISO|IEC|EN|DIN|BS|NEN|ASTM|ANSI|IEEE)(?:[/ ](?:IEC|EN|ISO|TS|TR|PAS))*"
-        r"[ \t ]?\d{1,6}(?:[\-:]\d{1,4}|\.\d{1,4}(?!\d))*"
+        r"[ \t\u00a0]?\d{1,6}(?:[\-:]\d{1,4}|\.\d{1,4}(?!\d))*"
     )
     named = rf"(?i:{names})|{abbreviation}"
-    body = f"{article_number}|{cue_number}|{sayili}|{standard}|{named}"
+    body = f"{article_number}|{cue_number}|{sayili}|{_EU_BRACKET}|{_EU_NUMBER}|{standard}|{named}"
     return re.compile(rf"(?<![\w§])(?:{body})(?![\w])")
 
 
 _PATTERN = _compile(LEGAL_TERMS)
-_BARE_NO = re.compile(r"(?<![\w])No\.?[ \t]*(?P<n>\d{3,5})(?![\w]|[.,]\d)")
-_PREPOSITIONS = frozenset(
-    ("under", "pursuant", "to", "per", "by", "of", "with", "and", "or", "the", "in", "see")
-    + ("within", "according", "as", "for", "from", "on")
-)
-_KNOWN_SAYILI = re.compile(r"(?P<n>\d{2,5})[ \t]+sayılı(?![\w])")
-
-
-def _bare_no_spans(text: str) -> list[tuple[int, int]]:
-    """ "No. 6698" for a known law number, when only a preposition (or nothing) stands before it:
-    "Agreement No. 6698" is a contract number and is not one.
-    """
-    spans = []
-    for match in _BARE_NO.finditer(text):
-        if match["n"] not in LEGAL_TERMS.known_numbers:
-            continue
-        before = text[: match.start()].rstrip()
-        last = re.split(r"\s+", before)[-1].lower() if before else ""
-        if not before or last in _PREPOSITIONS or last[-1:] in ",;:(.":
-            spans.append(match.span())
-    return spans
-
-
-def _known_sayili_spans(text: str) -> list[tuple[int, int]]:
-    """ "6098 sayılı" with a known law number, even without a title after it, unless an ordinary
-    lowercase word follows ("6698 sayılı sözleşme" is a contract numbered 6698).
-    """
-    spans = []
-    for match in _KNOWN_SAYILI.finditer(text):
-        if match["n"] in LEGAL_TERMS.known_numbers and not re.match(
-            r"[ \t]+[a-zçğıöşü]", text[match.end() :]
-        ):
-            spans.append(match.span())
-    return spans
 
 
 def legal_spans(text: str) -> list[tuple[int, int]]:
-    """The stretches of ``text`` that are references to laws, standards and codes, in order."""
-    spans = [m.span() for m in _PATTERN.finditer(text)]
-    spans += _bare_no_spans(text) + _known_sayili_spans(text)
-    spans.sort()
+    """The stretches of ``text`` that are references to laws, standards and codes, in order.
+    Stretches that touch, or have only blanks between them, are one.
+    """
     merged: list[tuple[int, int]] = []
-    for start, end in spans:
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    for match in _PATTERN.finditer(text):
+        start, end = match.span()
+        if merged and not text[merged[-1][1] : start].strip(" \t\u00a0"):
+            merged[-1] = (merged[-1][0], end)
         else:
             merged.append((start, end))
     return merged
+
+
+def public_spans(text: str, names: Iterable[str] = ()) -> list[tuple[int, int]]:
+    """``legal_spans`` without the stretches that are, or are part of, a name found in the
+    document (``names``: people and companies, in any form): "Data Act" of "Data Act Ltd (the
+    "Data Act")" and "HGB" of "HGB Bank" are the party's, not the law's.
+    """
+    keys = [_key(name) for name in names]
+    spans = legal_spans(text)
+    if not keys:
+        return spans
+    return [(a, b) for a, b in spans if not _is_part_of(_key(text[a:b]), keys)]
+
+
+def _key(text: str) -> list[str]:
+    return [w for w in (normalize(word) for word in re.split(r"[\s/\-]+", text)) if w]
+
+
+def _is_part_of(short: list[str], names: list[list[str]]) -> bool:
+    n = len(short)
+    return n > 0 and any(
+        name[i : i + n] == short for name in names for i in range(len(name) - n + 1)
+    )
 
 
 @lru_cache(maxsize=4096)
