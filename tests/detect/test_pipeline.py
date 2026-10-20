@@ -1123,3 +1123,112 @@ def test_a_corpus_contract(corpus, engine, lists):
         end = start + len(item["value"])
         found += any(s <= start and end <= e for s, e in hidden)
     assert found >= 0.9 * len(truth)
+
+
+# --- Page labels and document references are never names (Task D4) --------------------------------
+
+PAGE_LABELS = [
+    "Page PAGE1",
+    "Page 1",
+    "Page 1 of 3",
+    "PAGE1",
+    "PAGE",
+    "NUMPAGES",
+    "Page PAGE of NUMPAGES",
+    "Seite 2",
+    "Seite 2 von 5",
+    "Seite PAGE2",
+    "Pagina 3",
+    "Pagina PAGE3",
+    "Pagina 3 van 7",
+    "Bladzijde 4",
+    "Bladzijde 4 van 9",
+    "Section 3",
+    "Article 5",
+    "Exhibit A",
+    "Schedule 2",
+    "Annex",
+    "Annex II",
+    "Clause 4.1",
+    "Appendix B",
+    "Table 1",
+    "Figure 2",
+]
+
+
+@pytest.mark.parametrize("label", PAGE_LABELS)
+@pytest.mark.parametrize("kind", [P, C])
+@pytest.mark.parametrize("score", [0.6, 0.85])
+def test_a_page_label_or_reference_is_never_hidden_as_a_name(lists, label, kind, score):
+    fake = FakeEngine((kind, label, score, "model"))
+    a = analyze(one(f"Footer: {label}\n\nSigned for the Buyer."), fake, lists)
+    assert a.groups == []
+
+
+def test_a_person_named_page_is_still_a_person(lists):
+    fake = FakeEngine((P, "Page Smith", 0.85, "model"))
+    a = analyze(one("Mr Page Smith signs."), fake, lists)
+    assert [g.canonical for g in a.groups] == ["Page Smith"]
+
+
+# --- Guesses made of ordinary words (ruling R122, items 1 and 2) ----------------------------------
+
+
+def test_a_guess_of_a_never_hide_term_plus_filler_is_dropped(lists):
+    phrase = "the Confidential Information of the other"
+    fake = FakeEngine((C, phrase, 0.6, "model"))
+    a = analyze(one(f"Each party shall protect {phrase} party."), fake, lists)
+    assert a.groups == []
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["the Personal Data of the other", "the Receiving Party and the Disclosing Party"],
+)
+def test_other_term_plus_filler_guesses_are_dropped_at_any_score(lists, phrase):
+    fake = FakeEngine((P, phrase, 0.85, "model"))
+    assert analyze(one(f"We regard {phrase} as terms."), fake, lists).groups == []
+
+
+def test_a_low_confidence_guess_of_ordinary_words_is_shown_and_asked_about(lists):
+    fake = FakeEngine((C, "Personal Services", 0.6, "model"))
+    a = analyze(
+        one("The Personal Services start in June. Personal Services continue."), fake, lists
+    )
+    (g,) = a.groups
+    assert g.canonical == "Personal Services"
+    assert g.enabled is False and g.needs_check is True
+    assert len(g.findings) == 2  # every place is kept, so the owner's Hide covers them all
+
+
+def test_a_low_confidence_guess_with_a_name_shaped_word_stays_hidden(lists):
+    fake = FakeEngine((C, "Zorblax Services", 0.6, "model"))
+    (g,) = analyze(one("Zorblax Services start in June."), fake, lists).groups
+    assert g.enabled is True and g.needs_check is True
+
+
+def test_a_confident_guess_of_ordinary_words_is_not_asked_about(lists):
+    fake = FakeEngine((C, "Personal Services", 0.85, "model"))
+    (g,) = analyze(one("The Personal Services start in June."), fake, lists).groups
+    assert g.enabled is True
+
+
+def test_a_contract_rule_finding_is_never_turned_off(lists):
+    fake = FakeEngine((C, "Personal Services Ltd", 0.95, "rule"))
+    (g,) = analyze(one("Personal Services Ltd signs."), fake, lists).groups
+    assert g.enabled is True and g.needs_check is False
+
+
+def test_the_owners_always_hide_entry_is_never_turned_off(lists):
+    from themask.detect.lists import UserLists
+
+    owner = UserLists(["COMPANY: Personal Services"], [])
+    fake = FakeEngine((C, "Personal Services", 0.6, "model"))
+    (g,) = analyze(one("The Personal Services start."), fake, owner).groups
+    assert g.enabled is True
+
+
+def test_a_place_in_a_low_confidence_guess_keeps_it_hidden(lists):
+    fake = FakeEngine((C, "Bank of Ireland", 0.6, "model"))
+    (g,) = analyze(one("Payment to Bank of Ireland follows."), fake, lists).groups
+    assert g.enabled is True
