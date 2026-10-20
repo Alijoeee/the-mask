@@ -228,13 +228,22 @@ def _placeholders_in(text: str) -> int:
     return len({item.match.placeholder for item in plan_restore(text, _NOBODY)})
 
 
-def _case_title(case: Case) -> str:
+# The longest list of file names a line of the case box shows whole; the tool tip has the rest.
+CASE_FILES_LIMIT = 34
+
+
+def _case_title(case: Case, files_limit: int | None = None) -> str:
     """The line of a case in the case box: its code, the files it was made from (a case that
     stores no file names has none), when it was made and how many values its key holds.
     """
     parts = [case.id]
     if case.source_files:
-        parts.append(", ".join(case.source_files))
+        files = ", ".join(case.source_files)
+        if files_limit is not None and len(files) > files_limit:
+            # The middle goes, so that the start of the name and its end (the extension) stay.
+            keep = files_limit - 1
+            files = f"{files[: keep - keep // 2]}\N{HORIZONTAL ELLIPSIS}{files[-(keep // 2) :]}"
+        parts.append(files)
     parts += [format_when(case.created_at), _count(len(case.entries), "value")]
     return " \N{MIDDLE DOT} ".join(parts)
 
@@ -723,7 +732,7 @@ class RestoreScreen(QWidget):
         self.case_combo.clear()
         for case in ranked:
             title = _case_title(case)
-            self.case_combo.addItem(title, case.id)
+            self.case_combo.addItem(_case_title(case, CASE_FILES_LIMIT), case.id)
             self.case_combo.setItemData(
                 self.case_combo.count() - 1, title, Qt.ItemDataRole.ToolTipRole
             )

@@ -35,6 +35,7 @@ What the next steps need from the analysis stays on the window: ``sources`` (the
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,10 +123,6 @@ def ask_redline(parent: QWidget | None) -> bool:
     """Ask whether to make a before-and-after pair of a file with tracked changes."""
     answer = QMessageBox.question(parent, APP_NAME, REDLINE_QUESTION)
     return answer == QMessageBox.StandardButton.Yes
-
-
-def _count(number: int, noun: str) -> str:
-    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 class SidebarToggle(QToolButton):
@@ -326,10 +323,37 @@ class MainWindow(QMainWindow):
         self.cases_screen.addFilesRequested.connect(self._add_files_to_case)
         self.cases_screen.restoreRequested.connect(self.show_restore)
         self.review_screen.exportRequested.connect(self.show_export)
+        self.cases_screen.newCaseRequested.connect(self.show_home)
+        # Each screen says its own two lines of the tool bar, and keeps them up to date.
+        self.review_screen.titleChanged.connect(self._review_title_changed)
+        for name, screen in (
+            ("restore", self.restore_screen),
+            ("cases", self.cases_screen),
+        ):
+            self._follow_title(name, screen)
+        # The window has the Restore button: the screen's own goes, and the tool bar's follows
+        # what the screen can do.
+        self.restore_screen.set_primary_in_toolbar(True)
+        self.restore_screen.primaryEnabledChanged.connect(lambda _on: self.refresh_chrome())
         self.analysisProgress.connect(self.home.show_progress)
         # The primary action and the file chooser follow what the screens switch on and off.
-        _EnabledWatcher(self.restore_screen.restore_button, self.refresh_chrome)
         _EnabledWatcher(self.home.drop_zone, self.refresh_chrome)
+
+    def _review_title_changed(self, screen_title: str, caption: str) -> None:
+        """The review's two lines: the caption is the screen's, live; the first line names every
+        file, comma-joined (the screen's own wording shortens a long list).
+        """
+        names = ", ".join(source.path.name for source in self.sources)
+        self.set_title(names or screen_title, caption, screen="review")
+
+    def _follow_title(self, name: str, screen: RestoreScreen | CasesScreen) -> None:
+        """Show the title and caption ``screen`` says in the tool bar while it shows, and again
+        whenever it changes them.
+        """
+        self.set_title(*screen.title(), screen=name)
+        screen.titleChanged.connect(
+            lambda title, caption: self.set_title(title, caption, screen=name)
+        )
 
     # ---- the shell -------------------------------------------------------------------------
 
@@ -383,10 +407,10 @@ class MainWindow(QMainWindow):
 
     def _build_primary(self) -> None:
         """What the primary action does on each screen, and when it is on."""
-        restore_button = self.restore_screen.restore_button
+        restore = self.restore_screen
         self.set_primary("home", "Review", lambda: self._show("review"), lambda: self._review_ready)
         self.set_primary("review", "Export…", self.show_export, lambda: self._review_ready)
-        self.set_primary("restore", "Restore", restore_button.click, restore_button.isEnabled)
+        self.set_primary("restore", "Restore", restore.primary, restore.primary_enabled)
         self.set_primary("cases", "New case", self.show_home)
 
     def set_primary(
@@ -427,7 +451,15 @@ class MainWindow(QMainWindow):
             raise KeyError(name)
         self._titles[name] = (title, caption)
         if name == self.current_screen_name():
-            self.title_block.set_texts(title, caption)
+            self._show_title(title, caption)
+
+    def _show_title(self, title: str, caption: str) -> None:
+        """Say the two lines in the tool bar. On the Mac the unified title bar already says the
+        window's title; a toolbar line that only repeats it (the home screen's) is left out.
+        """
+        self.title_block.set_texts(title, caption)
+        doubled = sys.platform == "darwin" and title == self.windowTitle() and not caption
+        self.title_block.title_label.setVisible(not doubled)
 
     def add_toolbar_widget(self, screen: str, widget: QWidget) -> None:
         """Put ``widget`` in the tool bar, before the primary action, for as long as ``screen``
@@ -441,8 +473,7 @@ class MainWindow(QMainWindow):
 
     def _apply_chrome(self, name: str) -> None:
         """Make the tool bar, the sidebar and its note those of the screen ``name``."""
-        title, caption = self._titles[name]
-        self.title_block.set_texts(title, caption)
+        self._show_title(*self._titles[name])
         self.sidebar.set_current(SECTION_OF_SCREEN[name])
         self.sidebar.set_context(name)
         if name == "cases":
@@ -526,12 +557,7 @@ class MainWindow(QMainWindow):
         self.redline_split = any(source.pkg_before is not None for source in sources)
         self.pending_case = case
         self._review_ready = True
-        counts = review.counts()
-        self.set_title(
-            ", ".join(source.path.name for source in sources),
-            f"Review · {_count(counts.groups, 'value')} found · {counts.needs_check} to check",
-            screen="review",
-        )
+        self._review_title_changed(*self.review_screen.title())
         self._show("review")
 
     def show_export(self) -> None:

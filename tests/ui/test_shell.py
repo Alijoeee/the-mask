@@ -284,15 +284,20 @@ def test_the_primary_action_of_the_restore_screen_restores_and_follows_the_butto
     qtbot: QtBot, window: MainWindow, app_ctx: AppContext
 ) -> None:
     window.show_restore()
-    button = window.restore_screen.restore_button
-    assert not button.isEnabled() and not window.primary_action.isEnabled()  # no case, no file
+    screen = window.restore_screen
+    # Adapted: the tool bar follows what the screen says (primary_enabled / primaryEnabledChanged),
+    # not its own hidden button.
+    assert not screen.primary_enabled() and not window.primary_action.isEnabled()
+    assert screen.restore_button.isHidden()
     clicked: list[bool] = []
-    button.clicked.connect(lambda: clicked.append(True))
-    button.setEnabled(True)
+    screen._restore_file = lambda: clicked.append(True)  # type: ignore[method-assign]
+    screen._primary_enabled = True
+    screen.primaryEnabledChanged.emit(True)
     assert window.primary_action.isEnabled()
     window.primary_action.trigger()
     assert clicked == [True]
-    button.setEnabled(False)
+    screen._primary_enabled = False
+    screen.primaryEnabledChanged.emit(False)
     assert not window.primary_action.isEnabled()
 
 
