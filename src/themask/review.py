@@ -135,6 +135,14 @@ def key_variants(kind: PlaceholderType, canonical: str, forms: Iterable[str]) ->
     return sorted(v for v in set(forms) if is_searchable(v) and normalize(v) not in bare)
 
 
+def asks_about(group: Group, answered: Collection[str] = ()) -> bool:
+    """Whether the owner is asked about ``group``: the analysis was not sure of it and it is
+    switched off, so it stays visible unless the owner says hide. A group the owner has answered
+    "Show" to (``answered``) is not asked about again.
+    """
+    return group.needs_check and not group.enabled and group.id not in answered
+
+
 class ReviewState:
     """What the owner has decided about an analysis so far.
 
@@ -163,6 +171,9 @@ class ReviewState:
         self.user_lists = user_lists
         self.case_lists = case_lists
         self.reserved = frozenset(reserved)
+        # The ids of the groups the owner answered "Show" to under "Not sure — hide?": kept
+        # here, not in the screen, so that a merge, a split and the export know them.
+        self.answered: set[str] = set()
         # The names an existing case's key gives its placeholders (ruling R127). A group the
         # case holds keeps its name: the case's other masked files are written with it.
         self.reserved_labels = dict(reserved_labels or {})
@@ -336,6 +347,11 @@ class ReviewState:
                 " do not merge these groups."
             )
         enabled = any(g.enabled for g in groups)
+        # The merged group is answered when it was asked about and every one of those was.
+        asked = [g for g in groups if g.needs_check and not g.enabled]
+        was_answered = any(g.id in self.answered for g in groups) and all(
+            g.id in self.answered for g in asked
+        )
         occurrences_off = sorted(
             (
                 (f, i in g.disabled or (enabled and not g.enabled))
@@ -353,6 +369,10 @@ class ReviewState:
         keep.findings = [f for f, _ in occurrences_off]
         keep.disabled = {i for i, (_, off) in enumerate(occurrences_off) if off}
         merged = {g.id for g in groups} - {keep.id}
+        self.answered -= merged
+        self.answered.discard(keep.id)
+        if was_answered:
+            self.answered.add(keep.id)
         self.groups[:] = [g for g in self.groups if g.id not in merged]
         self._sweep()
         self._tidy()
@@ -397,6 +417,8 @@ class ReviewState:
             group.variants.add(group.canonical)
         group.disabled = {n for n, i in enumerate(stay) if i in group.disabled}
         group.findings = staying
+        if group.id in self.answered:
+            self.answered.add(new.id)
         self.groups.append(new)
         self._tidy()
         return new
@@ -735,6 +757,7 @@ class ReviewState:
         groups themselves in the order they stand in the text.
         """
         self.groups[:] = [g for g in self.groups if g.findings]
+        self.answered &= {g.id for g in self.groups}
         for group in self.groups:
             _in_text_order(group)
         self.groups.sort(key=lambda g: g.findings[0].start)

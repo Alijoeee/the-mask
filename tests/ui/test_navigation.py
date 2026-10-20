@@ -225,3 +225,34 @@ def test_a_masked_file_goes_from_the_export_through_the_cases_to_the_restored_fi
     ).text
     assert all(entry.value in text for entry in result.case.entries)
     assert find_placeholders(text) == []  # every placeholder of the file was in the key
+
+
+def test_unanswered_guesses_are_asked_about_before_the_export_opens(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.model import Finding, Group, PlaceholderType
+    from themask.ui import main_window
+
+    started: list[object] = []
+    monkeypatch.setattr(ExportDialog, "run", lambda self, *args: started.append(self))
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    with qtbot.waitSignal(w.analysisFinished, timeout=60000):
+        w.open_files([corpus / "supply-01.docx"], redline_split=False)
+    review = w.review_screen.review
+    guess = Group(
+        "guess", PlaceholderType.COMPANY, "Equipment Services", set(),
+        [Finding(PlaceholderType.COMPANY, 0, 1, "x", 0.6, "model")], "[COMPANY_77]", False, True,
+    )  # fmt: skip
+    review.groups.append(guess)
+    asked: list[int] = []
+    monkeypatch.setattr(main_window, "ask_unanswered", lambda parent, n: asked.append(n) or False)
+    w.show_export()
+    assert asked == [1] and started == [] and w.export_dialog is None  # "Back to review"
+    monkeypatch.setattr(main_window, "ask_unanswered", lambda parent, n: asked.append(n) or True)
+    w.show_export()
+    assert asked == [1, 1] and started == [w.export_dialog]  # "Export anyway"
+    w.export_dialog.reject()  # type: ignore[union-attr]
+    review.answered.add("guess")
+    w.show_export()
+    assert asked == [1, 1]  # answered Show: not asked again

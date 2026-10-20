@@ -105,6 +105,8 @@ BLOCKED_ADVICE = (
 )
 UNMARKED = "Also found in the masked copy — not marked by you:"
 LEFT_VISIBLE = "Left visible on purpose:"
+SHOWN_ON_PURPOSE = "Groups you chose to show (switched off or answered Show):"
+STILL_ASKED = "Under \u201cNot sure \u2014 hide?\u201d and never answered, so they stay visible:"
 NOT_CHECKABLE = "Not checkable (too short):"
 NOTHING_TO_REPORT = "Nothing to report."
 UNEXPECTED_MESSAGE = "Something went wrong while saving the masked files."
@@ -569,15 +571,21 @@ class ExportDialog(QDialog):
         self.file_names_label.setText("\n".join(path.name for path in result.outputs))
         self.file_caption_label.setText(self._file_caption(result, folder))
         sections = self._sections(result)
+        extra = ""
+        if result.shown_on_purpose:
+            extra += f" · {len(result.shown_on_purpose)} shown by choice"
+        if result.still_asked:
+            extra += f" · {len(result.still_asked)} never answered"
         self.details_button.setText(
             f"Details · {len(result.allowed_hits)} left visible on purpose"
             f" · {len(result.unverifiable)} not checkable · {len(result.unmarked)} found unmarked"
+            + extra
         )
         self.details.setPlainText("\n\n".join(sections) if sections else NOTHING_TO_REPORT)
         lines = self.details.blockCount()
         self.details.setFixedHeight(min(lines, DETAILS_LINES) * DETAILS_LINE + 16)
         # What the owner never marked is not fine print: it is shown without being asked for.
-        self.details_button.setChecked(bool(result.unmarked))
+        self.details_button.setChecked(bool(result.unmarked or result.still_asked))
         self._toggle_details(self.details_button.isChecked())
         self._summary = self._saved_text(result)
         self._offer(body="saved", copy=True, finder=True, close=True, back=True)
@@ -696,6 +704,14 @@ class ExportDialog(QDialog):
                 f"  • {group.canonical} ({group.type.value})" for group in result.unmarked
             )
             blocks.append(f"{UNMARKED}\n{found}")
+        if result.still_asked:
+            asked = "\n".join(f"  • {g.canonical} ({g.type.value})" for g in result.still_asked)
+            blocks.append(f"{STILL_ASKED}\n{asked}")
+        if result.shown_on_purpose:
+            chosen = "\n".join(
+                f"  • {g.canonical} ({g.type.value})" for g in result.shown_on_purpose
+            )
+            blocks.append(f"{SHOWN_ON_PURPOSE}\n{chosen}")
         if result.allowed_hits:
             shown = "\n".join(f"  • {_hit_line(hit)}" for hit in result.allowed_hits)
             blocks.append(f"{LEFT_VISIBLE}\n{shown}")

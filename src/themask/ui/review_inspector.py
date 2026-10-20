@@ -74,7 +74,7 @@ from PySide6.QtWidgets import (
 from themask.labels import LabelError, clean_label
 from themask.leakcheck import unverifiable
 from themask.model import Group, KeyEntry, PlaceholderType
-from themask.review import key_variants
+from themask.review import asks_about, key_variants
 from themask.ui import icons
 from themask.ui.theme import TYPE_COLOURS, Tokens, appearance_of, body_font, tokens_of
 
@@ -169,14 +169,6 @@ class Section:
     def title(self) -> str:
         """The heading as it is drawn: "COMPANIES · 2"."""
         return f"{self.name} · {len(self.groups)}"
-
-
-def asks_about(group: Group, answered: Collection[str] = ()) -> bool:
-    """Whether the owner is asked about ``group``: the analysis was not sure of it and it is
-    switched off, so it stays visible unless the owner says hide. A group the owner has answered
-    "Show" to (``answered``) is not asked about again.
-    """
-    return group.needs_check and not group.enabled and group.id not in answered
 
 
 def sections(groups: Iterable[Group], answered: Collection[str] = ()) -> list[Section]:

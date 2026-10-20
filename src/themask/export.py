@@ -60,7 +60,7 @@ from themask.leakcheck import LeakHit, media_left, rescan_detection, scan_packag
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
 from themask.pdf.to_docx import pdf_to_docx
-from themask.review import key_variants
+from themask.review import asks_about, key_variants
 from themask.textnorm import normalize
 
 if TYPE_CHECKING:
@@ -135,7 +135,10 @@ class ExportResult:
     "MASKED-K4F7-2.docx: word/header1.xml" (ruling R81). ``unmarked`` holds what the detection
     finds in the masked files that the owner never marked (only after an export that was not
     blocked), ``unverifiable`` the placeholders whose values are too short to be checked, and
-    ``instruction`` the instruction to paste into the AI tool.
+    ``instruction`` the instruction to paste into the AI tool. ``shown_on_purpose`` are the groups
+    with nothing to mask that the owner chose to leave visible (switched off by hand, or answered
+    "Show"), ``still_asked`` those of "Not sure — hide?" that were never answered and so stay
+    visible; neither is in ``unmarked``.
     """
 
     case: Case | None
@@ -146,6 +149,8 @@ class ExportResult:
     blocked: bool
     allowed_hits: list[LeakHit] = field(default_factory=list)
     unverifiable: list[str] = field(default_factory=list)
+    shown_on_purpose: list[Group] = field(default_factory=list)
+    still_asked: list[Group] = field(default_factory=list)
 
 
 def load_sources(paths: list[Path], redline_split: bool) -> list[SourceDoc]:
@@ -247,11 +252,17 @@ def export_case(
             )
         unmarked = _unmarked(staged, engine, user_lists, key)
         unmarked = _without_names(unmarked, key)
+        shown = [g for g in review.groups if not g.active_findings()]
+        asked = [g for g in shown if asks_about(g, review.answered)]
+        shown = [g for g in shown if not asks_about(g, review.answered)]
+        unmarked = _without_groups(unmarked, shown + asked)
         outputs, case = _save(staged, sources, key, code, options, save_case)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     allowed = _named(visible, outputs)  # by the names the files were written under
-    return ExportResult(case, outputs, [], unmarked, instruction, False, allowed, not_checkable)
+    return ExportResult(
+        case, outputs, [], unmarked, instruction, False, allowed, not_checkable, shown, asked
+    )
 
 
 def _check_labels(key: list[KeyEntry], text: str, stored: Collection[str] = ()) -> None:
@@ -283,6 +294,16 @@ def _check_labels(key: list[KeyEntry], text: str, stored: Collection[str] = ()) 
             "The files already hold a name chosen for a placeholder in square brackets; choose"
             " another name."
         )
+
+
+def _forms(group: Group) -> set[str]:
+    return {normalize(form) for form in (group.canonical, *group.variants)}
+
+
+def _without_groups(found: list[Group], known: list[Group]) -> list[Group]:
+    """``found`` without the groups the owner already decided about (any normalised form alike)."""
+    forms = {form for group in known for form in _forms(group)}
+    return [g for g in found if not _forms(g) & forms]
 
 
 def _without_names(found: list[Group], key: list[KeyEntry]) -> list[Group]:

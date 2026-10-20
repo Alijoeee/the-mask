@@ -75,7 +75,7 @@ from themask.docx.reader import has_revisions
 from themask.errors import KeyStoreError, MaskError
 from themask.export import UNSUPPORTED_MESSAGE, ExportOptions, SourceDoc, combined_text
 from themask.model import Analysis, Case
-from themask.review import ReviewState
+from themask.review import ReviewState, asks_about
 from themask.ui import icons, theme
 from themask.ui.cases_screen import NOT_READ, CasesScreen
 from themask.ui.export_dialog import ExportDialog
@@ -123,6 +123,25 @@ def ask_redline(parent: QWidget | None) -> bool:
     """Ask whether to make a before-and-after pair of a file with tracked changes."""
     answer = QMessageBox.question(parent, APP_NAME, REDLINE_QUESTION)
     return answer == QMessageBox.StandardButton.Yes
+
+
+def ask_unanswered(parent: QWidget | None, count: int) -> bool:
+    """Ask whether to export although ``count`` guesses under "Not sure — hide?" were not
+    answered: they stay visible in the masked files. True for "Export anyway".
+    """
+    guesses = "1 guess" if count == 1 else f"{count} guesses"
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(APP_NAME)
+    box.setText(
+        f"{guesses} under \u201cNot sure \u2014 hide?\u201d {'was' if count == 1 else 'were'} not"
+        " answered and will stay visible."
+    )
+    anyway = box.addButton("Export anyway", QMessageBox.ButtonRole.AcceptRole)
+    back = box.addButton("Back to review", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(back)
+    box.exec()
+    return box.clickedButton() is anyway
 
 
 class SidebarToggle(QToolButton):
@@ -589,6 +608,10 @@ class MainWindow(QMainWindow):
                 else ""
             )
             show_error(self, problems[0] + more)
+            return
+        review = self.review_screen.review
+        unanswered = sum(asks_about(g, review.answered) for g in review.groups)
+        if unanswered and not ask_unanswered(self, unanswered):
             return
         try:
             codes = self._case_codes()
