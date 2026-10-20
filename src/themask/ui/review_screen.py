@@ -360,6 +360,11 @@ class ReviewScreen(QWidget):
         self.review, self.combined = review, combined
         self.inspector.name_panel.show_group(None)  # nothing of the last review stays
         self.inspector.name_panel.clear_error()
+        # Nothing typed for the last review applies to this one: a name for the next hide, the
+        # find, and the refusal of a hide.
+        self.hide_name_field.clear()
+        self.inspector.show_hide_error("")
+        self.find_field.clear()
         self._map = self._show_text(combined)
         self._stressed = set()
         self._rebuild()

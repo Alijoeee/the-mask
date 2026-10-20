@@ -557,3 +557,21 @@ def test_a_name_that_clashes_with_a_masked_value_is_listed_and_marked(qtbot: QtB
     assert (
         panel.problems_label.isHidden() and "clashes" not in screen.row_for(first.id).data.caption
     )
+
+
+def test_loading_another_review_clears_the_typed_name_the_find_and_the_refusal(
+    qtbot: QtBot,
+) -> None:
+    screen, state = screen_of(qtbot)
+    screen.hide_name_field.setText("Codename")
+    screen.find_field.setText("payment")
+    screen.inspector.show_hide_error("That name is taken.")
+    other, other_state = screen_of(qtbot)
+    screen.load(other_state, other.combined)
+    assert screen.hide_name_field.text() == ""
+    assert screen.find_field.text() == ""
+    assert screen.inspector.hide_message_label.isHidden()
+    select_text(screen, "late payment")
+    screen.hide_selection(PlaceholderType.CUSTOM)  # the first hide of the next document
+    group = next(g for g in other_state.groups if g.canonical == "late payment")
+    assert group.label is None
