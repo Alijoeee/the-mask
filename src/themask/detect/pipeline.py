@@ -59,7 +59,6 @@ from themask.detect.lists import (
     UserLists,
     always_hide_entry,
     is_default_term,
-    is_place_term,
     is_vocabulary_word,
     never_hide_check,
     on_never_hide_list,
@@ -240,9 +239,8 @@ def analyze(
         ):
             group.needs_check = True
     stored = {seed.id for seed in seeds}
-    for group in groups:
-        if _asks_the_owner(group, is_term, stored):
-            group.enabled, group.needs_check = False, True
+    for group in _unsure_guesses(groups, stored):
+        group.enabled, group.needs_check = False, True
     groups.sort(key=lambda g: g.findings[0].start)
     _number(groups, seed_entries or [], placeholders)
     return Analysis(text, groups, _warnings(placeholders))
@@ -340,14 +338,19 @@ def _starts_a_term(text: str, finding: Finding) -> bool:
 def _names_nobody(finding: Finding, is_term: Callable[[str], bool]) -> bool:
     """Whether the language model found a text made of the contract's own words only, which
     names nobody: "GOVERNING LAW", "the Recipient for the Purpose" (``is_contract_wording``), or
-    a never-hide term with filler words: "the Confidential Information of the other" (ruling
-    R122, item 2).
+    a never-hide term with filler words, at low confidence: "the Confidential Information of
+    the other" (ruling R122, item 2). A confident guess, and any word that is not a default
+    never-hide term, keeps the finding: "The Capital Group" is a company.
     """
     if finding.source != "model":
         return False
     if is_contract_wording(finding.text):
         return True
-    return finding.type in _NAMES and _plain_words(finding.text, is_term) == _WITH_FILLER
+    return (
+        finding.type in _NAMES
+        and finding.score < CHECK_BELOW
+        and _plain_words(finding.text, whole=True) == _WITH_FILLER
+    )
 
 
 # Small words that join the ordinary words of a phrase without naming anybody.
@@ -357,57 +360,81 @@ _FILLER = frozenset(
     | {"its", "their", "his", "her", "as", "at", "between", "under", "upon", "&"}
 )
 _PLAIN_WORD = re.compile(r"[^\W\d_]+(?:['\N{RIGHT SINGLE QUOTATION MARK}\-][^\W\d_]+)*")
-# What ``_plain_words`` reports: made of ordinary words with at least one filler word and at
-# least one other (``_WITH_FILLER``); made of ordinary words with no filler (``_PLAIN``); not
-# made of ordinary words only (``_NAME_SHAPED``).
+# What ``_plain_words`` reports: made of default never-hide words with at least one filler word
+# (``_WITH_FILLER``); made of them with no filler (``_PLAIN``); anything else (``_NAME_SHAPED``).
 _WITH_FILLER, _PLAIN, _NAME_SHAPED = "filler", "plain", "name"
 
 
-def _plain_word(word: str, is_term: Callable[[str], bool]) -> bool:
-    """Whether ``word`` is an ordinary word of a contract: a word of a default role, document
-    or legal term, a COMMON_WORDS word, a word of the contract's own, or a never-hide term that
-    is not a place, a month or a body (those are names in other combinations).
-    """
-    return (
-        is_vocabulary_word(word)
-        or word.casefold() in _COMMON_WORDS
-        or is_contract_wording(word)
-        or (is_term(word) and not is_place_term(word))
-    )
+def _plain_words(text: str, whole: bool = False) -> str:
+    """How ``text`` reads: ``_WITH_FILLER``, ``_PLAIN`` or ``_NAME_SHAPED`` (see above).
 
-
-def _plain_words(text: str, is_term: Callable[[str], bool]) -> str:
-    """How ``text`` reads: ``_WITH_FILLER``, ``_PLAIN`` or ``_NAME_SHAPED`` (see above). A word
-    with a digit, or one that is not an ordinary word, makes it name-shaped.
+    Only the default never-hide terms count (ruling R122), not COMMON_WORDS and not the terms a
+    document defines: every word must be a word of a default term and not a place, a month or a
+    body. Every run of words between filler words must be a default term itself ("Confidential
+    Information", not "Standard") or, unless ``whole``, made of default terms ("Services Agreement").
+    A word with a digit makes it name-shaped.
     """
     words = [word.strip(".,:;()\"'") for word in text.split()]
     words = [word for word in words if word]
     if not words or any(not _PLAIN_WORD.fullmatch(word) for word in words):
         return _NAME_SHAPED
-    filler = [word for word in words if word.casefold() in _FILLER]
     others = [word for word in words if word.casefold() not in _FILLER]
-    if not others or not all(_plain_word(word, is_term) for word in others):
+    if not others or not all(is_vocabulary_word(word) for word in others):
         return _NAME_SHAPED
-    return _WITH_FILLER if filler else _PLAIN
+    runs: list[list[str]] = [[]]
+    for word in words:
+        if word.casefold() in _FILLER:
+            runs.append([])
+        else:
+            runs[-1].append(word)
+    for run in filter(None, runs):
+        if not (is_default_term(" ".join(run)) or (not whole and all(map(is_default_term, run)))):
+            return _NAME_SHAPED
+    return _WITH_FILLER if len(others) < len(words) else _PLAIN
 
 
-def _asks_the_owner(group: Group, is_term: Callable[[str], bool], keys: set[str]) -> bool:
-    """Whether ``group`` is a low-confidence guess of the language model made of ordinary words
-    only ("Personal Services"): it is shown, not hidden, and the owner is asked (ruling R122,
-    item 1). A value the owner, a contract rule or a pattern found, a stored key and anything
-    name-shaped are not.
+def _inside(short: str, long: str) -> bool:
+    """Whether the words of ``short`` stand as a run in the words of ``long`` (both normalised)."""
+    a, b = short.split(), long.split()
+    return bool(a) and any(b[i : i + len(a)] == a for i in range(len(b) - len(a) + 1))
+
+
+def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
+    """The groups that are low-confidence guesses of the language model made only of default
+    never-hide words ("Personal Services"): shown, not hidden, and the owner is asked (ruling
+    R122, item 1). Only a company is asked about, and only when the guess comes from the model
+    alone: a value a rule, a pattern, the owner or a stored key found, a person, anything
+    name-shaped, and any form that is, or holds, or sits inside a form of a name that stays
+    hidden is not.
     """
-    if group.type not in _NAMES or group.id in keys:
-        return False
-    found = [f for f in group.findings if f.source != "sweep"]
-    return (
-        bool(found)
-        and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
-        and all(
-            _plain_words(form, is_term) != _NAME_SHAPED
-            for form in {group.canonical, *group.variants}
+
+    def guess(group: Group) -> bool:
+        found = [f for f in group.findings if f.source != "sweep"]
+        return (
+            group.type is PlaceholderType.COMPANY
+            and group.id not in stored
+            and bool(found)
+            and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
+            and all(_plain_words(form) == _PLAIN for form in {group.canonical, *group.variants})
         )
-    )
+
+    asked = [g for g in groups if guess(g)]
+    kept = {id(g) for g in asked}
+    hidden = [
+        normalize(form)
+        for g in groups
+        if id(g) not in kept and g.type in _NAMES
+        for form in {g.canonical, *g.variants}
+    ]
+    return [
+        g
+        for g in asked
+        if not any(
+            _inside(normalize(form), other) or _inside(other, normalize(form))
+            for form in {g.canonical, *g.variants}
+            for other in hidden
+        )
+    ]
 
 
 def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bool]) -> list[str]:

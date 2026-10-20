@@ -1185,18 +1185,18 @@ def test_a_guess_of_a_never_hide_term_plus_filler_is_dropped(lists):
     "phrase",
     ["the Personal Data of the other", "the Receiving Party and the Disclosing Party"],
 )
-def test_other_term_plus_filler_guesses_are_dropped_at_any_score(lists, phrase):
-    fake = FakeEngine((P, phrase, 0.85, "model"))
+def test_other_term_plus_filler_guesses_are_dropped_at_low_score(lists, phrase):
+    fake = FakeEngine((P, phrase, 0.6, "model"))
     assert analyze(one(f"We regard {phrase} as terms."), fake, lists).groups == []
 
 
 def test_a_low_confidence_guess_of_ordinary_words_is_shown_and_asked_about(lists):
-    fake = FakeEngine((C, "Personal Services", 0.6, "model"))
+    fake = FakeEngine((C, "Equipment Services", 0.6, "model"))
     a = analyze(
-        one("The Personal Services start in June. Personal Services continue."), fake, lists
+        one("The Equipment Services start in June. Equipment Services continue."), fake, lists
     )
     (g,) = a.groups
-    assert g.canonical == "Personal Services"
+    assert g.canonical == "Equipment Services"
     assert g.enabled is False and g.needs_check is True
     assert len(g.findings) == 2  # every place is kept, so the owner's Hide covers them all
 
@@ -1208,23 +1208,23 @@ def test_a_low_confidence_guess_with_a_name_shaped_word_stays_hidden(lists):
 
 
 def test_a_confident_guess_of_ordinary_words_is_not_asked_about(lists):
-    fake = FakeEngine((C, "Personal Services", 0.85, "model"))
-    (g,) = analyze(one("The Personal Services start in June."), fake, lists).groups
+    fake = FakeEngine((C, "Equipment Services", 0.85, "model"))
+    (g,) = analyze(one("The Equipment Services start in June."), fake, lists).groups
     assert g.enabled is True
 
 
 def test_a_contract_rule_finding_is_never_turned_off(lists):
-    fake = FakeEngine((C, "Personal Services Ltd", 0.95, "rule"))
-    (g,) = analyze(one("Personal Services Ltd signs."), fake, lists).groups
+    fake = FakeEngine((C, "Equipment Services Ltd", 0.95, "rule"))
+    (g,) = analyze(one("Equipment Services Ltd signs."), fake, lists).groups
     assert g.enabled is True and g.needs_check is False
 
 
 def test_the_owners_always_hide_entry_is_never_turned_off(lists):
     from themask.detect.lists import UserLists
 
-    owner = UserLists(["COMPANY: Personal Services"], [])
-    fake = FakeEngine((C, "Personal Services", 0.6, "model"))
-    (g,) = analyze(one("The Personal Services start."), fake, owner).groups
+    owner = UserLists(["COMPANY: Equipment Services"], [])
+    fake = FakeEngine((C, "Equipment Services", 0.6, "model"))
+    (g,) = analyze(one("The Equipment Services start."), fake, owner).groups
     assert g.enabled is True
 
 
@@ -1243,3 +1243,99 @@ def test_page_footers_in_a_real_contract_hide_nobody_but_the_parties(engine, lis
     )
     a = analyze(one(t), engine, lists)
     assert sorted(g.canonical for g in a.groups) == ["Acme Supplies Ltd", "John Carter"]
+
+
+# --- Review fixes (C1, C2, I1-I3, M2, M4) ----------------------------------------------------------
+
+REAL_COMPANIES = [
+    "The Capital Group",
+    "The Standard",
+    "The Trading Company",
+    "Global Payments and Services",
+    "Bond and Grant",
+]
+
+
+@pytest.mark.parametrize("name", REAL_COMPANIES)
+@pytest.mark.parametrize("score", [0.6, 0.9, 0.95])
+def test_real_company_names_of_common_words_are_never_dropped_or_switched_off(lists, name, score):
+    fake = FakeEngine((C, name, score, "model"))
+    a = analyze(one(f"Do not disclose anything to {name} or to others."), fake, lists)
+    assert len(a.groups) == 1
+    assert a.groups[0].enabled is True
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Royal Mail", "First Data", "Capital Partners", "General Holdings", "Standard Trading"]
+    + ["Central Logistics", "Software Solutions", "Global Services", "Master Supply"],
+)
+def test_common_word_companies_at_low_confidence_stay_hidden(lists, name):
+    fake = FakeEngine((C, name, 0.6, "model"))
+    (g,) = analyze(one(f"Payment goes to {name} monthly."), fake, lists).groups
+    assert g.enabled is True and g.needs_check is True
+
+
+@pytest.mark.parametrize("word", ["Bond", "Grant", "Day", "Long", "Holiday", "Personal Data"])
+def test_a_person_guess_is_never_switched_off(lists, word):
+    fake = FakeEngine((P, word, 0.6, "model"))
+    a = analyze(one(f"We met {word} on Tuesday."), fake, lists)
+    assert all(g.enabled for g in a.groups)
+
+
+def test_a_defined_term_code_name_and_its_longer_forms_stay_hidden(lists):
+    fake = FakeEngine((C, "Kestrel Group", 0.6, "model"), (C, "Kestrel Holdings", 0.6, "model"))
+    t = '"Kestrel" means the target business. Kestrel Group and Kestrel Holdings are excluded.'
+    a = analyze(one(t), fake, lists)
+    assert a.groups and all(g.enabled for g in a.groups)
+
+
+def test_a_short_form_of_a_confident_company_is_not_switched_off(lists):
+    fake = FakeEngine(
+        (C, "Capital Partners Holdings", 0.9, "model"), (C, "Capital Partners", 0.6, "model")
+    )
+    a = analyze(one("Capital Partners Holdings signs. Capital Partners pays."), fake, lists)
+    assert a.groups and all(g.enabled for g in a.groups)
+
+
+def test_a_guess_inside_a_hidden_name_is_not_switched_off(lists):
+    fake = FakeEngine(
+        (C, "Equipment Services Ltd", 0.95, "rule"), (C, "Equipment Services", 0.6, "model")
+    )
+    a = analyze(one("Equipment Services Ltd signs. Equipment Services pays."), fake, lists)
+    assert all(g.enabled for g in a.groups)
+
+
+def test_a_confident_term_plus_filler_guess_is_kept(lists):
+    fake = FakeEngine((C, "the Confidential Information of the other", 0.9, "model"))
+    a = analyze(one("Protect the Confidential Information of the other."), fake, lists)
+    assert len(a.groups) == 1
+
+
+@pytest.mark.parametrize(
+    "label", ["Seite B", "Pagina V", "Page CIVIL", "Seite C", "Pagina L", "Page MIX"]
+)
+def test_an_unclear_page_label_is_not_a_never_hide_term(lists, label):
+    from themask.detect.lists import CaseLists, is_never_hide
+
+    assert not is_never_hide(label, lists, CaseLists([], [], set()))
+
+
+@pytest.mark.parametrize(
+    "label", ["Page PAGE1", "Seite 2 von 5", "Page 1 of 3", "NUMPAGES", "Page XII"]
+)
+def test_clear_page_labels_remain_never_hide_terms(lists, label):
+    from themask.detect.lists import CaseLists, is_never_hide
+
+    assert is_never_hide(label, lists, CaseLists([], [], set()))
+
+
+def test_real_engine_keeps_capital_group_and_the_trading_company_hidden(engine, lists):
+    t = (
+        "The Recipient shall not disclose anything to The Capital Group or to Global Services."
+        " The Trading Company and Supply and Logistics are excluded."
+    )
+    a = analyze(one(t), engine, lists)
+    names = {g.canonical for g in a.groups}
+    assert "Capital Group" in names and any(n.startswith("Trading Company") for n in names)
+    assert all(g.enabled for g in a.groups)

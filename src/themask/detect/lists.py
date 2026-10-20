@@ -211,11 +211,11 @@ DEFAULT_NEVER_HIDE: frozenset[str] = (
 _REFERENCE_WORDS = _terms(
     """
     Schedule, Annex, Appendix, Exhibit, Attachment, Addendum, Clause, Sub-clause, Section,
-    Article, Paragraph, Recital, Part, Chapter, Page, Table, Item, Party, Annexure, Figure, Fig
+    Article, Paragraph, Recital, Part, Chapter, Page, Table, Item, Party, Annexure, Figure
     """
 )
 _REFERENCE = re.compile(
-    r"\(?(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[A-Za-z]|[IVXLC]{1,7}|[ivxlc]{1,7})\)?"
+    r"\(?(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[A-Za-z]|[IVXivx]{1,4})\)?"
     r"(?:\([A-Za-z0-9]{1,4}\))*\.?"
 )
 
@@ -223,7 +223,7 @@ _REFERENCE = re.compile(
 # "Pagina 3 van 7", "Bladzijde 4", and a field's own code, which a PDF or a Word export may leave
 # as text: "Page PAGE1", "PAGE", "NUMPAGES", "Seite PAGE2 von NUMPAGES".
 _PAGE_FIELD = r"(?:NUM|SECTION)?PAGES?\d*|PAGEREF\w*"
-_PAGE_NUMBER = rf"(?:\d{{1,4}}|[IVXLC]{{1,7}}|[ivxlc]{{1,7}}|[A-Za-z]|{_PAGE_FIELD})"
+_PAGE_NUMBER = rf"(?:\d{{1,4}}|[IVXivx]{{2,4}}|{_PAGE_FIELD})"
 _PAGE_LABEL = re.compile(
     rf"(?i:(?:pages?|seiten?|pagina'?s?|p[aá]ginas?|bladzijden?|blz|pág)\.?[ \N{{NO-BREAK SPACE}}]+)"
     rf"{_PAGE_NUMBER}(?:[ \N{{NO-BREAK SPACE}}]+(?i:of|von|van|de|sur|di|din|av|af)"
@@ -281,7 +281,7 @@ _DEFAULTS = _Terms(DEFAULT_NEVER_HIDE)
 _VOCABULARY_KEYS = frozenset(
     key
     for term in _ROLES | _DOCUMENT_WORDS | _LEGAL_WORDS
-    for key in map(term_key, term.replace("-", " ").split())
+    for key in map(term_key, term.split())
     if key
 )
 _PLACE_KEYS = frozenset(

@@ -24,13 +24,13 @@ class _Model:
 
 
 def test_the_guess_is_a_question_for_the_review_and_stays_out_of_the_plan(lists):
-    text = "Personal Services start now. Zorblax Services start too."
+    text = "Equipment Services start now. Zorblax Services start too."
     C = PlaceholderType.COMPANY
-    engine = _Model((C, "Personal Services", 0.6), (C, "Zorblax Services", 0.6))
+    engine = _Model((C, "Equipment Services", 0.6), (C, "Zorblax Services", 0.6))
     analysis = analyze(CombinedText.join([("x", text)]), engine, lists)
     state = ReviewState.from_analysis(analysis, UserLists([], []), CaseLists([], [], set()))
     asked = [g for g in state.groups if asks_about(g)]
-    assert [g.canonical for g in asked] == ["Personal Services"]
+    assert [g.canonical for g in asked] == ["Equipment Services"]
     assert [s.name for s in sections(state.groups) if s.question] == [NOT_SURE]
     hidden = {text[r.start : r.end] for r in state.mask_plan().replacements}
     assert hidden == {"Zorblax Services"}
