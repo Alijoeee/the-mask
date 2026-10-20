@@ -67,7 +67,7 @@ from PySide6.QtWidgets import (
 from themask.about import APP_NAME
 from themask.detect.lists import CaseLists, UserLists, on_never_hide_list
 from themask.detect.pipeline import CombinedText
-from themask.labels import LabelError
+from themask.labels import LabelError, clean_label
 from themask.model import Finding, Group, PlaceholderType
 from themask.review import ReviewState
 from themask.ui.review_inspector import (
@@ -248,6 +248,7 @@ class ReviewScreen(QWidget):
         self._stressed: set[str] = set()
         self._formats: dict[tuple[PlaceholderType, bool, bool], QTextCharFormat] = {}
         self._answered: set[str] = set()  # the groups the owner answered "Show" to
+        self._problem_ids: set[str] = set()  # groups whose name clashes with a masked value
         self._updating = False
         self._from_text = False
         self._by_hand = False  # a switch is being moved by the owner (see _set_by_hand)
@@ -411,6 +412,8 @@ class ReviewScreen(QWidget):
         name, text the review refuses) is explained in a notice and nothing changes; a name that
         is refused is explained under the "Name it" field, and nothing is hidden either.
         """
+        if not self.commit_pending_name():
+            return
         if label is None:
             label = self.hide_name_field.text()
         cursor = self.text.textCursor()
@@ -428,6 +431,7 @@ class ReviewScreen(QWidget):
             return
         self.hide_name_field.clear()
         self.inspector.show_hide_error("")
+        self.inspector.name_panel.clear_error()
         cursor.clearSelection()  # so that the colour of the new find shows
         self.text.setTextCursor(cursor)
         self._rebuild(select=group.id, scroll=False)
@@ -696,6 +700,8 @@ class ReviewScreen(QWidget):
         The groups that were open stay open. ``select`` is the group (or groups) to select
         afterwards, and ``scroll`` whether the pane then goes to the first occurrence of the first.
         """
+        self._flush_name()  # a name typed and not yet committed is not lost by the redraw
+        self._problem_ids = self._clashing_groups()
         opened = {group_id for group_id, item in self._items.items() if item.isExpanded()}
         width = self.tree.viewport().width()
         bar = self.tree.verticalScrollBar()
@@ -747,7 +753,7 @@ class ReviewScreen(QWidget):
         child for each place. ``first`` says that the group starts its section, which the row
         then names, and ``leading`` that the section is the first of the list.
         """
-        data = RowData.of(group, section.question)
+        data = RowData.of(group, section.question, group.id in self._problem_ids)
         item = QTreeWidgetItem([data.name])
         item.setFlags(_FLAGS)
         item.setCheckState(0, Qt.CheckState.Checked if group.enabled else Qt.CheckState.Unchecked)
@@ -811,8 +817,11 @@ class ReviewScreen(QWidget):
             self._grey_occurrences(item, checked)
             row = self._rows[group_id]
             row.set_checked(checked)
-            if asks_about(self._group(group_id), self._answered) != row.data.question:
-                self._regroup_later(group_id)  # the group moves into or out of "not sure"
+            if (
+                asks_about(self._group(group_id), self._answered) != row.data.question
+                or self._clashing_groups() != self._problem_ids
+            ):
+                self._regroup_later(group_id)  # into or out of "not sure", or a name's clash
         else:
             self.review.set_occurrence_enabled(group_id, cast("int", index), checked)
         self._refresh_highlights()
@@ -973,6 +982,7 @@ class ReviewScreen(QWidget):
     def _refresh_summary(self) -> None:
         """Count the groups again (the footer), and tell the window if its title changed."""
         self.inspector.set_counts(FooterCounts.of(self.review.groups, self._answered))
+        self.inspector.name_panel.show_problems(self.review.label_problems())
         title = self.title()
         if title != self._title:
             self._title = title
@@ -1103,25 +1113,71 @@ class ReviewScreen(QWidget):
         else:
             item.setExpanded(not item.isExpanded())
 
-    def _name_committed(self, group_id: str, text: str) -> None:
-        """The owner pressed Return in the "Mask name" field, or left it: give the group the name.
+    def commit_pending_name(self) -> bool:
+        """Give the selected group the name that stands in the "Mask name" field if the owner has
+        typed one and not yet pressed Return (a button of the toolbar or the buttons beside the
+        list do not take the keyboard on a Mac, so the field never loses it). True when there is
+        nothing to commit or it was accepted; False when the review refused the name: the reason
+        is shown under the field, and the caller must not go on.
+        """
+        panel = self.inspector.name_panel
+        group_id = panel.group_id()
+        if group_id is None or not panel.is_editable() or not panel.is_dirty():
+            return True
+        return self._commit_name(group_id, panel.current_text())
 
-        An empty text takes the name off. A name the review refuses is explained under the field
-        and the field goes back to the name the group has.
+    def _flush_name(self) -> None:
+        """Before the list is drawn again: commit a typed name; a refusal is shown and the field
+        goes back (the redraw must not drop what the owner typed without a word).
+        """
+        self.commit_pending_name()
+
+    def _name_committed(self, group_id: str, text: str) -> None:
+        """The owner pressed Return in the "Mask name" field, or left it."""
+        self._commit_name(group_id, text)
+
+    def _commit_name(self, group_id: str, text: str) -> bool:
+        """Give the group the name ``text`` (empty or blank: take its name off). A name the
+        review refuses is explained under the field with the name of the group it was for, the
+        field goes back to the name the group has, and the result is False.
         """
         group = next((g for g in self.review.groups if g.id == group_id), None)
-        if group is None or text.strip() == (group.label or ""):
-            return
+        if group is None:
+            return True
         panel = self.inspector.name_panel
+        if not text.strip():
+            wanted = None
+        else:
+            try:
+                wanted = clean_label(text)
+            except LabelError:
+                wanted = text
+        if wanted == group.label:
+            if not text.strip() and panel.group_id() == group_id:
+                panel.show_group(group, group.placeholder in self.review.reserved)
+            return True
         try:
             self.review.set_label(group_id, text)
         except LabelError as error:
-            if panel.group_id() == group_id:
-                panel.show_group(group, group.placeholder in self.review.reserved)
-                panel.show_error(str(error))
-            return
+            panel.show_group(group, group.placeholder in self.review.reserved)
+            panel.show_error(f"{collapse(group.canonical)}: {error}")
+            return False
+        panel.show_group(group, group.placeholder in self.review.reserved)  # the field as stored
         panel.clear_error()
         self._rebuild(select=group_id, scroll=False)
+        return True
+
+    def _clashing_groups(self) -> set[str]:
+        """The groups whose name clashes with a value that will be masked (``label_problems``)."""
+        messages = self.review.label_problems()
+        return {
+            g.id
+            for g in self.review.groups
+            if g.label is not None
+            and any(
+                m.startswith(f"The name {g.label} ") and f" {g.placeholder} " in m for m in messages
+            )
+        }
 
     def _toggle_places(self) -> None:
         """Open the places of the selected group, or close them."""
@@ -1136,6 +1192,8 @@ class ReviewScreen(QWidget):
         self._merge_groups(groups)
 
     def _merge_groups(self, group_ids: list[str]) -> None:
+        if not self.commit_pending_name():
+            return
         try:
             merged = self.review.merge(group_ids)
         except ValueError as error:
@@ -1144,6 +1202,8 @@ class ReviewScreen(QWidget):
         self._rebuild(select=merged.id)
 
     def _split(self) -> None:
+        if not self.commit_pending_name():
+            return
         _, occurrences = self._selected()
         if len(occurrences) != 1:
             return
@@ -1156,6 +1216,8 @@ class ReviewScreen(QWidget):
         self._rebuild(select=new.id)
 
     def _always_hide(self) -> None:
+        if not self.commit_pending_name():
+            return
         group = self._selected_group()
         if group is not None:
             self._change_a_list(self.review.add_always_hide, group.canonical, group.id)
@@ -1165,6 +1227,8 @@ class ReviewScreen(QWidget):
         button), else the value of the selected group. The menu's action passes ``False``: it is
         about the group that was clicked, whatever stays selected in the document.
         """
+        if not self.commit_pending_name():
+            return
         cursor = self.text.textCursor()
         if from_text and cursor.hasSelection():
             try:

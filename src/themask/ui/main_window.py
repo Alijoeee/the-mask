@@ -577,6 +577,14 @@ class MainWindow(QMainWindow):
         """
         if self.export_dialog is not None:
             return
+        # A name typed in the review and not yet committed is given first, and one the review
+        # refuses, or a name that clashes with a value, stops the export here, in words.
+        if not self.review_screen.commit_pending_name():
+            return
+        problems = self.review_screen.review.label_problems()
+        if problems:
+            show_error(self, problems[0])
+            return
         try:
             codes = self._case_codes()
         except MaskError as error:

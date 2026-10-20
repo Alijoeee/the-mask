@@ -569,6 +569,24 @@ def test_a_document_that_holds_the_name_in_brackets_stops_the_export(
         export(sources, review, tmp_path / "o", engine, lists)
 
 
+def test_the_refusals_of_the_label_check_are_errors_with_a_message_for_the_owner(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.errors import MaskError
+
+    sources = one_file(make_docx, SUPPLY + " Also [Provider].")
+    review = named_review(sources, lists)
+    review.groups[0].label = "Provider"
+    with pytest.raises(MaskError) as caught:
+        export(sources, review, tmp_path / "o", engine, lists)
+    assert "square brackets" in caught.value.user_message
+    sources = one_file(make_docx)
+    review = named_review(sources, lists)
+    review.groups[0].label = review.groups[1].label = "Same"
+    with pytest.raises(MaskError):
+        export(sources, review, tmp_path / "o2", engine, lists)
+
+
 def test_a_file_added_to_a_case_keeps_the_names(
     make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
 ) -> None:

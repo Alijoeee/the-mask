@@ -263,7 +263,7 @@ def _check_labels(key: list[KeyEntry], text: str, stored: Collection[str] = ()) 
     try:
         validate_key_labels(entry.label for entry in key)
     except LabelError as error:
-        raise ValueError(str(error)) from error
+        raise LabelClashError(str(error)) from error
     for entry in key:
         if entry.label is None:
             continue
@@ -279,7 +279,7 @@ def _check_labels(key: list[KeyEntry], text: str, stored: Collection[str] = ()) 
                 )
     names = {label_key(e.label): e.label for e in key if e.label is not None}
     if names and find_labels(text, names):
-        raise ValueError(
+        raise LabelClashError(
             "The files already hold a name chosen for a placeholder in square brackets; choose"
             " another name."
         )

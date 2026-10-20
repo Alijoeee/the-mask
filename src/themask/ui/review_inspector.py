@@ -84,6 +84,8 @@ FIND_NAME = "Find in document"
 HINT = "Space toggles · ↑↓ moves"
 NOT_SURE = "NOT SURE — HIDE?"
 NAME_TITLE = "Mask name"
+NAME_TITLE_SHOWN = "Mask name (selected value)"
+NAME_TIP = "The name the masked file writes for the value selected in the list."
 NAME_HIDE_PLACEHOLDER = "Name it (optional)"
 NAME_HIDE_NAME = "Name for the hidden text, optional"
 NAME_HIDE_TIP = (
@@ -94,6 +96,7 @@ NAME_NONE = "Select a value in the list to give its mask a name."
 NAME_STORED = (
     "This value is in the case already, so it keeps the name its earlier files were written with."
 )
+NAME_CLASH = "its name clashes with a value"
 NAME_INVALID = "Press Return to check this name."
 MODEL_ONLY = "found by the model only"
 TOO_SHORT = "too short for the leak check"
@@ -118,6 +121,7 @@ _PILL_GAP = 6
 _BUTTON_HEIGHT = 26
 _BUTTON_GAP = 6
 _OCCURRENCE_HEIGHT = 28
+_MESSAGE_LINE = 15  # 11 px at a line height of 1.3, rounded up
 _BOX = 14  # the check box of a place
 
 
@@ -236,7 +240,7 @@ def check_reason(group: Group) -> str:
     return TOO_SHORT if unverifiable([entry]) else ""
 
 
-def caption_of(group: Group) -> str:
+def caption_of(group: Group, problem: bool = False) -> str:
     """The line under a group's name: "[COMPANY_1] · 6 places · also “Northwind”, “the Buyer’s
     group”". It names up to two other spellings and then goes on with "…"; a group to check says
     why, when it can.
@@ -251,6 +255,8 @@ def caption_of(group: Group) -> str:
     reason = check_reason(group)
     if reason:
         parts.append(reason)
+    if problem:
+        parts.append(NAME_CLASH)
     return " · ".join(parts)
 
 
@@ -298,12 +304,12 @@ class RowData:
     question: bool = False  # a row of the "not sure" section
 
     @classmethod
-    def of(cls, group: Group, question: bool = False) -> RowData:
+    def of(cls, group: Group, question: bool = False, problem: bool = False) -> RowData:
         return cls(
             group.id,
             group.type,
             collapse(group.canonical),
-            caption_of(group),
+            caption_of(group, problem),
             group.needs_check,
             group.enabled,
             question,
@@ -941,17 +947,18 @@ class NamePanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._group_id: str | None = None
+        self._shown = ""  # what the field was last set to: the name the group has
         self._default = ""
         self._appearance = ""
-        self.title_label = QLabel(NAME_TITLE)
+        self.title_label = QLabel(NAME_TITLE_SHOWN)
         self.title_label.setFont(_font(11, QFont.Weight.DemiBold))
         self.name_field = QLineEdit()
         self.name_field.setFixedHeight(30)
         self.name_field.setAccessibleName(NAME_TITLE)
+        self.name_field.setToolTip(NAME_TIP)
         self.name_field.setClearButtonEnabled(True)
         self.token_label = QLabel()
         self.token_label.setFont(_font(11))
-        self.token_label.setAccessibleName("Written as")
         self.note_label = QLabel()
         self.note_label.setWordWrap(True)
         self.note_label.setFont(_font(11))
@@ -959,6 +966,15 @@ class NamePanel(QWidget):
         self.message_label.setWordWrap(True)
         self.message_label.setFont(_font(11))
         self.message_label.setAccessibleName("Mask name problem")
+        # The line keeps its room (two lines) whether it says something or not: no jump.
+        self.message_label.setMinimumHeight(2 * _MESSAGE_LINE)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.problems_label = QLabel()
+        self.problems_label.setWordWrap(True)
+        self.problems_label.setFont(_font(11))
+        self.problems_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.problems_label.setAccessibleName("Names that clash with a value")
+        self.problems_label.hide()
         self.message_label.setTextFormat(Qt.TextFormat.PlainText)
         self.note_label.setTextFormat(Qt.TextFormat.PlainText)
         column = QVBoxLayout(self)
@@ -968,6 +984,7 @@ class NamePanel(QWidget):
         column.addWidget(self.name_field)
         column.addWidget(self.token_label)
         column.addWidget(self.message_label)
+        column.addWidget(self.problems_label)
         column.addWidget(self.note_label)
         self.name_field.textEdited.connect(self._edited)
         self.name_field.editingFinished.connect(self._finished)
@@ -981,14 +998,13 @@ class NamePanel(QWidget):
     def show_group(self, group: Group | None, stored: bool = False) -> None:
         """Show ``group`` (None: nothing is selected, or several groups are). A ``stored`` group
         belongs to an existing case and cannot be renamed: the field is off and a line says why.
-        The refusal being shown stays while the group is the same one, and goes with another.
+        The refusal being shown stays, whichever group is selected: it names the group it is
+        about and goes when the owner types again or a name is accepted.
         """
-        same = group is not None and group.id == self._group_id
         self._group_id = None if group is None else group.id
-        if not same:
-            self.clear_error()
+        self._shown = "" if group is None or group.label is None else group.label
         with QSignalBlocker(self.name_field):
-            self.name_field.setText("" if group is None or group.label is None else group.label)
+            self.name_field.setText(self._shown)
         self._default = "" if group is None else group.placeholder
         self.name_field.setPlaceholderText(self._default)
         self.name_field.setEnabled(group is not None and not stored)
@@ -1000,8 +1016,27 @@ class NamePanel(QWidget):
     def show_error(self, message: str) -> None:
         """Say why the name was refused, under the field."""
         self.message_label.setText(message)
-        self.message_label.setVisible(bool(message))
         self.name_field.setAccessibleDescription(message)
+
+    def show_problems(self, messages: list[str]) -> None:
+        """List the names that clash with a value (``ReviewState.label_problems``), or none."""
+        self.problems_label.setText("\n".join(messages))
+        self.problems_label.setVisible(bool(messages))
+
+    def current_text(self) -> str:
+        """What the field holds now, committed or not."""
+        return self.name_field.text()
+
+    def is_dirty(self) -> bool:
+        """Whether the owner has typed in the field since it showed the group's name."""
+        return self.name_field.text() != self._shown
+
+    def is_editable(self) -> bool:
+        return self._group_id is not None and self.name_field.isEnabled()
+
+    def commit_now(self) -> None:
+        """Send ``committed`` for the text in the field, as Return does."""
+        self._finished()
 
     def clear_error(self) -> None:
         self.show_error("")
@@ -1042,6 +1077,7 @@ class NamePanel(QWidget):
         for label in (self.token_label, self.note_label):
             label.setStyleSheet(f"color: {t.secondary};")
         self.message_label.setStyleSheet(f"color: {t.danger};")
+        self.problems_label.setStyleSheet(f"color: {t.danger};")
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
