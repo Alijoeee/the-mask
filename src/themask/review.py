@@ -40,7 +40,14 @@ from themask.detect.lists import (
     on_never_hide_list,
 )
 from themask.detect.sweep import Spans, existing_placeholders, is_searchable, occurrences, sweep
-from themask.labels import LabelError, check_label, find_labels, label_key
+from themask.labels import (
+    LabelError,
+    check_label,
+    clash_message,
+    clashes_with_values,
+    find_labels,
+    label_key,
+)
 from themask.model import (
     Analysis,
     Finding,
@@ -226,16 +233,12 @@ class ReviewState:
         value = value.strip()
         if not is_searchable(value):
             raise ValueError("Select at least two letters or digits to hide.")
-        if label is not None and label.strip():
-            self._check_label_before_hiding(value, type, label)
-        group = self._hide(value, type)
+        group = self._hiding(value, type, label, retype=True)
         if group is None:
             raise ValueError(
                 "The selected text is not in the document, runs over a line break, or is hidden"
                 " already."
             )
-        if label is not None and label.strip():
-            self.set_label(group.id, label)
         return group
 
     def add_always_hide(self, value: str, label: str | None = None) -> None:
@@ -243,20 +246,25 @@ class ReviewState:
         here: as ``TYPE:value`` writes it, else as CUSTOM. A plain value that a group has among
         its forms joins that group and keeps its type; only a ``TYPE:value`` entry re-types it
         (ruling R62). A value this document lacks is only added. Raises ValueError for a blank
-        value. With ``label`` the group it hides is named (ruling R127); a label that cannot be
-        used raises LabelError before anything is added.
+        value. With ``label`` the group it hides is named (ruling R127). Raises LabelError, and
+        changes nothing (the list neither), when the name cannot be used, when the value is too
+        short or not in this document so there is no group to name, or when the value would
+        clash with a name already given.
         """
         kind, text = always_hide_entry(value)
         retype = text != value.strip()
         named = label is not None and bool(label.strip())
-        if named and is_searchable(text):
-            self._check_label_before_hiding(text, kind, label or "", retype)
+        if named and not is_searchable(text):
+            raise LabelError("Select at least two letters or digits to hide and name.")
+        if named or is_searchable(text):
+            group = self._hiding(text, kind, label, retype=retype)
+            if named and group is None:
+                raise LabelError(
+                    "That text is not in this document (or is hidden already), so there is no"
+                    " group to give the name to. It was not added."
+                )
         self.user_lists.add_always(value)
         self.user_lists.save(lists_path())
-        if is_searchable(text):
-            group = self._hide(text, kind, retype=retype)
-            if group is not None and named:
-                self.set_label(group.id, label or "")
 
     def add_never_hide(self, value: str) -> None:
         """Add ``value`` to the owner's never-hide list, saved for every document, and stop
@@ -315,6 +323,15 @@ class ReviewState:
                 " cannot be given to it; remove the name before merging."
             )
         label = named[0].label if named else None
+        if label is not None and clashes_with_values(
+            label,
+            [f for g in groups for f in (g.canonical, *g.variants, *(x.text for x in g.findings))],
+        ):
+            raise ValueError(
+                f"The name {label} contains, or is part of, a value in the groups you are"
+                " merging, so the merged group would show part of it. Remove the name first, or"
+                " do not merge these groups."
+            )
         enabled = any(g.enabled for g in groups)
         occurrences_off = sorted(
             (
@@ -489,17 +506,86 @@ class ReviewState:
                 f"The document already contains [{text}] in square brackets. A restore could not"
                 " tell it from the name you chose; choose another name."
             )
-        needle = normalize(text)
         forms = [*own_forms, *(f for g in self.groups for f in (g.canonical, *g.variants))]
         forms += self._found_texts()
-        for form in forms:
-            shape = normalize(form)
-            if shape and (shape == needle or (len(shape) >= 4 and shape in needle)):
-                raise LabelError(
-                    f"{text} is, or contains, a value that is being hidden, so the masked file"
-                    " would still show it. Choose another name."
-                )
+        if clashes_with_values(text, forms):
+            raise LabelError(
+                f"{text} is, or contains a word of, a value that is being hidden, so the masked"
+                " file would still show part of it. Choose another name."
+            )
         return text
+
+    def _hiding(
+        self, value: str, kind: PlaceholderType, label: str | None, retype: bool
+    ) -> Group | None:
+        """Hide ``value`` as ``kind`` and name the group ``label`` (if given), all or nothing:
+        every check runs before the hide, and a failure after it puts the review back as it was.
+        """
+        named = label is not None and bool(label.strip())
+        self._check_value_against_names(value)
+        if named:
+            self._check_label_before_hiding(value, kind, label or "", retype)
+        before = self._snapshot()
+        group = self._hide(value, kind, retype=retype)
+        if group is not None and named:
+            try:
+                self.set_label(group.id, label)
+            except LabelError:
+                self._restore(before)
+                raise
+        return group
+
+    def _snapshot(self) -> list[tuple[Group, Group]]:
+        """Every group with a copy of its state, to put the review back (``_restore``)."""
+        return [
+            (
+                g,
+                replace(
+                    g, variants=set(g.variants), findings=list(g.findings), disabled=set(g.disabled)
+                ),
+            )
+            for g in self.groups
+        ]
+
+    def _restore(self, snapshot: list[tuple[Group, Group]]) -> None:
+        for group, state in snapshot:
+            group.__dict__.update(state.__dict__)
+        self.groups[:] = [group for group, _ in snapshot]
+
+    def _check_value_against_names(self, value: str) -> None:
+        """Raises LabelError if hiding ``value`` would put part of it inside a name already given
+        to a group: the masked file would show that part. Nothing is changed."""
+        for g in self.groups:
+            if g.label is not None and clashes_with_values(g.label, [value]):
+                kept = (
+                    " That name is in the case already and cannot change."
+                    if g.placeholder in self.reserved
+                    else " Remove or change the name first."
+                )
+                raise LabelError(
+                    f"That text contains, or is part of, the name {g.label} given to"
+                    f" {g.placeholder}, so the masked file would still show part of it.{kept}"
+                )
+
+    def label_problems(self) -> list[str]:
+        """Plain messages for every name that clashes with a value that will be masked (a group
+        that is on): what an export would refuse. Switching the other group off, or choosing
+        another name, clears the message; a name from the case's key cannot change, so for
+        it the other group must go. Empty when all is well.
+        """
+        masked = [g for g in self.groups if g.active_findings()]
+        messages = []
+        for g in masked:
+            if g.label is None:
+                continue
+            for other in masked:
+                forms = [other.canonical, *other.variants, *(f.text for f in other.findings)]
+                if clashes_with_values(g.label, forms):
+                    stored = g.placeholder in self.reserved_labels
+                    messages.append(
+                        clash_message(g.label, g.placeholder, other.placeholder, stored)
+                    )
+        return messages
 
     def _check_label_before_hiding(
         self, value: str, kind: PlaceholderType, label: str, retype: bool = True
@@ -525,6 +611,16 @@ class ReviewState:
         Without ``retype`` a group of another type that has the value keeps its type.
         """
         group = self._holding(value, kind)
+        if (
+            group is not None
+            and retype
+            and group.type is not kind
+            and group.placeholder in self.reserved_labels
+        ):
+            raise LabelError(
+                f"{group.placeholder} is in the case with the name {group.label}, so its type"
+                " cannot be changed."
+            )
         if group is None:
             group = Group(uuid.uuid4().hex, kind, value, {value}, [], self._next_placeholder(kind))
             self.groups.append(group)

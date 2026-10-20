@@ -185,16 +185,41 @@ def test_a_changed_form_waits_for_the_owner(form: str) -> None:
 
 @pytest.mark.parametrize(
     "text",
-    ["[Provider", "Provider]", "Provider", "[Providers]", "[the Provider]", "[Provider, Customer]",
-     "[Prov ider]", "(Provider)", "{Provider}", "[Provider](#x)y"],
-)  # fmt: skip
-def test_forms_that_are_not_the_name_are_left(text: str) -> None:
-    items = plan_restore(text, PROVIDER_CUSTOMER)
-    if text == "[Provider](#x)y":  # a markdown link: the bracketed name is found, as changed or not
-        assert [i.status for i in items] == ["exact"]
-        return
-    assert items == []
+    ["[Provider", "Provider]", "Provider", "(Provider)", "{Provider}", "[Customers"],
+)
+def test_bare_and_one_sided_forms_are_left(text: str) -> None:
+    assert plan_restore(text, PROVIDER_CUSTOMER) == []
     assert restore_text(text, PROVIDER_CUSTOMER, True)[0] == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["[Providers]", "[Provider\u2019s]", "[Provider.]", "[The Provider]", "[Provider\tGroup]",
+     "[Provider, Customer]", "[the Provider]", "\u3010Provider's\u3011", "[Provider group]",
+     "[Prov ider]"],
+)  # fmt: skip
+def test_a_changed_name_that_is_not_recognised_is_reported_never_replaced(text: str) -> None:
+    # I3: it used to be silent (these were pinned as "left"); now the report names it.
+    (item,) = plan_restore(text, PROVIDER_CUSTOMER)
+    assert item.status == "unknown" and item.entry is None
+    out, report = restore_text(text, PROVIDER_CUSTOMER, True)
+    assert out == text and report.restored == 0 and report.unknown == [text]
+
+
+@pytest.mark.parametrize("text", ["[Pro\u00advider]", "\u3010Provider\u3011", "[Provide\u0155]"])
+def test_invisible_and_accent_changes_are_recognised_as_changed(text: str) -> None:
+    (item,) = plan_restore(text, PROVIDER_CUSTOMER)
+    assert item.status == "altered"
+    assert restore_text(text, PROVIDER_CUSTOMER, False)[0] == text
+    assert restore_text(text, PROVIDER_CUSTOMER, True)[0] == "Northwind Trading B.V."
+
+
+def test_a_markdown_link_is_a_changed_form() -> None:
+    # M3: it used to be restored as exact, leaving "Northwind Trading B.V.(https://x.y)".
+    (item,) = plan_restore("[Provider](https://x.y)", PROVIDER_CUSTOMER)
+    assert item.status == "altered"
+    out, report = restore_text("[Provider](https://x.y)", PROVIDER_CUSTOMER, False)
+    assert out == "[Provider](https://x.y)" and len(report.needs_check) == 1
 
 
 def test_two_names_and_a_canonical_form_in_one_text() -> None:
@@ -619,3 +644,474 @@ def test_corpus_round_trip_with_names(
             assert secret["value"] in text, secret["value"]
     assert report.needs_check == []
     assert not re.search(r"\[(Seller Party|Signatory)\]", text)
+
+
+# ---- fix round: the review's findings ------------------------------------------------------------
+
+PARTS = (
+    "IBM Corp supplies goods to M\u00fcller GmbH and Northwind Trading B.V. Ahmet Y\u0131lmaz"
+    " signs; Jane Smith witnesses."
+)
+
+
+def parts_review(lists: UserLists) -> tuple[ReviewState, dict[str, Group]]:
+    groups = {
+        "ibm": group(COMPANY, "[COMPANY_1]", "IBM Corp", PARTS),
+        "mul": group(COMPANY, "[COMPANY_2]", "M\u00fcller GmbH", PARTS),
+        "nw": group(COMPANY, "[COMPANY_3]", "Northwind Trading B.V.", PARTS),
+        "ahmet": group(PERSON, "[PERSON_1]", "Ahmet Y\u0131lmaz", PARTS),
+        "jane": group(PERSON, "[PERSON_2]", "Jane Smith", PARTS),
+    }
+    return review_of(PARTS, lists, *groups.values()), groups
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["IBM Side", "IBM", "Muller Side", "Mueller Side", "M\u00fcller", "Ahmet", "Ahmet Taraf",
+     "AHMET", "Y\u0131lmaz", "Yilmaz Co", "Jane", "Trading", "Northwind", "Smith", "GmbH", "Corp"],
+)  # fmt: skip
+def test_c1_a_name_cannot_carry_part_of_a_hidden_value(lists: UserLists, name: str) -> None:
+    review, groups = parts_review(lists)
+    for key in ("ibm", "ahmet", "nw"):  # also on a group of another value
+        with pytest.raises(LabelError, match="value"):
+            review.set_label(groups[key].id, name)
+    assert all(g.label is None for g in groups.values())
+
+
+def test_c1_the_export_refuses_the_same_names_when_set_by_hand(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    sources = one_file(make_docx, PARTS)
+    for name in ("IBM Side", "Mueller Side", "Ahmet Taraf", "Trading"):
+        text = combined_text(sources).text
+        review = review_of(
+            text, lists,
+            group(COMPANY, "[COMPANY_1]", "IBM Corp", text),
+            group(COMPANY, "[COMPANY_2]", "M\u00fcller GmbH", text),
+            group(PERSON, "[PERSON_1]", "Ahmet Y\u0131lmaz", text),
+            group(COMPANY, "[COMPANY_3]", "Northwind Trading B.V.", text),
+        )  # fmt: skip
+        review.groups[0].label = name
+        with pytest.raises(ValueError, match="value"):
+            export(sources, review, tmp_path / "x", engine, lists)
+    assert not (tmp_path / "x").exists()
+
+
+TURKISH = named_case("Kirac\u0131", "\u0130\u015fveren")
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["[KIRACI]", "[K\u0130RACI]", "[kirac\u0131]", "[Kiraci]", "[KIRAC\u0130]", "**[Kiraci]**"],
+)
+def test_i1_turkish_case_forms_are_changed_forms_never_silent(form: str) -> None:
+    (item,) = plan_restore(form, TURKISH)
+    assert item.status == "altered" and item.entry is TURKISH.entries[0]
+    out, report = restore_text(form, TURKISH, False)
+    assert out == form and len(report.needs_check) == 1  # asked, not silent
+    assert restore_text(form, TURKISH, True)[0] == "Northwind Trading B.V."
+
+
+@pytest.mark.parametrize(
+    "form", ["[i\u015fveren]", "[ISVEREN]", "[\u0130\u015eVEREN]", "[Isveren]"]
+)
+def test_i1_the_second_turkish_name(form: str) -> None:
+    (item,) = plan_restore(form, TURKISH)
+    assert item.status == "altered" and item.entry is TURKISH.entries[1]
+
+
+def test_i1_the_stored_name_itself_is_exact() -> None:
+    (item,) = plan_restore("[Kirac\u0131]", TURKISH)
+    assert item.status == "exact"
+
+
+def test_i1_and_i4_look_alike_names_are_one_name(lists: UserLists) -> None:
+    review, groups = parts_review(lists)
+    review.set_label(groups["ibm"].id, "Provider")
+    for twin in ("Provid\u00e9r", "PROVIDER", "Provider\u00ad"):
+        with pytest.raises(LabelError):
+            review.set_label(groups["mul"].id, twin)
+    review.set_label(groups["mul"].id, "Kiracı")
+    for twin in ("Kiraci", "KIRACI", "K\u0130RACI"):
+        with pytest.raises(LabelError, match="already used"):
+            review.set_label(groups["nw"].id, twin)
+    review.set_label(groups["nw"].id, "Isveren")
+    with pytest.raises(LabelError, match="already used"):
+        review.set_label(groups["ahmet"].id, "\u0130sveren")
+
+
+@pytest.mark.parametrize("name", ["\u0420rovider", "Pr\u043evider", "\u0391lpha"])
+def test_i4_mixed_script_names_are_refused(name: str) -> None:
+    with pytest.raises(LabelError, match="alphabets"):
+        clean_label(name)
+
+
+def test_i4_a_whole_cyrillic_look_alike_is_the_same_name(lists: UserLists) -> None:
+    review, groups = parts_review(lists)
+    review.set_label(groups["ibm"].id, "Cope")
+    with pytest.raises(LabelError, match="already used"):
+        review.set_label(groups["mul"].id, "\u0421\u043e\u0440\u0435")  # Cyrillic C o p e
+
+
+def test_stored_cases_with_look_alike_names_are_unreadable() -> None:
+    data = json.loads(named_case("Kiracı", None).to_json())
+    data["entries"][1]["label"] = "KIRACI"
+    with pytest.raises(ValueError, match="Not a stored case"):
+        Case.from_json(json.dumps(data))
+
+
+def tracked_para(*parts: str) -> str:
+    return "<w:p>" + "".join(parts) + "</w:p>"
+
+
+def t_run(text: str) -> str:
+    return f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+
+
+def ins(text: str) -> str:
+    return f'<w:ins w:id="9" w:author="AI" w:date="2026-10-17T09:00:00Z">{t_run(text)}</w:ins>'
+
+
+def dele(text: str) -> str:
+    inner = f'<w:r><w:delText xml:space="preserve">{escape(text)}</w:delText></w:r>'
+    return f'<w:del w:id="8" w:author="AI" w:date="2026-10-17T09:00:00Z">{inner}</w:del>'
+
+
+@pytest.mark.parametrize(
+    "paragraph",
+    [
+        tracked_para(t_run("Pay [Provider"), ins(" Group"), t_run("] now.")),
+        tracked_para(t_run("Pay [Provider"), dele("s"), t_run("] now.")),
+        tracked_para(t_run("Pay [Provider"), ins("s"), t_run("] now.")),
+        tracked_para(t_run("Pay "), dele("[Supplier]"), ins("[Provider]"), t_run(" now.")),
+        tracked_para(t_run("Pay "), dele("[Provider]"), ins("[Supplier]"), t_run(" now.")),
+        tracked_para(t_run("Pay [Provider]"), ins("(x)"), t_run(" now.")),
+    ],
+)
+def test_i2_a_tracked_change_inside_a_name_waits_for_the_owner(
+    make_docx: MakeDocx, tmp_path: Path, paragraph: str
+) -> None:
+    path = make_docx(paragraph)
+    out, report = restore_docx(path, PROVIDER_CUSTOMER, True, tmp_path / "o")
+    # the owner confirming changed forms does not release a name a change runs through
+    accepted = extract_text(DocxPackage.open(out)).text
+    assert "Northwind" not in accepted or "(x)" in accepted
+    if "(x)" not in accepted:
+        assert report.restored == 0 and len(report.needs_check) == 1
+        assert report.needs_check[0].reason == "changed inside a tracked change"
+
+
+def test_i2_a_plain_name_in_a_tracked_insertion_is_still_restored(
+    make_docx: MakeDocx, tmp_path: Path
+) -> None:
+    path = make_docx(tracked_para(t_run("Pay "), ins("[Provider]"), t_run(" now.")))
+    out, report = restore_docx(path, PROVIDER_CUSTOMER, False, tmp_path / "o")
+    assert report.restored == 1
+    assert "Pay Northwind Trading B.V. now." in extract_text(DocxPackage.open(out)).text
+
+
+def test_m1_retyping_a_stored_named_group_is_refused(lists: UserLists) -> None:
+    text = "Northwind Trading B.V. signs."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    review = review_of(
+        text, lists, a, reserved=["[COMPANY_1]"], reserved_labels={"[COMPANY_1]": "Provider"}
+    )
+    with pytest.raises(LabelError, match="cannot be changed"):
+        review.hide_text("Northwind Trading B.V.", PlaceholderType.CUSTOM)
+    assert a.type is COMPANY and a.placeholder == "[COMPANY_1]" and a.label == "Provider"
+
+
+def test_m2_naming_a_value_that_is_not_there_is_refused(lists: UserLists) -> None:
+    review, _ = parts_review(lists)
+    n = len(review.groups)
+    with pytest.raises(LabelError, match="not in this document"):
+        review.add_always_hide("Absent Holdings", label="Seller")
+    with pytest.raises(LabelError, match="at least two"):
+        review.add_always_hide("x", label="Seller")
+    assert len(review.groups) == n and "Absent Holdings" not in lists.always_hide
+    review.add_always_hide("Absent Holdings")  # without a name it is only added, as before
+    assert "Absent Holdings" in lists.always_hide
+
+
+# ---- fix round 2 ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["IBMSide", "AhmetTaraf", "Y\u0131lmazlar", "M\u00fcllerSeite", "MuellerSeite", "NorthwindCo",
+     "Northwinds", "Smiths", "JaneS", "TradingCo", "Ibmco", "Ahmets", "XIBMX", "SideIBM"],
+)  # fmt: skip
+def test_a_a_value_word_inside_a_name_is_refused(lists: UserLists, name: str) -> None:
+    review, groups = parts_review(lists)
+    for key in ("ibm", "ahmet"):
+        with pytest.raises(LabelError, match="value"):
+            review.set_label(groups[key].id, name)
+
+
+def test_a_the_export_refuses_the_same_names_with_a_plain_message(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.errors import MaskError
+    from themask.labels import LabelClashError
+
+    sources = one_file(make_docx, PARTS)
+    for name in ("IBMSide", "AhmetTaraf", "MuellerSeite", "Northwinds"):
+        text = combined_text(sources).text
+        review = review_of(
+            text, lists,
+            group(COMPANY, "[COMPANY_1]", "IBM Corp", text),
+            group(COMPANY, "[COMPANY_2]", "M\u00fcller GmbH", text),
+            group(PERSON, "[PERSON_1]", "Ahmet Y\u0131lmaz", text),
+            group(COMPANY, "[COMPANY_3]", "Northwind Trading B.V.", text),
+        )  # fmt: skip
+        review.groups[0].label = name
+        with pytest.raises(LabelClashError) as caught:
+            export(sources, review, tmp_path / "x", engine, lists)
+        assert isinstance(caught.value, MaskError) and isinstance(caught.value, ValueError)
+        assert name in caught.value.user_message and "Corp" not in caught.value.user_message
+
+
+@pytest.mark.parametrize(
+    ("name", "values"),
+    [("Party 1", ["1 January 2024"]), ("Seller A", ["Demir A.\u015e."]),
+     ("The Buyer", ["The Coca-Cola Company"]), ("Seller B", ["Demir A.\u015e.", "B2B GmbH"]),
+     ("Party 12", ["12 pm"]), ("Provider", ["Thamesgate Catering plc"])],
+)  # fmt: skip
+def test_d_ordinary_names_stay_usable(name: str, values: list[str]) -> None:
+    from themask.labels import clashes_with_values
+
+    assert not clashes_with_values(name, values)
+
+
+@pytest.mark.parametrize(
+    ("name", "values"),
+    [("Party 2024", ["1 January 2024"]), ("Coca", ["The Coca-Cola Company"]),
+     ("Cola Side", ["The Coca-Cola Company"]), ("Party 123", ["Flat 123"])],
+)  # fmt: skip
+def test_d_identifying_words_still_clash(name: str, values: list[str]) -> None:
+    from themask.labels import clashes_with_values
+
+    assert clashes_with_values(name, values)
+
+
+def test_c_umlaut_spellings_are_one_name(lists: UserLists) -> None:
+    review, groups = parts_review(lists)
+    review.set_label(groups["nw"].id, "Z\u00e4hler")
+    for twin in ("Zaehler", "Zahler", "ZAEHLER"):
+        with pytest.raises(LabelError, match="already used"):
+            review.set_label(groups["jane"].id, twin)
+
+
+def test_c_a_token_matching_a_name_only_by_umlaut_is_changed_not_exact() -> None:
+    case = named_case("M\u00fcller", None)
+    for token in ("[Mueller]", "[Muller]", "[M\u00dcLLER]"):
+        (item,) = plan_restore(token, case)
+        assert item.status == "altered" and item.entry is case.entries[0], token
+        assert restore_text(token, case, False)[0] == token  # waits for the owner
+    (item,) = plan_restore("[M\u00fcller]", case)
+    assert item.status == "exact"
+
+
+def test_c_stored_names_with_umlaut_twins_are_unreadable() -> None:
+    data = json.loads(named_case("M\u00fcller", None).to_json())
+    data["entries"][1]["label"] = "Mueller"
+    with pytest.raises(ValueError, match="Not a stored case"):
+        Case.from_json(json.dumps(data))
+
+
+def test_e_a_name_inside_another_name_is_refused(lists: UserLists) -> None:
+    review, groups = parts_review(lists)
+    review.set_label(groups["ibm"].id, "Provider")
+    with pytest.raises(LabelError, match="part of"):
+        review.set_label(groups["mul"].id, "Provider Group")
+    review.set_label(groups["mul"].id, "Data Customer")
+    with pytest.raises(LabelError, match="part of"):
+        review.set_label(groups["nw"].id, "Customer")
+
+
+def test_f_a_failed_name_leaves_the_review_as_it_was(lists: UserLists) -> None:
+    text = SUPPLY + " Project Falcon starts."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    review = review_of(text, lists, a)
+    # a name that clashes with a value being hidden
+    before = ([g.id for g in review.groups], [list(g.findings) for g in review.groups])
+    for bad in ("Falcon", "ProjectFalcon", "Northwind Side"):
+        with pytest.raises(LabelError):
+            review.hide_text("Project Falcon", PlaceholderType.CUSTOM, label=bad)
+        with pytest.raises(LabelError):
+            review.add_always_hide("Project Falcon", label=bad)
+    assert ([g.id for g in review.groups], [list(g.findings) for g in review.groups]) == before
+    assert "Project Falcon" not in lists.always_hide
+
+
+def test_f_a_failure_after_the_hide_is_rolled_back(
+    lists: UserLists, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = SUPPLY + " Project Falcon starts."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    review = review_of(text, lists, a)
+
+    def refuse(self: ReviewState, group_id: str, label: str | None) -> str | None:
+        raise LabelError("late failure")
+
+    monkeypatch.setattr(ReviewState, "set_label", refuse)
+    with pytest.raises(LabelError, match="late"):
+        review.hide_text("Project Falcon", PlaceholderType.CUSTOM, label="Codename")
+    assert [g.canonical for g in review.groups] == ["Northwind Trading B.V."]
+
+
+def test_b_ii_hiding_a_value_that_holds_an_existing_name_is_refused(lists: UserLists) -> None:
+    text = "IBM Corp and Provider Side Ltd sign."
+    a = group(COMPANY, "[COMPANY_1]", "IBM Corp", text)
+    review = review_of(text, lists, a)
+    review.set_label(a.id, "Side")
+    with pytest.raises(LabelError, match="the name Side"):
+        review.hide_text("Provider Side Ltd", COMPANY)
+    with pytest.raises(LabelError, match="the name Side"):
+        review.add_always_hide("Provider Side Ltd")
+    assert len(review.groups) == 1 and "Provider Side Ltd" not in lists.always_hide
+    a.label = None
+    review.hide_text("Provider Side Ltd", COMPANY)  # fine once the name is gone
+
+
+def test_b_i_a_stored_name_clashing_with_a_new_value_has_a_way_out(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.errors import MaskError
+
+    stored = named_case("Provider", None)
+    text2 = "Northwind Trading B.V. buys from Provider Holdings Ltd."
+    sources = one_file(make_docx, text2)
+    t = combined_text(sources).text
+    old = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", t)
+    new = group(COMPANY, "[COMPANY_3]", "Provider Holdings Ltd", t)
+    review = review_of(
+        t, lists, old, new,
+        reserved=[e.placeholder for e in stored.entries],
+        reserved_labels={"[COMPANY_1]": "Provider"},
+    )  # fmt: skip
+    (problem,) = review.label_problems()
+    assert "[COMPANY_3]" in problem and "cannot change" in problem and "Switch off" in problem
+    assert "Holdings" not in problem  # names and placeholders only, never a value
+    with pytest.raises(MaskError, match="Switch off"):
+        export(sources, review, tmp_path / "o", engine, lists, existing_case=stored)
+    review.set_group_enabled(new.id, False)  # the way out
+    assert review.label_problems() == []
+    res = export(sources, review, tmp_path / "o2", engine, lists, existing_case=stored)
+    assert not res.blocked and res.case is not None
+
+
+def test_b_the_export_worker_shows_the_plain_message(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.ui.export_dialog import UNEXPECTED_MESSAGE, ExportWorker
+
+    sources = one_file(make_docx, PARTS)
+    text = combined_text(sources).text
+    review = review_of(text, lists, group(COMPANY, "[COMPANY_1]", "IBM Corp", text))
+    review.groups[0].label = "IBMSide"
+    worker = ExportWorker(
+        sources, review, ExportOptions(tmp_path / "w"), engine, lists, lambda c: None
+    )
+    failures: list[str] = []
+    worker.failed.connect(failures.append)
+    worker.run()
+    assert len(failures) == 1 and failures[0] != UNEXPECTED_MESSAGE and "IBMSide" in failures[0]
+
+
+def test_g_lookalike_letters_fold_to_latin() -> None:
+    from themask.labels import label_key
+
+    assert label_key("\u0432") == label_key("b") and label_key("\u03b2") == "b"
+    assert label_key("\u03b7\u03bc") == "nu"
+
+
+# ---- fix round 3 ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("BPSide", "BP plc"), ("HPTeam", "HP Inc"), ("3MCo", "3M Company"), ("SideBP", "BP plc"),
+     ("SideBPTeam", "BP plc"), ("Tel12345678", "+49 30 12345678"),
+     ("Acct 37040044", "DE89 3704 0044 0532 0130 00"), ("VAT123456789", "NL123456789B01"),
+     ("Fee1250000", "EUR 1250000"), ("Side 1250000", "EUR 1,250,000")],
+)  # fmt: skip
+def test_n1_short_values_and_digit_runs_cannot_ride_in_a_name(name: str, value: str) -> None:
+    from themask.labels import clashes_with_values
+
+    assert clashes_with_values(name, [value])
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("Party 12", "12 pm"), ("Party 1", "1 January 2024"), ("Seller B", "B2B GmbH"),
+     ("Provider", "Thamesgate Catering plc"), ("Fee 125", "EUR 1250000")],
+)  # fmt: skip
+def test_n1_ordinary_names_stay_usable(name: str, value: str) -> None:
+    from themask.labels import clashes_with_values
+
+    assert not clashes_with_values(name, [value])
+
+
+def test_n1_the_review_and_the_export_refuse_them(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.labels import LabelClashError
+
+    text = "BP plc owes EUR 1,250,000 to HP Inc."
+    a = group(COMPANY, "[COMPANY_1]", "BP plc", text)
+    b = group(PlaceholderType.AMOUNT, "[AMOUNT_1]", "EUR 1,250,000", text)
+    review = review_of(text, lists, a, b)
+    for name in ("BPSide", "Side 1250000"):
+        with pytest.raises(LabelError):
+            review.set_label(a.id, name)
+    sources = one_file(make_docx, text)
+    for name in ("BPSide", "Fee1250000"):
+        review = review_of(
+            combined_text(sources).text, lists,
+            group(COMPANY, "[COMPANY_1]", "BP plc", text),
+            group(PlaceholderType.AMOUNT, "[AMOUNT_1]", "EUR 1,250,000", text),
+        )  # fmt: skip
+        review.groups[0].label = name
+        with pytest.raises(LabelClashError):
+            export(sources, review, tmp_path / "x", engine, lists)
+
+
+def test_m1_merging_into_a_name_that_clashes_is_refused(lists: UserLists) -> None:
+    text = "Northwind Trading B.V. and Provider Holdings Ltd and Provider."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    b = group(COMPANY, "[COMPANY_2]", "Provider Holdings Ltd", text)
+    review = review_of(
+        text, lists, a, b, reserved=["[COMPANY_1]"], reserved_labels={"[COMPANY_1]": "Provider"}
+    )
+    with pytest.raises(ValueError, match="merging"):
+        review.merge([a.id, b.id])
+    assert [g.placeholder for g in review.groups] == ["[COMPANY_1]", "[COMPANY_2]"]
+    assert a.label == "Provider" and b.canonical == "Provider Holdings Ltd"
+
+
+def test_m2_a_failure_after_a_retype_puts_the_group_back(
+    lists: UserLists, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = "Northwind Trading B.V. signs; Northwind again."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    a.variants.add("Northwind")
+    review = review_of(text, lists, a)
+    state = (a.type, a.placeholder, a.canonical, set(a.variants), list(a.findings), a.enabled)
+
+    def refuse(self: ReviewState, group_id: str, label: str | None) -> str | None:
+        raise LabelError("late failure")
+
+    monkeypatch.setattr(ReviewState, "set_label", refuse)
+    with pytest.raises(LabelError, match="late"):
+        review.hide_text("Northwind Trading B.V.", PlaceholderType.CUSTOM, label="Codename")
+    assert review.groups == [a]
+    assert (
+        a.type,
+        a.placeholder,
+        a.canonical,
+        set(a.variants),
+        list(a.findings),
+        a.enabled,
+    ) == state
+    assert {f.type for f in a.findings} == {COMPANY}
