@@ -225,7 +225,7 @@ _REFERENCE = re.compile(
 _PAGE_FIELD = r"(?:NUM|SECTION)?PAGES?\d*|PAGEREF\w*"
 _PAGE_NUMBER = rf"(?:\d{{1,4}}|[IVXLC]{{1,7}}|[ivxlc]{{1,7}}|[A-Za-z]|{_PAGE_FIELD})"
 _PAGE_LABEL = re.compile(
-    rf"(?i:(?:pages?|seiten?|pagina'?s?|p[aá]ginas?|bladzijden?|blz|pág|p)\.?[ \N{{NO-BREAK SPACE}}]+)"
+    rf"(?i:(?:pages?|seiten?|pagina'?s?|p[aá]ginas?|bladzijden?|blz|pág)\.?[ \N{{NO-BREAK SPACE}}]+)"
     rf"{_PAGE_NUMBER}(?:[ \N{{NO-BREAK SPACE}}]+(?i:of|von|van|de|sur|di|din|av|af)"
     rf"[ \N{{NO-BREAK SPACE}}]+{_PAGE_NUMBER})?"
     rf"|(?:{_PAGE_FIELD})(?:[ \N{{NO-BREAK SPACE}}]+(?i:of|von|van|de|sur)"
