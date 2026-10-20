@@ -316,3 +316,23 @@ def test_a_blank_value_cannot_be_added(value):
         lists.add_always(value)
     with pytest.raises(ValueError):
         lists.add_never(value.replace("COMPANY:", ""))
+
+
+# --- Page labels and references (Task D4) ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Page PAGE1", "page 1", "Page 1 of 3", "PAGE1", "NUMPAGES", "Page PAGE of NUMPAGES",
+        "Seite 2 von 5", "Seite PAGE2", "Pagina 3", "Pagina 3 van 7", "Bladzijde 4", "Página 2",
+        "- Page 4 -", "Figure 2", "Annexure B", "Table 1", "Exhibit A", "Clause 4.1",
+    ],
+)  # fmt: skip
+def test_page_labels_and_references_are_never_hide_terms(label):
+    assert is_never_hide(label, NO_LISTS, NO_CASE)
+
+
+@pytest.mark.parametrize("name", ["Page Smith", "Pagina Jones", "Seiten Holdings", "Page Turner"])
+def test_a_name_that_starts_with_a_page_word_is_not_a_term(name):
+    assert not is_never_hide(name, NO_LISTS, NO_CASE)

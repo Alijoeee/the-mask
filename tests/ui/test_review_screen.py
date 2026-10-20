@@ -934,6 +934,14 @@ def test_the_title_is_the_file_and_the_summary_of_the_mockup(qtbot: QtBot) -> No
     assert s.title() == ("a.docx", "Review · 8 values found · 2 to check")
 
 
+def test_the_title_counts_the_groups_the_owner_is_asked_about(qtbot: QtBot) -> None:
+    s, st = screen_of(qtbot, CONTRACT, FAMILY_SPECS)
+    g = group_named(st, "Project Falcon")
+    g.enabled, g.needs_check = False, True
+    s.load(st, s.combined if hasattr(s, "combined") else custom_review(CONTRACT, FAMILY_SPECS)[0])
+    assert s.title()[1] == "Review · 8 values found · 3 to check"
+
+
 def test_the_title_of_one_value_and_of_a_review_that_is_not_loaded_yet(qtbot: QtBot) -> None:
     s, _ = screen_of(qtbot, CONTRACT, FAMILY_SPECS[:1])
     assert s.title()[1] == "Review · 1 value found · 0 to check"
@@ -963,13 +971,13 @@ def test_the_title_names_the_file_or_the_files(qtbot: QtBot, names: list[str], t
 def test_the_window_is_told_when_the_title_changes_and_only_then(qtbot: QtBot) -> None:
     s, st = screen_of(qtbot, CONTRACT, FAMILY_SPECS)
     fatma, acme = group_named(st, "Ms Fatma Yildiz"), group_named(st, "Acme Supplies Ltd")
-    # Switching off a group to check changes "2 to check"; one the analysis was sure of does not.
+    # Switching off a group the analysis was sure of changes nothing; one to check moves into the
+    # "Not sure" section, where it is still a question, so "2 to check" stays (review fix M1).
     with qtbot.assertNotEmitted(s.titleChanged):
         s.tree_item_for(acme.id).setCheckState(0, Qt.CheckState.Unchecked)
-    with qtbot.waitSignal(s.titleChanged) as changed:
+    with qtbot.assertNotEmitted(s.titleChanged):
         s.row_for(fatma.id).switch.click()
-    assert changed.args == ["a.docx", "Review · 8 values found · 1 to check"]
-    assert s.title() == tuple(changed.args)
+    assert s.title() == ("a.docx", "Review · 8 values found · 2 to check")
     with qtbot.waitSignal(s.titleChanged) as loaded:
         combined, other = custom_review(
             "Zed Ltd signs.", [{"kind": COMPANY, "canonical": "Zed Ltd"}]

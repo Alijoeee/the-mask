@@ -373,7 +373,8 @@ class ReviewScreen(QWidget):
         """
         counts = self.review.counts()
         found = _count(counts.groups, "value")
-        return self._file_title(), f"Review · {found} found · {counts.needs_check} to check"
+        asked = sum(asks_about(g, self._answered) for g in self.review.groups)
+        return self._file_title(), f"Review · {found} found · {counts.needs_check + asked} to check"
 
     def group_count(self) -> int:
         """How many groups the review has."""

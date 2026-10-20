@@ -274,4 +274,5 @@ def test_the_review_of_supply_08_with_its_checks_and_a_question_is_drawn_too(
     assert picture.save(str(shots / f"review-{appearance}-checks.png"))
     assert screen.section_titles()[0] == "NOT SURE — HIDE? · 1"
     assert screen.row_for(kraft.id).data.caption.endswith("found by the model only")
-    assert screen.title()[1] == "Review · 43 values found · 2 to check"
+    # the question about Kraft counts as one to check (review fix M1)
+    assert screen.title()[1] == "Review · 43 values found · 3 to check"

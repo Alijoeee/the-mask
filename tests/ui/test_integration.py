@@ -64,9 +64,9 @@ def test_flipping_a_switch_in_the_review_changes_the_caption_of_the_tool_bar(
     assert before == window.review_screen.title()[1]
     window.review_screen.row_for(fatma.id).switch.click()
     after = window.title_block.caption_label.text()
-    assert after != before
-    assert after == window.review_screen.title()[1]
-    assert after.endswith(f"{state.counts().needs_check} to check")
+    # the group to check moves into "Not sure", where it is still a question: the count stays
+    assert after == before == window.review_screen.title()[1]
+    assert after.endswith("2 to check")
     assert window.title_block.title_label.text() == "supply-01.docx"
 
 
