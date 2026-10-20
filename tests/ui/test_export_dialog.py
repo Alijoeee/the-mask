@@ -17,6 +17,7 @@ import errno
 import logging
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1045,3 +1046,49 @@ def test_the_sheet_follows_the_system_from_light_to_dark(
         qapp.setPalette(palette)
         qapp.setStyleSheet(sheet)
         qapp.setFont(font)
+
+
+# ---- the instruction of a case with owner-chosen names (ruling R127) -----------------------------
+
+
+def test_the_dialog_shows_and_copies_the_instruction_of_the_result(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from themask.instruction import AI_INSTRUCTION_NAMED
+
+    named = replace(saved(tmp_path), instruction=AI_INSTRUCTION_NAMED)
+    d = run_dialog(qtbot, app_ctx, tmp_path, monkeypatch, lambda *a: named)
+    assert d.instruction_label.text() == AI_INSTRUCTION_NAMED != AI_INSTRUCTION
+    qtbot.mouseClick(d.copy_button, Qt.MouseButton.LeftButton)
+    assert QApplication.clipboard().text() == AI_INSTRUCTION_NAMED
+
+
+def test_without_names_the_dialog_copies_the_plain_instruction(
+    qtbot: QtBot,
+    app_ctx: AppContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d = run_dialog(qtbot, app_ctx, tmp_path, monkeypatch, lambda *a: saved(tmp_path))
+    assert d.instruction_label.text() == AI_INSTRUCTION
+    qtbot.mouseClick(d.copy_button, Qt.MouseButton.LeftButton)
+    assert QApplication.clipboard().text() == AI_INSTRUCTION
+
+
+def test_a_real_export_of_a_named_review_copies_the_named_instruction(
+    qtbot: QtBot, app_ctx: AppContext, corpus: Path, tmp_path: Path
+) -> None:
+    from themask.instruction import AI_INSTRUCTION_NAMED
+
+    srcs, review = analysed(app_ctx, [corpus / "supply-01.docx"])
+    review.set_label(review.groups[0].id, "Provider")
+    d = ExportDialog()
+    qtbot.addWidget(d)
+    with qtbot.waitSignal(d.finishedExport, timeout=EXPORT_TIMEOUT):
+        d.run(srcs, review, ExportOptions(tmp_path), app_ctx)
+    assert d.result is not None and not d.result.blocked
+    qtbot.mouseClick(d.copy_button, Qt.MouseButton.LeftButton)
+    assert QApplication.clipboard().text() == AI_INSTRUCTION_NAMED

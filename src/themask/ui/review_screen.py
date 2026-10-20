@@ -67,10 +67,12 @@ from PySide6.QtWidgets import (
 from themask.about import APP_NAME
 from themask.detect.lists import CaseLists, UserLists, on_never_hide_list
 from themask.detect.pipeline import CombinedText
+from themask.labels import LabelError
 from themask.model import Finding, Group, PlaceholderType
 from themask.review import ReviewState
 from themask.ui.review_inspector import (
     CHECK_TIP,
+    NAME_STORED,
     FooterCounts,
     GroupRow,
     Inspector,
@@ -288,6 +290,7 @@ class ReviewScreen(QWidget):
         self.tree = self.inspector.tree
         self.find_field = self.inspector.find_field
         self.hide_button = self.inspector.hide_button
+        self.hide_name_field = self.inspector.hide_name_field
         self.never_button = self.inspector.never_button
         self.counts_label = self.inspector.counts_label
         self.hint_label = self.inspector.hint_label
@@ -307,6 +310,10 @@ class ReviewScreen(QWidget):
             "Show always",
             "Leave the value of the selected group visible in every document from now on.",
             lambda: self._never_hide(from_text=False),
+        )
+        self._rename_tip = "Choose the name the masked file writes for the selected group."
+        self.rename_action = self._action(
+            "Rename mask…", self._rename_tip, self._rename
         )
         self.split_action = self._action(
             "Split", "Move the selected places into a group of their own.", self._split
@@ -333,6 +340,8 @@ class ReviewScreen(QWidget):
         self.tree.focusChanged.connect(self._mark_rows)
         self.tree.toggleRequested.connect(self._toggle_item)
         self.tree.menuRequested.connect(self._open_menu)
+        self.tree.itemDoubleClicked.connect(self._double_clicked)
+        self.inspector.name_panel.committed.connect(self._name_committed)
         self.find_field.textChanged.connect(self._find_typed)
         self.find_field.returnPressed.connect(self.find_next)
         self.text.selectionChanged.connect(self._refresh_buttons)
@@ -395,30 +404,49 @@ class ReviewScreen(QWidget):
         rows = (self._rows[g] for g in self._items)
         return [row.heading for row in rows if row.heading is not None]
 
-    def hide_selection(self, type: PlaceholderType) -> None:
+    def hide_selection(self, type: PlaceholderType, label: str | None = None) -> None:
         """Hide the text selected in the pane as ``type``, wherever it stands.
 
-        What the owner cannot hide (nothing selected, a selection that takes in two files or a
-        file name, text the review refuses) is explained in a notice and nothing changes.
+        With ``label`` (else what the "Name it" field holds) the new group is named at once. What
+        the owner cannot hide (nothing selected, a selection that takes in two files or a file
+        name, text the review refuses) is explained in a notice and nothing changes; a name that
+        is refused is explained under the "Name it" field, and nothing is hidden either.
         """
+        if label is None:
+            label = self.hide_name_field.text()
         cursor = self.text.textCursor()
         if not cursor.hasSelection():
             show_notice(self, NOTHING_SELECTED)
             return
         try:
             start, end = self._map.selection(cursor.selectionStart(), cursor.selectionEnd())
-            group = self.review.hide_text(self.review.text[start:end], type)
+            group = self.review.hide_text(self.review.text[start:end], type, label or None)
+        except LabelError as error:
+            self.inspector.show_hide_error(str(error))
+            return
         except ValueError as error:
             show_notice(self, str(error))
             return
+        self.hide_name_field.clear()
+        self.inspector.show_hide_error("")
         cursor.clearSelection()  # so that the colour of the new find shows
         self.text.setTextCursor(cursor)
         self._rebuild(select=group.id, scroll=False)
 
     def tooltip_at(self, point: QPoint) -> str:
-        """The tooltip for ``point`` of the pane: "check" over a find to check, else nothing."""
+        """The tooltip for ``point`` of the pane: over a find of a group the owner named, what will
+        be written for it; over a find to check, "check"; else nothing.
+        """
         highlight = self._highlight_at(point)
-        return CHECK_TIP if highlight is not None and highlight.needs_check else ""
+        if highlight is None:
+            return ""
+        lines = []
+        group = self._group(highlight.group_id)
+        if group.label is not None:
+            lines.append(f"Written as {group.token}")
+        if highlight.needs_check:
+            lines.append(CHECK_TIP)
+        return "\n".join(lines)
 
     def focus_find(self) -> None:
         """Put the keyboard in the find field (⌘F), with what it holds selected."""
@@ -711,6 +739,7 @@ class ReviewScreen(QWidget):
             finally:
                 self._from_text = False
         self._mark_rows()
+        self._refresh_name()
 
     def _make_group(
         self, group: Group, section: Section, first: bool, leading: bool, width: int
@@ -912,6 +941,7 @@ class ReviewScreen(QWidget):
             self._refresh_highlights()
         self._refresh_buttons()
         self._mark_rows()
+        self._refresh_name()
         items = self.tree.selectedItems()
         if len(items) == 1 and not self._from_text:
             group_id = cast("str", items[0].data(0, GROUP_ROLE))
@@ -931,6 +961,9 @@ class ReviewScreen(QWidget):
             splittable = group is not None and 0 < len(found) < len(group.findings)
         self.split_action.setEnabled(splittable)
         group = self._selected_group()
+        stored = group is not None and group.placeholder in self.review.reserved
+        self.rename_action.setEnabled(group is not None and not stored)
+        self.rename_action.setToolTip(NAME_STORED if stored else self._rename_tip)
         self.always_action.setEnabled(group is not None)
         self.never_action.setEnabled(group is not None)
         self.never_button.setEnabled(group is not None or has_text)
@@ -1015,6 +1048,8 @@ class ReviewScreen(QWidget):
         """
         self._refresh_buttons()
         menu = QMenu(self.tree)
+        menu.addAction(self.rename_action)
+        menu.addSeparator()
         menu.addAction(self.always_action)
         menu.addAction(self.never_action)
         menu.addSeparator()
@@ -1037,7 +1072,7 @@ class ReviewScreen(QWidget):
             for other in self.review.groups:
                 if other.id != group.id and other.type is group.type:
                     found = True
-                    action = menu.addAction(f"{collapse(other.canonical)}  {other.placeholder}")
+                    action = menu.addAction(f"{collapse(other.canonical)}  {other.token}")
                     action.triggered.connect(
                         lambda checked=False, ids=(group.id, other.id): self._merge_groups(
                             list(ids)
@@ -1045,6 +1080,49 @@ class ReviewScreen(QWidget):
                     )
         menu.menuAction().setEnabled(found)
         return menu
+
+    def _refresh_name(self) -> None:
+        """Show the "Mask name" block for the one group the list has selected, else for none."""
+        group = self._selected_group()
+        stored = group is not None and group.placeholder in self.review.reserved
+        self.inspector.name_panel.show_group(group, stored)
+
+    def _rename(self) -> None:
+        """Put the keyboard in the "Mask name" field (the context menu's "Rename mask…")."""
+        if self.rename_action.isEnabled():
+            self.inspector.name_panel.focus_field()
+
+    def _double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
+        """A double click on a group's row renames it; on a group of an existing case, which
+        cannot be renamed, it opens or closes its places, as it did before.
+        """
+        if item.data(0, OCCURRENCE_ROLE) is not None:
+            return
+        self._refresh_buttons()
+        if self.rename_action.isEnabled():
+            self._rename()
+        else:
+            item.setExpanded(not item.isExpanded())
+
+    def _name_committed(self, group_id: str, text: str) -> None:
+        """The owner pressed Return in the "Mask name" field, or left it: give the group the name.
+
+        An empty text takes the name off. A name the review refuses is explained under the field
+        and the field goes back to the name the group has.
+        """
+        group = next((g for g in self.review.groups if g.id == group_id), None)
+        if group is None or text.strip() == (group.label or ""):
+            return
+        panel = self.inspector.name_panel
+        try:
+            self.review.set_label(group_id, text)
+        except LabelError as error:
+            if panel.group_id() == group_id:
+                panel.show_group(group, group.placeholder in self.review.reserved)
+                panel.show_error(str(error))
+            return
+        panel.clear_error()
+        self._rebuild(select=group_id, scroll=False)
 
     def _toggle_places(self) -> None:
         """Open the places of the selected group, or close them."""

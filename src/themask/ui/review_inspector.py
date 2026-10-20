@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from themask.labels import LabelError, clean_label
 from themask.leakcheck import unverifiable
 from themask.model import Group, KeyEntry, PlaceholderType
 from themask.review import key_variants
@@ -82,6 +83,18 @@ FIND_PLACEHOLDER = "Find in document  ⌘F"
 FIND_NAME = "Find in document"
 HINT = "Space toggles · ↑↓ moves"
 NOT_SURE = "NOT SURE — HIDE?"
+NAME_TITLE = "Mask name"
+NAME_HIDE_PLACEHOLDER = "Name it (optional)"
+NAME_HIDE_NAME = "Name for the hidden text, optional"
+NAME_HIDE_TIP = (
+    "Optional: a name to write instead of the placeholder for this text, such as Provider. "
+    "Empty keeps the default."
+)
+NAME_NONE = "Select a value in the list to give its mask a name."
+NAME_STORED = (
+    "This value is in the case already, so it keeps the name its earlier files were written with."
+)
+NAME_INVALID = "Press Return to check this name."
 MODEL_ONLY = "found by the model only"
 TOO_SHORT = "too short for the leak check"
 MAX_OTHER_SPELLINGS = 2
@@ -228,7 +241,7 @@ def caption_of(group: Group) -> str:
     group”". It names up to two other spellings and then goes on with "…"; a group to check says
     why, when it can.
     """
-    parts = [group.placeholder, places(len(group.findings))]
+    parts = [group.token, places(len(group.findings))]
     others = other_spellings(group)
     if others:
         shown = [f"“{form}”" for form in others[:MAX_OTHER_SPELLINGS]]
@@ -822,7 +835,7 @@ class GroupTree(QTreeWidget):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setAnimated(False)
-        self.setExpandsOnDoubleClick(True)
+        self.setExpandsOnDoubleClick(False)  # a double click renames; Right and the menu open
         self.setUniformRowHeights(False)
         self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.setItemDelegate(GroupDelegate(self))
@@ -914,6 +927,128 @@ class Rule(QWidget):
         painter.end()
 
 
+class NamePanel(QWidget):
+    """The "Mask name" block under the list: a field for the name of the selected group, the
+    token the masked file will write for it, and a line for a refusal or an explanation.
+
+    ``committed`` is sent with the group's id and the text when the owner presses Return or leaves
+    the field (the id is the one the text was typed for, also when the selection has moved on by
+    then). The panel only shows; the screen asks the review and calls ``show_error``.
+    """
+
+    committed = Signal(str, str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._group_id: str | None = None
+        self._default = ""
+        self._appearance = ""
+        self.title_label = QLabel(NAME_TITLE)
+        self.title_label.setFont(_font(11, QFont.Weight.DemiBold))
+        self.name_field = QLineEdit()
+        self.name_field.setFixedHeight(30)
+        self.name_field.setAccessibleName(NAME_TITLE)
+        self.name_field.setClearButtonEnabled(True)
+        self.token_label = QLabel()
+        self.token_label.setFont(_font(11))
+        self.token_label.setAccessibleName("Written as")
+        self.note_label = QLabel()
+        self.note_label.setWordWrap(True)
+        self.note_label.setFont(_font(11))
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        self.message_label.setFont(_font(11))
+        self.message_label.setAccessibleName("Mask name problem")
+        self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.note_label.setTextFormat(Qt.TextFormat.PlainText)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(14, 10, 14, 10)
+        column.setSpacing(6)
+        column.addWidget(self.title_label)
+        column.addWidget(self.name_field)
+        column.addWidget(self.token_label)
+        column.addWidget(self.message_label)
+        column.addWidget(self.note_label)
+        self.name_field.textEdited.connect(self._edited)
+        self.name_field.editingFinished.connect(self._finished)
+        self.show_group(None)
+        self.restyle()
+
+    def group_id(self) -> str | None:
+        """The group the field is about, if any."""
+        return self._group_id
+
+    def show_group(self, group: Group | None, stored: bool = False) -> None:
+        """Show ``group`` (None: nothing is selected, or several groups are). A ``stored`` group
+        belongs to an existing case and cannot be renamed: the field is off and a line says why.
+        The refusal being shown stays while the group is the same one, and goes with another.
+        """
+        same = group is not None and group.id == self._group_id
+        self._group_id = None if group is None else group.id
+        if not same:
+            self.clear_error()
+        with QSignalBlocker(self.name_field):
+            self.name_field.setText("" if group is None or group.label is None else group.label)
+        self._default = "" if group is None else group.placeholder
+        self.name_field.setPlaceholderText(self._default)
+        self.name_field.setEnabled(group is not None and not stored)
+        self.note_label.setText(NAME_NONE if group is None else NAME_STORED if stored else "")
+        self.note_label.setVisible(group is None or stored)
+        self.token_label.setVisible(group is not None)
+        self._preview(self.name_field.text())
+
+    def show_error(self, message: str) -> None:
+        """Say why the name was refused, under the field."""
+        self.message_label.setText(message)
+        self.message_label.setVisible(bool(message))
+        self.name_field.setAccessibleDescription(message)
+
+    def clear_error(self) -> None:
+        self.show_error("")
+
+    def focus_field(self) -> None:
+        """Put the keyboard in the field, with its text selected."""
+        self.name_field.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.name_field.selectAll()
+
+    def _preview(self, text: str) -> None:
+        """What the masked file will write for ``text`` (the default for an empty one)."""
+        if not self._default:
+            self.token_label.setText("")
+            return
+        if not text.strip():
+            self.token_label.setText(f"Written as {self._default}")
+            return
+        try:
+            self.token_label.setText(f"Written as [{clean_label(text)}]")
+        except LabelError:
+            self.token_label.setText(NAME_INVALID)
+
+    def _edited(self, text: str) -> None:
+        self.clear_error()
+        self._preview(text)
+
+    def _finished(self) -> None:
+        if self._group_id is not None and self.name_field.isEnabled():
+            self.committed.emit(self._group_id, self.name_field.text())
+
+    def restyle(self) -> None:
+        """Take the colours of the appearance: captions quiet, the refusal in the danger colour."""
+        appearance = appearance_of(self.palette())
+        if appearance == self._appearance:
+            return
+        self._appearance = appearance
+        t = tokens_of(self)
+        for label in (self.token_label, self.note_label):
+            label.setStyleSheet(f"color: {t.secondary};")
+        self.message_label.setStyleSheet(f"color: {t.danger};")
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):
+            self.restyle()
+        super().changeEvent(event)
+
+
 class Inspector(QWidget):
     """The pane on the right of the review: the find field and the two buttons on top, the list
     of groups (``tree``), and the counts and the hint for the keys at the bottom.
@@ -934,6 +1069,19 @@ class Inspector(QWidget):
         self._magnifier = self.find_field.addAction(
             QIcon(), QLineEdit.ActionPosition.LeadingPosition
         )
+        self.hide_name_field = QLineEdit()
+        self.hide_name_field.setPlaceholderText(NAME_HIDE_PLACEHOLDER)
+        self.hide_name_field.setAccessibleName(NAME_HIDE_NAME)
+        self.hide_name_field.setToolTip(NAME_HIDE_TIP)
+        self.hide_name_field.setFixedHeight(30)
+        self.hide_message_label = QLabel()
+        self.hide_message_label.setWordWrap(True)
+        self.hide_message_label.setFont(_font(11))
+        self.hide_message_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.hide_message_label.setAccessibleName("Name problem")
+        self.hide_message_label.hide()
+        self.hide_name_field.textEdited.connect(lambda _text: self.show_hide_error(""))
+        self.name_panel = NamePanel()
         self.hide_button = QPushButton("Hide selection")
         self.never_button = QPushButton("Show always")
         for button in (self.hide_button, self.never_button):
@@ -951,11 +1099,13 @@ class Inspector(QWidget):
         top.setContentsMargins(14, 12, 14, 12)
         top.setSpacing(10)
         top.addWidget(self.find_field)
+        top.addWidget(self.hide_name_field)
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         buttons.addWidget(self.hide_button, 1)
         buttons.addWidget(self.never_button, 1)
         top.addLayout(buttons)
+        top.addWidget(self.hide_message_label)
         bottom = QHBoxLayout()
         bottom.setContentsMargins(14, 10, 14, 10)
         bottom.setSpacing(8)
@@ -968,11 +1118,21 @@ class Inspector(QWidget):
         column.addWidget(Rule())
         column.addWidget(self.tree, 1)
         column.addWidget(Rule())
+        column.addWidget(self.name_panel)
+        column.addWidget(Rule())
         column.addLayout(bottom)
-        self.setTabOrder(self.find_field, self.hide_button)
+        self.setTabOrder(self.find_field, self.hide_name_field)
+        self.setTabOrder(self.hide_name_field, self.hide_button)
         self.setTabOrder(self.hide_button, self.never_button)
         self.setTabOrder(self.never_button, self.tree)
+        self.setTabOrder(self.tree, self.name_panel.name_field)
         self.restyle()
+
+    def show_hide_error(self, message: str) -> None:
+        """Say, under the buttons, why the name for "Hide selection" was refused (empty: clear)."""
+        self.hide_message_label.setText(message)
+        self.hide_message_label.setVisible(bool(message))
+        self.hide_name_field.setAccessibleDescription(message)
 
     def set_counts(self, counts: FooterCounts) -> None:
         self.counts_label.setText(counts.text())
@@ -992,6 +1152,8 @@ class Inspector(QWidget):
         for label in (self.counts_label, self.hint_label):
             label.setStyleSheet(f"color: {t.secondary};")
         self.find_field.setStyleSheet(f'QLineEdit[noMatch="true"] {{ color: {t.danger}; }}')
+        self.hide_message_label.setStyleSheet(f"color: {t.danger};")
+        self.name_panel.restyle()
 
     def changeEvent(self, event: QEvent) -> None:
         if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange):

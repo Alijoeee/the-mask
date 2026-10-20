@@ -564,6 +564,7 @@ class ExportDialog(QDialog):
         self._outcome = result
         many = len(result.outputs) > 1
         self._say(SAVED_MANY if many else SAVED_ONE, SAVED_CAPTION, badge="check")
+        self.instruction_label.setText(result.instruction)
         folder = result.outputs[0].parent if result.outputs else self._folder
         self.file_names_label.setText("\n".join(path.name for path in result.outputs))
         self.file_caption_label.setText(self._file_caption(result, folder))
@@ -716,7 +717,10 @@ class ExportDialog(QDialog):
     # ---- the buttons -----------------------------------------------------------------------
 
     def _copy_instruction(self) -> None:
-        QApplication.clipboard().setText(AI_INSTRUCTION)
+        # The result's own instruction: it says that every name in brackets is a placeholder
+        # when the owner named some (ruling R127); the plain one stands only before a result.
+        result = self._outcome
+        QApplication.clipboard().setText(AI_INSTRUCTION if result is None else result.instruction)
 
     def _show_in_finder(self) -> None:
         result = self._outcome
