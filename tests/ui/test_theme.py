@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtCore import Qt, qInstallMessageHandler
-from PySide6.QtGui import QColor, QFont, QFontInfo, QPalette
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication, QFrame, QLabel, QWidget
 
 from themask.model import PlaceholderType
@@ -504,7 +504,10 @@ def test_the_serif_font_for_the_document_names_the_three_families_in_order(
     untouched_look: QApplication,
 ) -> None:
     font = theme.serif_font()
-    assert font.families()[:3] == ["Iowan Old Style", "Palatino", "Georgia"]
+    # Only the families the system has (an absent one costs Qt an alias lookup and a warning).
+    installed = set(QFontDatabase.families())
+    wanted = [n for n in ("Iowan Old Style", "Palatino", "Georgia") if n in installed]
+    assert font.families()[:3] == (wanted or ["Georgia"])
     dpi = untouched_look.primaryScreen().logicalDotsPerInchY()
     assert font.pointSizeF() * dpi / 72 == pytest.approx(14.5, abs=0.01)  # 14.5 pixels
     assert theme.serif_font(16).pixelSize() == 16  # a whole number of pixels is set as such
@@ -514,7 +517,11 @@ def test_the_mono_font_is_fixed_pitch_for_codes_and_placeholders(
     untouched_look: QApplication,
 ) -> None:
     font = theme.mono_font()
-    assert font.families()[:2] == ["SF Mono", "Menlo"]
+    # No family is asked for by name: it is the system's fixed font, whatever that is.
+    assert len(font.families()) <= 1
+    assert (
+        font.families()[0] == QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+    )
     assert QFontInfo(font).pixelSize() == 12
 
 
@@ -534,3 +541,20 @@ def test_the_status_line_is_hidden_when_it_says_nothing_and_marks_a_problem(
     assert label.property("problem") is True
     theme.set_status(label, "")
     assert label.isHidden()
+
+
+def test_present_keeps_only_the_families_the_system_lists_and_looks_once(
+    untouched_look: QApplication, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def families(*args: object) -> list[str]:
+        calls.append(1)
+        return ["Palatino", "Menlo"]
+
+    theme._present.cache_clear()
+    monkeypatch.setattr(QFontDatabase, "families", staticmethod(families))
+    assert theme._present("Iowan Old Style", "Palatino", "Georgia") == ["Palatino"]
+    assert theme._present("Iowan Old Style", "Palatino", "Georgia") == ["Palatino"]
+    assert len(calls) == 1  # cached
+    theme._present.cache_clear()

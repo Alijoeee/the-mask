@@ -136,6 +136,14 @@ def key_variants(kind: PlaceholderType, canonical: str, forms: Iterable[str]) ->
     return sorted(v for v in set(forms) if is_searchable(v) and normalize(v) not in bare)
 
 
+def asks_about(group: Group, answered: Collection[str] = ()) -> bool:
+    """Whether the owner is asked about ``group``: the analysis was not sure of it and it is
+    switched off, so it stays visible unless the owner says hide. A group the owner has answered
+    "Show" to (``answered``) is not asked about again.
+    """
+    return group.needs_check and not group.enabled and group.id not in answered
+
+
 class ReviewState:
     """What the owner has decided about an analysis so far.
 
@@ -164,10 +172,16 @@ class ReviewState:
         self.user_lists = user_lists
         self.case_lists = case_lists
         self.reserved = frozenset(reserved)
+        # The ids of the groups the owner answered "Show" to under "Not sure — hide?": kept
+        # here, not in the screen, so that a merge, a split and the export know them.
+        self.answered: set[str] = set()
         # The names an existing case's key gives its placeholders (ruling R127). A group the
         # case holds keeps its name: the case's other masked files are written with it.
         self.reserved_labels = dict(reserved_labels or {})
         self._problems: tuple[object, list[tuple[str, str]]] | None = None
+        # A name the case's key holds that this text already writes in square brackets: a restore
+        # could not tell the two apart, and the export refuses it. Said here, in the review.
+        self._bracketed = self._stored_names_in_text()
         for g in groups:
             if g.label is None and g.placeholder in self.reserved_labels:
                 g.label = self.reserved_labels[g.placeholder]
@@ -337,9 +351,17 @@ class ReviewState:
                 " do not merge these groups."
             )
         enabled = any(g.enabled for g in groups)
+        # The merged group is answered when it was asked about and every one of those was.
+        asked = [g for g in groups if g.needs_check and not g.enabled]
+        was_answered = any(g.id in self.answered for g in groups) and all(
+            g.id in self.answered for g in asked
+        )
+        # A guess the owner was asked about and did not answer is hidden along with the group it
+        # joins (they merged it to hide it): the safe direction, not left visible unasked.
+        unanswered = {g.id for g in asked if g.id not in self.answered}
         occurrences_off = sorted(
             (
-                (f, i in g.disabled or (enabled and not g.enabled))
+                (f, i in g.disabled or (enabled and not g.enabled and g.id not in unanswered))
                 for g in groups
                 for i, f in enumerate(g.findings)
             ),
@@ -354,6 +376,10 @@ class ReviewState:
         keep.findings = [f for f, _ in occurrences_off]
         keep.disabled = {i for i, (_, off) in enumerate(occurrences_off) if off}
         merged = {g.id for g in groups} - {keep.id}
+        self.answered -= merged
+        self.answered.discard(keep.id)
+        if was_answered:
+            self.answered.add(keep.id)
         self.groups[:] = [g for g in self.groups if g.id not in merged]
         self._sweep()
         self._tidy()
@@ -398,11 +424,33 @@ class ReviewState:
             group.variants.add(group.canonical)
         group.disabled = {n for n, i in enumerate(stay) if i in group.disabled}
         group.findings = staying
+        if group.id in self.answered:
+            self.answered.add(new.id)
         self.groups.append(new)
         self._tidy()
         return new
 
     # --- What the owner decided ------------------------------------------------------------------
+
+    def fingerprint(self) -> tuple[object, ...]:
+        """What the owner has decided, as a value to compare: it differs after any switch, name,
+        merge, split, hide or answer. Used to tell whether a review is as it was when exported.
+        """
+        return (
+            tuple(
+                (
+                    g.id,
+                    g.placeholder,
+                    g.enabled,
+                    g.label,
+                    g.canonical,
+                    tuple(sorted(g.disabled)),
+                    tuple((f.start, f.end) for f in g.findings),
+                )
+                for g in self.groups
+            ),
+            frozenset(self.answered),
+        )
 
     def mask_plan(self) -> MaskPlan:
         """The replacements to make: every finding of a group that is on, but the single
@@ -586,7 +634,7 @@ class ReviewState:
         screen can ask after every redraw without paying for the test each time.
         """
         if not any(g.label is not None for g in self.groups):
-            return []
+            return list(self._bracketed)
         key = (
             tuple(
                 (
@@ -604,9 +652,29 @@ class ReviewState:
         )
         if self._problems is not None and self._problems[0] == key:
             return list(self._problems[1])
-        pairs = self._find_label_problems()
+        pairs = [*self._bracketed, *self._find_label_problems()]
         self._problems = (key, pairs)
         return list(pairs)
+
+    def _stored_names_in_text(self) -> list[tuple[str, str]]:
+        """(id of the group that has the name, or "" if the text has none; message) for each name
+        of the case's key that the text already holds in square brackets.
+        """
+        pairs = []
+        for placeholder, label in self.reserved_labels.items():
+            if find_labels(self.text, {label_key(label): label}):
+                owner = next((g.id for g in self.groups if g.placeholder == placeholder), "")
+                pairs.append(
+                    (
+                        owner,
+                        (
+                            f"The file already contains [{label}] in square brackets, the name"
+                            f" {placeholder} has in the case. A restore could not tell them"
+                            " apart; take it out of the file in Word and open the file again."
+                        ),
+                    )
+                )
+        return pairs
 
     def _find_label_problems(self) -> list[tuple[str, str]]:
         masked = [g for g in self.groups if g.active_findings()]
@@ -743,6 +811,7 @@ class ReviewState:
         groups themselves in the order they stand in the text.
         """
         self.groups[:] = [g for g in self.groups if g.findings]
+        self.answered &= {g.id for g in self.groups}
         for group in self.groups:
             _in_text_order(group)
         self.groups.sort(key=lambda g: g.findings[0].start)

@@ -69,7 +69,7 @@ from themask.detect.lists import CaseLists, UserLists, on_never_hide_list
 from themask.detect.pipeline import CombinedText
 from themask.labels import LabelError, clean_label
 from themask.model import Finding, Group, PlaceholderType
-from themask.review import ReviewState
+from themask.review import ReviewState, asks_about
 from themask.ui.review_inspector import (
     CHECK_TIP,
     NAME_STORED,
@@ -78,7 +78,6 @@ from themask.ui.review_inspector import (
     Inspector,
     RowData,
     Section,
-    asks_about,
     collapse,
     sections,
 )
@@ -247,7 +246,6 @@ class ReviewScreen(QWidget):
         self._starts: list[int] = []
         self._stressed: set[str] = set()
         self._formats: dict[tuple[PlaceholderType, bool, bool], QTextCharFormat] = {}
-        self._answered: set[str] = set()  # the groups the owner answered "Show" to
         self._problem_ids: set[str] = set()  # groups whose name clashes with a masked value
         self._updating = False
         self._from_text = False
@@ -361,9 +359,13 @@ class ReviewScreen(QWidget):
         self.review, self.combined = review, combined
         self.inspector.name_panel.show_group(None)  # nothing of the last review stays
         self.inspector.name_panel.clear_error()
+        # Nothing typed for the last review applies to this one: a name for the next hide, the
+        # find, and the refusal of a hide.
+        self.hide_name_field.clear()
+        self.inspector.show_hide_error("")
+        self.find_field.clear()
         self._map = self._show_text(combined)
         self._stressed = set()
-        self._answered = set()
         self._rebuild()
         self.tree.scrollToTop()
         self._show_warnings()
@@ -376,7 +378,7 @@ class ReviewScreen(QWidget):
         """
         counts = self.review.counts()
         found = _count(counts.groups, "value")
-        asked = sum(asks_about(g, self._answered) for g in self.review.groups)
+        asked = sum(asks_about(g, self.review.answered) for g in self.review.groups)
         return self._file_title(), f"Review · {found} found · {counts.needs_check + asked} to check"
 
     def group_count(self) -> int:
@@ -715,7 +717,7 @@ class ReviewScreen(QWidget):
             # The lines are made apart and put in the list in one go, and then given their rows:
             # a list that is made to lay itself out again for each line takes seconds for 300.
             lines: list[tuple[QTreeWidgetItem, GroupRow]] = []
-            for number, section in enumerate(sections(self.review.groups, self._answered)):
+            for number, section in enumerate(sections(self.review.groups, self.review.answered)):
                 for k, group in enumerate(section.groups):
                     lines.append(self._make_group(group, section, k == 0, number == 0, width))
             self.tree.addTopLevelItems([item for item, _ in lines])
@@ -820,7 +822,7 @@ class ReviewScreen(QWidget):
             row = self._rows[group_id]
             row.set_checked(checked)
             if (
-                asks_about(self._group(group_id), self._answered) != row.data.question
+                asks_about(self._group(group_id), self.review.answered) != row.data.question
                 or self._clashing_groups() != self._problem_ids
             ):
                 self._regroup_later(group_id)  # into or out of "not sure", or a name's clash
@@ -878,7 +880,7 @@ class ReviewScreen(QWidget):
         """The owner pressed Show on a group they are asked about: it stays visible, and they are
         not asked about it again.
         """
-        self._answered.add(group_id)
+        self.review.answered.add(group_id)
         self._rebuild(select=group_id, scroll=False)
 
     def _regroup_later(self, group_id: str) -> None:
@@ -983,7 +985,7 @@ class ReviewScreen(QWidget):
 
     def _refresh_summary(self) -> None:
         """Count the groups again (the footer), and tell the window if its title changed."""
-        self.inspector.set_counts(FooterCounts.of(self.review.groups, self._answered))
+        self.inspector.set_counts(FooterCounts.of(self.review.groups, self.review.answered))
         self.inspector.name_panel.show_problems(self.review.label_problems())
         title = self.title()
         if title != self._title:
@@ -1258,7 +1260,7 @@ class ReviewScreen(QWidget):
         else:
             if shows:
                 only_this, no_case = UserLists([], [value]), CaseLists([], [], set())
-                self._answered |= {
+                self.review.answered |= {
                     group.id
                     for group in self.review.groups
                     if not group.enabled and on_never_hide_list(group.canonical, only_this, no_case)

@@ -55,6 +55,7 @@ from PySide6.QtGui import (
     QResizeEvent,
 )
 from PySide6.QtWidgets import (
+    QDialog,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -75,7 +76,7 @@ from themask.docx.reader import has_revisions
 from themask.errors import KeyStoreError, MaskError
 from themask.export import UNSUPPORTED_MESSAGE, ExportOptions, SourceDoc, combined_text
 from themask.model import Analysis, Case
-from themask.review import ReviewState
+from themask.review import ReviewState, asks_about
 from themask.ui import icons, theme
 from themask.ui.cases_screen import NOT_READ, CasesScreen
 from themask.ui.export_dialog import ExportDialog
@@ -123,6 +124,41 @@ def ask_redline(parent: QWidget | None) -> bool:
     """Ask whether to make a before-and-after pair of a file with tracked changes."""
     answer = QMessageBox.question(parent, APP_NAME, REDLINE_QUESTION)
     return answer == QMessageBox.StandardButton.Yes
+
+
+def ask_discard_review(parent: QWidget | None) -> bool:
+    """Ask whether to throw away the review that is open, for a new file. True for "Discard"."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(APP_NAME)
+    box.setText("Discard this review?")
+    box.setInformativeText(
+        "Choosing another file starts a new review. What you decided in this one is lost."
+    )
+    discard = box.addButton("Discard", QMessageBox.ButtonRole.DestructiveRole)
+    keep = box.addButton("Keep reviewing", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(keep)
+    box.exec()
+    return box.clickedButton() is discard
+
+
+def ask_unanswered(parent: QWidget | None, count: int) -> bool:
+    """Ask whether to export although ``count`` guesses under "Not sure — hide?" were not
+    answered: they stay visible in the masked files. True for "Export anyway".
+    """
+    guesses = "1 guess" if count == 1 else f"{count} guesses"
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setWindowTitle(APP_NAME)
+    box.setText(
+        f"{guesses} under \u201cNot sure \u2014 hide?\u201d {'was' if count == 1 else 'were'} not"
+        " answered and will stay visible."
+    )
+    anyway = box.addButton("Export anyway", QMessageBox.ButtonRole.AcceptRole)
+    back = box.addButton("Back to review", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(back)
+    box.exec()
+    return box.clickedButton() is anyway
 
 
 class SidebarToggle(QToolButton):
@@ -268,6 +304,8 @@ class MainWindow(QMainWindow):
         self._engine_loader: EngineWorker | None = None
         self._engine_problem: str | None = None
         self._review_ready = False
+        # The review as it was when its export was finished with "Done"; None if it has not.
+        self._exported_state: tuple[object, ...] | None = None
         self._closing = False
         self._fade: tuple[QPropertyAnimation, QLabel] | None = None
         self._titles = dict(DEFAULT_TITLES)
@@ -283,6 +321,8 @@ class MainWindow(QMainWindow):
         self.cases_screen = CasesScreen(ctx)
         self.settings_window = SettingsWindow(ctx, self)
         self.settings_screen = self.settings_window.settings_screen
+        # The note in the sidebar follows a save at once, also while the Cases screen shows.
+        self.settings_screen.saved.connect(self._settings_saved)
         self.sidebar = Sidebar()
         self._stack = QStackedWidget()
         self._stack.setObjectName("screenStack")
@@ -497,8 +537,22 @@ class MainWindow(QMainWindow):
             self._primary[self.current_screen_name()].run()
 
     def _choose_triggered(self) -> None:
-        if self.choose_action.isEnabled():
+        """Choose file…: on Restore it is the AI's returned file; on the review it is a new file
+        to mask, which replaces the review, so the owner is asked first unless it was exported.
+        """
+        if not self.choose_action.isEnabled():
+            return
+        screen = self.current_screen_name()
+        if screen == "restore":
+            self.restore_screen.drop_zone.choose_files()
+        elif screen == "review" and self._review_ready and not self._review_is_exported():
+            if ask_discard_review(self):
+                self.home.drop_zone.choose_files()
+        else:
             self.home.drop_zone.choose_files()
+
+    def _settings_saved(self) -> None:
+        self.sidebar.set_retention_days(self.ctx.settings.retention_days)
 
     def _settings_triggered(self) -> None:
         if self.settings_action.isEnabled():
@@ -564,6 +618,7 @@ class MainWindow(QMainWindow):
         self.redline_split = any(source.pkg_before is not None for source in sources)
         self.pending_case = case
         self._review_ready = True
+        self._exported_state = None
         self._review_title_changed(*self.review_screen.title())
         self._show("review")
 
@@ -590,6 +645,10 @@ class MainWindow(QMainWindow):
             )
             show_error(self, problems[0] + more)
             return
+        review = self.review_screen.review
+        unanswered = sum(asks_about(g, review.answered) for g in review.groups)
+        if unanswered and not ask_unanswered(self, unanswered):
+            return
         try:
             codes = self._case_codes()
         except MaskError as error:
@@ -609,6 +668,9 @@ class MainWindow(QMainWindow):
         dialog = ExportDialog(self)
         dialog.finished.connect(self._export_closed)
         self.export_dialog = dialog
+        # The export reads the owner's lists on its thread: the Settings cannot change them now.
+        self.settings_action.setEnabled(False)
+        self.settings_window.setEnabled(False)
         dialog.open()
         dialog.run(self.sources, self.review_screen.review, options, self.ctx)
 
@@ -620,8 +682,26 @@ class MainWindow(QMainWindow):
         codes = [summary.id for summary in store.list()]  # also finds the files that do not open
         return codes + [path.stem for path in store.unreadable]
 
-    def _export_closed(self) -> None:
+    def _review_is_exported(self) -> bool:
+        """Whether the review is just as it was when an export of it was finished with "Done"."""
+        return (
+            self._exported_state is not None
+            and self._exported_state == self.review_screen.review.fingerprint()
+        )
+
+    def _export_closed(self, code: int = 0) -> None:
         dialog, self.export_dialog = self.export_dialog, None
+        saved = dialog is not None and dialog.result is not None and not dialog.result.blocked
+        # "Done" after a save: nothing of this review is left to lose. "Back to review", a block
+        # or a cancel: it is still being worked on.
+        self._exported_state = (
+            self.review_screen.review.fingerprint()
+            if saved and code == QDialog.DialogCode.Accepted.value
+            else None
+        )
+        if not self.is_analysing():
+            self.settings_action.setEnabled(True)
+            self.settings_window.setEnabled(True)
         if dialog is not None:
             dialog.deleteLater()
 

@@ -223,11 +223,6 @@ def _held(case: Case, text: str) -> int:
     return len({item.entry.placeholder for item in plan_restore(text, case) if item.entry})
 
 
-def _placeholders_in(text: str) -> int:
-    """How many different placeholders ``text`` holds (The MASK's own lines do not count)."""
-    return len({item.match.placeholder for item in plan_restore(text, _NOBODY)})
-
-
 # The longest list of file names a line of the case box shows whole; the tool tip has the rest.
 CASE_FILES_LIMIT = 34
 
@@ -385,7 +380,8 @@ class RestoreScreen(QWidget):
         self._file_plan: list[RestoreItem] = []
         self._file_sha256: str | None = None  # the fingerprint of the file the plan was made from
         self._file_text = ""  # what the file says: what the cases are put in order for
-        self._file_total = 0  # how many different placeholders it holds
+        self._total = 0  # ... counting owner names too, for the case (see _placeholders_in_file)
+        self._total_for: tuple[int, tuple[str, ...]] | None = None
         self._text_plan: list[RestoreItem] = []
         self._ranked_on = ""  # the text the cases were last put in order for
         self._ranked_name: str | None = None  # and the name of its file; None for pasted text
@@ -461,7 +457,7 @@ class RestoreScreen(QWidget):
             self._manual = False  # what the owner chose was for the file before this one
         self._for_next_file = False
         self._file, self._file_text = path, text
-        self._file_total = _placeholders_in(text)
+        self._total_for = None  # the count for another file is another count
         self._ranked_on, self._ranked_name = text, path.name
         if self._order_cases(self._selected_id() if self._manual else None):
             self._replan_text()  # another case: the pasted text reads differently too
@@ -858,7 +854,7 @@ class RestoreScreen(QWidget):
         """The line under the file's name: that it was just dropped, how many placeholders it
         holds, and which case fits it best when the screen chose the case for the file.
         """
-        total = self._file_total
+        total = self._placeholders_in_file(case)
         parts = [
             "Dropped just now",
             f"{_count(total, 'placeholder')} found" if total else "No placeholders found",
@@ -867,6 +863,20 @@ class RestoreScreen(QWidget):
         if case is not None and not self._manual and self._ranked_name is not None and held:
             parts.append(f"case {case.id} fits best")
         return " \N{MIDDLE DOT} ".join(parts)
+
+    def _placeholders_in_file(self, case: Case | None) -> int:
+        """How many different placeholders the file holds: those written as The MASK writes them
+        and, read with the case (every case while none is selected), the names the owner gave
+        some of them. Worked out once for a file and a case.
+        """
+        cases = [case] if case is not None else list(self._cases.values())
+        key = (id(self._file_text), tuple(c.id for c in cases))
+        if self._total_for != key:
+            found = {item.match.placeholder for item in plan_restore(self._file_text, _NOBODY)}
+            for each in cases:
+                found |= {item.match.placeholder for item in plan_restore(self._file_text, each)}
+            self._total, self._total_for = len(found), key
+        return self._total
 
     def _plan_file(self, case: Case) -> list[RestoreItem]:
         """The plan of the Word file for ``case``: empty when there is no file, or when the file

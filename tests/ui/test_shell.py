@@ -793,3 +793,126 @@ def test_the_toggle_shows_a_ring_when_the_keyboard_focuses_it_and_not_otherwise(
     toggle.setFocus(Qt.FocusReason.TabFocusReason)
     qtbot.waitUntil(toggle.hasFocus, timeout=2000)
     assert toggle.grab().toImage() != plain
+
+
+def test_cmd_o_means_the_screen_s_own_file(
+    qtbot: QtBot, window: MainWindow, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.ui import main_window
+
+    chosen: list[str] = []
+    monkeypatch.setattr(window.home.drop_zone, "choose_files", lambda: chosen.append("mask"))
+    monkeypatch.setattr(
+        window.restore_screen.drop_zone, "choose_files", lambda: chosen.append("restore")
+    )
+    window.show_restore()
+    window.choose_action.trigger()
+    assert chosen == ["restore"]  # the AI's file is never analysed for masking
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+    assert window.current_screen_name() == "review"
+    asked: list[bool] = []
+    answer = [False]
+    monkeypatch.setattr(
+        main_window, "ask_discard_review", lambda parent: asked.append(True) or answer[0]
+    )
+    window.choose_action.trigger()
+    assert asked == [True] and chosen == ["restore"]  # "Keep reviewing": nothing replaced
+    answer[0] = True
+    window.choose_action.trigger()
+    assert chosen == ["restore", "mask"]
+    window.show_home()
+    window.choose_action.trigger()
+    assert chosen[-1] == "mask" and len(asked) == 2
+
+
+def _finish_export(window: MainWindow, blocked: bool, how: str) -> None:
+    """Open the export dialog (no real export) and close it with an outcome as the owner would."""
+    from themask.export import ExportResult
+
+    window.show_export()
+    dialog = window.export_dialog
+    assert dialog is not None
+    dialog._outcome = ExportResult(None, [], [], [], "", blocked)
+    getattr(dialog, how)()
+
+
+def test_cmd_o_after_an_export_done_does_not_ask_but_after_anything_else_does(
+    qtbot: QtBot, window: MainWindow, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.ui import main_window
+    from themask.ui.export_dialog import ExportDialog
+
+    monkeypatch.setattr(ExportDialog, "run", lambda self, *args: None)
+    chosen: list[str] = []
+    monkeypatch.setattr(window.home.drop_zone, "choose_files", lambda: chosen.append("mask"))
+    asked: list[bool] = []
+    monkeypatch.setattr(
+        main_window, "ask_discard_review", lambda parent: asked.append(True) or True
+    )
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+    _finish_export(window, blocked=False, how="accept")  # saved, "Done"
+    window.choose_action.trigger()
+    assert asked == [] and chosen == ["mask"]
+    review = window.review_screen.review
+    review.set_group_enabled(review.groups[0].id, not review.groups[0].enabled)  # a later edit
+    window.choose_action.trigger()
+    assert asked == [True]
+    _finish_export(window, blocked=False, how="accept")
+    _finish_export(window, blocked=False, how="reject")  # saved, but "Back to review"
+    window.choose_action.trigger()
+    assert asked == [True, True]
+    _finish_export(window, blocked=False, how="accept")
+    _finish_export(window, blocked=True, how="reject")  # blocked: nothing was saved
+    window.choose_action.trigger()
+    assert asked == [True, True, True]
+
+
+def test_the_questions_default_to_the_safe_button(
+    qtbot: QtBot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from themask.ui import main_window
+
+    seen: list[str] = []
+
+    def peek(self: QMessageBox) -> int:
+        seen.append(self.defaultButton().text())
+        return 0
+
+    monkeypatch.setattr(QMessageBox, "exec", peek)
+    assert main_window.ask_unanswered(window, 2) is False
+    assert main_window.ask_discard_review(window) is False
+    assert seen == ["Back to review", "Keep reviewing"]
+
+
+def test_the_settings_are_off_while_the_export_dialog_is_open(
+    qtbot: QtBot, window: MainWindow, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.ui.export_dialog import ExportDialog
+
+    monkeypatch.setattr(ExportDialog, "run", lambda self, *args: None)
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+    window.show_settings()
+    window.show_export()
+    assert window.export_dialog is not None
+    assert not window.settings_action.isEnabled() and not window.settings_window.isEnabled()
+    window.export_dialog.reject()
+    assert window.settings_action.isEnabled() and window.settings_window.isEnabled()
+
+
+def test_the_note_of_the_cases_screen_follows_a_save_made_while_it_shows(
+    window: MainWindow, app_ctx: AppContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))  # the lists and settings files are written here
+    app_ctx.settings.retention_days = 14
+    window.show_cases()
+    assert "expires 14 days after" in window.sidebar.cases_note.text()
+    window.show_settings()
+    window.settings_screen.retention_spin.setValue(30)
+    window.settings_screen.save_button.click()
+    assert window.current_screen_name() == "cases"
+    assert "expires 30 days after" in window.sidebar.cases_note.text()

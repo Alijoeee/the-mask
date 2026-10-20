@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
+from functools import cache
 from string import Template
 from typing import Final, Literal
 
@@ -442,18 +443,28 @@ def body_font() -> QFont:
     return _pixel_font(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont), 13)
 
 
+@cache
+def _present(*names: str) -> list[str]:
+    """The ``names`` of fonts the system has, in the order given. A family that is not installed
+    is left out, as Qt would pay to look for an alias of it (and warn) every time a font is made.
+    Looked up once (``hasFamily`` is no use: it answers for aliases, which is the cost).
+    """
+    installed = set(QFontDatabase.families())
+    return [name for name in names if name in installed]
+
+
 def serif_font(pixels: float = 14.5) -> QFont:
-    """The font of the document pane: Iowan Old Style, else Palatino, else Georgia."""
+    """The font of the document pane: Iowan Old Style, else Palatino, else Georgia (the ones the
+    system has)."""
     font = QFont()
-    font.setFamilies(["Iowan Old Style", "Palatino", "Georgia"])
+    font.setFamilies(_present("Iowan Old Style", "Palatino", "Georgia") or ["Georgia"])
     font.setStyleHint(QFont.StyleHint.Serif)
     return _pixel_font(font, pixels)
 
 
 def mono_font(pixels: float = 12) -> QFont:
-    """The font of codes and placeholders: SF Mono, else Menlo, else the system's fixed font."""
+    """The font of codes and placeholders: the system's fixed font (SF Mono, Menlo or the like)."""
     font = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-    font.setFamilies(["SF Mono", "Menlo", font.family()])
     font.setStyleHint(QFont.StyleHint.Monospace)
     return _pixel_font(font, pixels)
 

@@ -24,6 +24,7 @@ import pytest
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import (
     QContextMenuEvent,
+    QFontDatabase,
     QHelpEvent,
     QTextBlockFormat,
     QTextCharFormat,
@@ -1656,7 +1657,9 @@ def test_the_page_is_a_serif_page_with_room_round_the_text(
     margins = document.rootFrame().frameFormat()
     assert (margins.leftMargin(), margins.rightMargin()) == (44, 44)
     assert (margins.topMargin(), margins.bottomMargin()) == (36, 36)
-    assert s.text.font().families()[:3] == ["Iowan Old Style", "Palatino", "Georgia"]
+    installed = set(QFontDatabase.families())
+    wanted = [n for n in ("Iowan Old Style", "Palatino", "Georgia") if n in installed]
+    assert s.text.font().families()[:3] == (wanted or ["Georgia"])  # only the ones installed
     body = document.findBlockByNumber(1).blockFormat()  # the text under the name of the file
     assert body.lineHeightType() == QTextBlockFormat.LineHeightTypes.FixedHeight.value
     assert body.lineHeight() == pytest.approx(14.5 * 1.7)
