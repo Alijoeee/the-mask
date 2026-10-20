@@ -6,7 +6,7 @@ a contract number, a company registration number or an amount stays as it was.
 import pytest
 
 from themask.detect.legal import LEGAL_TERMS, is_legal_reference, legal_spans
-from themask.detect.lists import CaseLists, UserLists, is_never_hide
+from themask.detect.lists import CaseLists, UserLists
 from themask.detect.pipeline import CombinedText, analyze
 
 # (sentence, the references in it that must stay visible and unasked)
