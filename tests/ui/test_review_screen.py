@@ -1244,16 +1244,25 @@ def test_the_right_and_left_keys_open_and_close_the_places_of_a_group(
     assert not item.isExpanded()
 
 
-def test_a_double_click_opens_the_places_of_a_group(qtbot: QtBot, review_screen: Screen) -> None:
+def test_a_double_click_renames_the_group_and_the_places_open_with_the_menu_or_the_key(
+    qtbot: QtBot, review_screen: Screen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Adapted for R127 (D6): a double click on a row used to open its places; it now puts the
+    # keyboard in the "Mask name" field. The places open as before with the key (Right) and with
+    # "Show places" of the context menu; a group of an existing case, which cannot be renamed,
+    # still opens its places on a double click (test_review_names).
     s, st = review_screen
     show(qtbot, s)
+    asked: list[bool] = []  # this window is not the active one, so look at the request itself
+    monkeypatch.setattr(s.inspector.name_panel, "focus_field", lambda: asked.append(True))
     item = s.tree_item_for(group_named(st, "Pennine Workwear Ltd").id)
     point = QPoint(60, s.tree.visualItemRect(item).center().y())
     qtbot.mouseClick(s.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)  # the first click
     qtbot.mouseDClick(s.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    assert asked == [True] and not item.isExpanded()
+    s.places_action.trigger()
     assert item.isExpanded()
-    qtbot.mouseClick(s.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
-    qtbot.mouseDClick(s.tree.viewport(), Qt.MouseButton.LeftButton, pos=point)
+    s.places_action.trigger()
     assert not item.isExpanded()
 
 
@@ -1437,7 +1446,14 @@ def test_the_context_menu_offers_the_actions_that_exist(
     s.tree_item_for(group_named(st, "Project Falcon").id).setSelected(True)
     menu = s.context_menu()
     shown = [a.text() for a in menu.actions() if not a.isSeparator()]
-    assert shown == ["Hide always", "Show always", "Split", "Merge with…", "Show places"]
+    assert shown == [
+        "Rename mask…",
+        "Hide always",
+        "Show always",
+        "Split",
+        "Merge with…",
+        "Show places",
+    ]
     by_name = {a.text(): a for a in menu.actions()}
     assert by_name["Hide always"].isEnabled() and by_name["Show always"].isEnabled()
     assert not by_name["Split"].isEnabled()  # a split needs places, not a group

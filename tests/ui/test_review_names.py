@@ -26,7 +26,9 @@ if TYPE_CHECKING:
 COMPANY = PlaceholderType.COMPANY
 
 
-def screen_of(qtbot: QtBot, specs: list[dict[str, Any]] | None = None) -> tuple[ReviewScreen, ReviewState]:
+def screen_of(
+    qtbot: QtBot, specs: list[dict[str, Any]] | None = None
+) -> tuple[ReviewScreen, ReviewState]:
     combined, state = custom_review(CONTRACT, specs or FAMILY_SPECS)
     screen = ReviewScreen()
     qtbot.addWidget(screen)
@@ -134,7 +136,7 @@ def test_leaving_the_field_for_another_row_names_the_group_it_was_typed_for(
 def test_an_empty_field_goes_back_to_the_default(
     qtbot: QtBot, named: tuple[ReviewScreen, ReviewState, Group]
 ) -> None:
-    screen, state, group = named
+    screen, _state, group = named
     panel = screen.inspector.name_panel
     type_name(qtbot, panel.name_field, "Provider")
     type_name(qtbot, panel.name_field, "")
@@ -162,7 +164,7 @@ def test_a_refused_name_says_why_under_the_field_and_changes_nothing(
 def test_the_message_goes_when_the_owner_types_again_or_chooses_another_group(
     qtbot: QtBot, named: tuple[ReviewScreen, ReviewState, Group]
 ) -> None:
-    screen, state, group = named
+    screen, state, _group = named
     panel = screen.inspector.name_panel
     type_name(qtbot, panel.name_field, "123")
     assert not panel.message_label.isHidden()
@@ -177,7 +179,7 @@ def test_the_message_goes_when_the_owner_types_again_or_chooses_another_group(
 def test_a_name_another_group_has_is_refused(
     qtbot: QtBot, named: tuple[ReviewScreen, ReviewState, Group]
 ) -> None:
-    screen, state, group = named
+    screen, state, _group = named
     panel = screen.inspector.name_panel
     type_name(qtbot, panel.name_field, "Provider")
     select(screen, group_of(state, "Acme Supplies Ltd"))
@@ -315,7 +317,9 @@ def test_hide_selection_with_a_refused_name_hides_nothing_and_says_why(qtbot: Qt
     assert len(state.groups) == before
     assert not screen.inspector.hide_message_label.isHidden()
     assert "square brackets" in screen.inspector.hide_message_label.text()
-    assert screen.hide_name_field.text() == "[late payment]"  # kept, so that the owner can correct it
+    assert (
+        screen.hide_name_field.text() == "[late payment]"
+    )  # kept, so that the owner can correct it
     qtbot.keyClicks(screen.hide_name_field, "x")
     assert screen.inspector.hide_message_label.isHidden()
 

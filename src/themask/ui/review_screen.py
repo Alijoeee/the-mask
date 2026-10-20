@@ -312,9 +312,7 @@ class ReviewScreen(QWidget):
             lambda: self._never_hide(from_text=False),
         )
         self._rename_tip = "Choose the name the masked file writes for the selected group."
-        self.rename_action = self._action(
-            "Rename mask…", self._rename_tip, self._rename
-        )
+        self.rename_action = self._action("Rename mask…", self._rename_tip, self._rename)
         self.split_action = self._action(
             "Split", "Move the selected places into a group of their own.", self._split
         )
