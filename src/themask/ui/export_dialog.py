@@ -72,6 +72,7 @@ from themask.instruction import AI_INSTRUCTION
 from themask.leakcheck import LeakHit
 from themask.ui.cards import DocGlyph, MarkBadge, Themed, folder_trail, style_vars, tokens_for
 from themask.ui.theme import Tokens
+from themask.ui.widgets import ElidedLines
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
@@ -391,7 +392,7 @@ class ExportDialog(QDialog):
         """What the sheet says after a save, under the headline: the file, the instruction and
         the details.
         """
-        self.file_names_label = QLabel()
+        self.file_names_label = ElidedLines()
         self.file_names_label.setObjectName("fileName")
         self.file_names_label.setTextFormat(Qt.TextFormat.PlainText)
         self.file_caption_label = QLabel()

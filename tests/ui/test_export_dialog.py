@@ -708,6 +708,24 @@ def test_the_progress_state_is_the_bar_and_the_masking_words(
             gate.set()
 
 
+def test_long_output_names_are_cut_in_the_middle_and_named_in_the_tooltip(
+    qtbot: QtBot, app_ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_name = "B" * 145 + ".docx"
+    result = saved(tmp_path)
+    result.outputs[:] = [tmp_path / long_name, tmp_path / "MASKED-K4F7-2.docx"]
+    d = run_dialog(qtbot, app_ctx, tmp_path, monkeypatch, lambda *a: result)
+    d.show()
+    label = d.file_names_label
+    assert label.text().split("\n") == [long_name, "MASKED-K4F7-2.docx"]  # all of it is kept
+    lines = label.displayed_lines()
+    assert lines[1] == "MASKED-K4F7-2.docx"
+    assert "\N{HORIZONTAL ELLIPSIS}" in lines[0] and lines[0].endswith(".docx")
+    assert label.fontMetrics().horizontalAdvance(lines[0]) <= label.contentsRect().width()
+    assert label.toolTip() == label.text()  # every name in full
+    assert d.width() == export_dialog.WIDTH  # the sheet keeps its width
+
+
 def test_the_success_state_is_the_mockup_s_sheet(
     qtbot: QtBot, app_ctx: AppContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
