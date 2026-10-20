@@ -189,6 +189,20 @@ def test_the_table_shows_every_case_newest_first(qtbot: QtBot, app_ctx: AppConte
     assert cell(c, 1, 3) == describe_expiry(a_case("B2C3", OCT_10, days=7).expires_at)[0]
 
 
+def test_the_expiry_counts_the_days_the_case_is_kept_for_not_a_fixed_thirty(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    now = datetime.now().astimezone()
+    app_ctx.settings.retention_days = 45
+    app_ctx.case_store.save(a_case("K4F7", created=now, days=app_ctx.settings.retention_days))
+    app_ctx.case_store.save(a_case("Z8Q2", created=now, days=14))
+    screen = CasesScreen(app_ctx)
+    qtbot.addWidget(screen)
+    texts = {ids(screen)[r]: cell(screen, r, cases_screen.EXPIRES_COLUMN) for r in range(2)}
+    assert texts["K4F7"].endswith("\N{MIDDLE DOT} 45 days")
+    assert texts["Z8Q2"].endswith("\N{MIDDLE DOT} 14 days")
+
+
 def test_the_dates_are_written_the_same_way_in_every_language() -> None:
     local = OCT_17.astimezone()
     assert format_moment(OCT_17) == local.strftime("%Y-%m-%d %H:%M")
