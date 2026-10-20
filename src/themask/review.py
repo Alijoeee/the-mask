@@ -40,7 +40,7 @@ from themask.detect.lists import (
     on_never_hide_list,
 )
 from themask.detect.sweep import Spans, existing_placeholders, is_searchable, occurrences, sweep
-from themask.labels import LabelError, check_label, find_labels, label_key
+from themask.labels import LabelError, check_label, clashes_with_values, find_labels, label_key
 from themask.model import (
     Analysis,
     Finding,
@@ -249,14 +249,23 @@ class ReviewState:
         kind, text = always_hide_entry(value)
         retype = text != value.strip()
         named = label is not None and bool(label.strip())
-        if named and is_searchable(text):
+        group = None
+        if named:
+            if not is_searchable(text):
+                raise LabelError("Select at least two letters or digits to hide and name.")
             self._check_label_before_hiding(text, kind, label or "", retype)
+            group = self._hide(text, kind, retype=retype)
+            if group is None:
+                raise LabelError(
+                    "That text is not in this document (or is hidden already), so there is no"
+                    " group to give the name to. It was not added."
+                )
         self.user_lists.add_always(value)
         self.user_lists.save(lists_path())
-        if is_searchable(text):
-            group = self._hide(text, kind, retype=retype)
-            if group is not None and named:
-                self.set_label(group.id, label or "")
+        if group is None and is_searchable(text):
+            self._hide(text, kind, retype=retype)
+        elif group is not None:
+            self.set_label(group.id, label or "")
 
     def add_never_hide(self, value: str) -> None:
         """Add ``value`` to the owner's never-hide list, saved for every document, and stop
@@ -489,16 +498,13 @@ class ReviewState:
                 f"The document already contains [{text}] in square brackets. A restore could not"
                 " tell it from the name you chose; choose another name."
             )
-        needle = normalize(text)
         forms = [*own_forms, *(f for g in self.groups for f in (g.canonical, *g.variants))]
         forms += self._found_texts()
-        for form in forms:
-            shape = normalize(form)
-            if shape and (shape == needle or (len(shape) >= 4 and shape in needle)):
-                raise LabelError(
-                    f"{text} is, or contains, a value that is being hidden, so the masked file"
-                    " would still show it. Choose another name."
-                )
+        if clashes_with_values(text, forms):
+            raise LabelError(
+                f"{text} is, or contains a word of, a value that is being hidden, so the masked"
+                " file would still show part of it. Choose another name."
+            )
         return text
 
     def _check_label_before_hiding(
@@ -525,6 +531,16 @@ class ReviewState:
         Without ``retype`` a group of another type that has the value keeps its type.
         """
         group = self._holding(value, kind)
+        if (
+            group is not None
+            and retype
+            and group.type is not kind
+            and group.placeholder in self.reserved_labels
+        ):
+            raise LabelError(
+                f"{group.placeholder} is in the case with the name {group.label}, so its type"
+                " cannot be changed."
+            )
         if group is None:
             group = Group(uuid.uuid4().hex, kind, value, {value}, [], self._next_placeholder(kind))
             self.groups.append(group)

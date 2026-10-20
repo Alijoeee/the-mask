@@ -47,7 +47,13 @@ from themask.docx.reader import DocText, extract_text, has_revisions
 from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
 from themask.instruction import BANNER_TEXT, ai_instruction, banner_text
-from themask.labels import LabelError, find_labels, label_key, validate_key_labels
+from themask.labels import (
+    LabelError,
+    clashes_with_values,
+    find_labels,
+    label_key,
+    validate_key_labels,
+)
 from themask.leakcheck import LeakHit, media_left, rescan_detection, scan_package, unverifiable
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
@@ -252,13 +258,10 @@ def _check_labels(key: list[KeyEntry], text: str) -> None:
     except LabelError as error:
         raise ValueError(str(error)) from error
     names = {label_key(e.label): e.label for e in key if e.label is not None}
-    shapes = {normalize(f) for e in key for f in (e.value, *e.variants)}
+    forms = [form for e in key for form in (e.value, *e.variants)]
     for name in names.values():
-        needle = normalize(name)
-        if any(
-            shape == needle or (len(shape) >= 4 and shape in needle) for shape in shapes if shape
-        ):
-            raise ValueError(f"The name {name} is, or contains, a value that is being hidden.")
+        if clashes_with_values(name, forms):
+            raise ValueError(f"The name {name} is, or contains a word of, a value being hidden.")
     if names and find_labels(text, names):
         raise ValueError(
             "The files already hold a name chosen for a placeholder in square brackets; choose"

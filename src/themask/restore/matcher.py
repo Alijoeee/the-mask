@@ -79,13 +79,14 @@ def _placeholders(text: str, case: Case | None = None) -> list[PlaceholderMatch]
             replace(m, exact=False) if m.placeholder in named and m.exact else m for m in found
         ]
         by_label = {label_key(e.label): e for e in named.values() if e.label is not None}
-        for label in find_labels(text, case.label_index()):
+        for label in find_labels(text, case.label_index(), near=True):
             if not any(m.start < label.end and label.start < m.end for m in found):
-                entry = by_label[label.key]
+                # A near miss ("[Providers]") has no entry: it is planned as unknown, reported
+                # and never replaced.
+                entry = None if label.key is None else by_label[label.key]
+                placeholder = label.raw if entry is None else entry.placeholder
                 found.append(
-                    PlaceholderMatch(
-                        label.start, label.end, label.raw, entry.placeholder, label.exact
-                    )
+                    PlaceholderMatch(label.start, label.end, label.raw, placeholder, label.exact)
                 )
         found.sort(key=lambda m: m.start)
     # A placeholder never runs over a line break, so one that overlaps a span lies inside it.
