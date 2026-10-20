@@ -63,6 +63,14 @@ class Group:
     enabled: bool = True
     needs_check: bool = False
     disabled: set[int] = field(default_factory=set)
+    label: str | None = None
+
+    @property
+    def token(self) -> str:
+        """What the masked file writes for the group: ``[Label]`` if the owner named it
+        (ruling R127), otherwise the canonical placeholder. The placeholder stays its identity.
+        """
+        return self.placeholder if self.label is None else f"[{self.label}]"
 
     def active_findings(self) -> list[Finding]:
         """The findings that will be replaced.
@@ -125,6 +133,12 @@ class KeyEntry:
     type: PlaceholderType
     value: str
     variants: list[str]
+    label: str | None = None
+
+    @property
+    def token(self) -> str:
+        """What the masked files write for this entry: ``[Label]`` or the placeholder."""
+        return self.placeholder if self.label is None else f"[{self.label}]"
 
 
 @dataclass
@@ -157,6 +171,11 @@ def _objects(value: object) -> list[dict[str, object]]:
     return value
 
 
+def _label(entry: dict[str, object]) -> str | None:
+    # An entry has a "label" only when the owner named it; a stored null or number is damage.
+    return _text(entry["label"]) if "label" in entry else None
+
+
 def _whole_number(value: object) -> int:
     # bool is a kind of int in Python, but a stored true or false is not a number of days.
     if not isinstance(value, int) or isinstance(value, bool):
@@ -183,6 +202,12 @@ class Case:
         """When the case is due to be deleted."""
         return self.created_at + timedelta(days=self.retention_days)
 
+    def label_index(self) -> dict[str, str]:
+        """The owner's names for the key's entries: ``label_key`` of each label -> the label."""
+        from themask.labels import label_key
+
+        return {label_key(e.label): e.label for e in self.entries if e.label is not None}
+
     def to_json(self) -> str:
         """The case as JSON text: UTC ISO-8601 timestamp, placeholder types by their name."""
         return json.dumps(
@@ -191,12 +216,15 @@ class Case:
                 "created_at": self.created_at.astimezone(UTC).isoformat(),
                 "source_files": self.source_files,
                 "masked_files": [{"name": f.name, "sha256": f.sha256} for f in self.masked_files],
+                # "label" is written only for an owner-named entry (ruling R127), so a case
+                # without names is stored exactly as before.
                 "entries": [
                     {
                         "placeholder": e.placeholder,
                         "type": e.type.value,
                         "value": e.value,
                         "variants": e.variants,
+                        **({} if e.label is None else {"label": e.label}),
                     }
                     for e in self.entries
                 ],
@@ -222,6 +250,14 @@ class Case:
             placeholders = [_text(e["placeholder"]) for e in _objects(data["entries"])]
             if len(set(placeholders)) != len(placeholders):
                 raise ValueError("A placeholder is in the key twice.")
+            labels = [_label(e) for e in _objects(data["entries"])]
+            # Local import: labels reads the placeholder grammar, which reads this module.
+            from themask.labels import LabelError, validate_key_labels
+
+            try:
+                validate_key_labels(labels)
+            except LabelError as error:
+                raise ValueError("A stored name is not valid.") from error
             return cls(
                 id=_text(data["id"]),
                 created_at=created_at,
@@ -236,8 +272,9 @@ class Case:
                         PlaceholderType(_text(e["type"])),
                         _text(e["value"]),
                         _texts(e["variants"]),
+                        label,
                     )
-                    for e in _objects(data["entries"])
+                    for e, label in zip(_objects(data["entries"]), labels, strict=True)
                 ],
                 retention_days=_whole_number(data["retention_days"]),
             )

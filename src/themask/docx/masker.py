@@ -360,7 +360,7 @@ def _values(doc_text: DocText, plan: MaskPlan, entries: Iterable[KeyEntry]) -> d
     for entry in entries:
         for form in (entry.value, *entry.variants):
             if form.strip():
-                values.setdefault(form, entry.placeholder)
+                values.setdefault(form, entry.token)
     return values
 
 

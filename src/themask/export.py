@@ -46,7 +46,8 @@ from themask.docx.package import NOT_A_DOCX_MESSAGE, DocxPackage
 from themask.docx.reader import DocText, extract_text, has_revisions
 from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
-from themask.instruction import AI_INSTRUCTION
+from themask.instruction import BANNER_TEXT, ai_instruction, banner_text
+from themask.labels import LabelError, find_labels, label_key, validate_key_labels
 from themask.leakcheck import LeakHit, media_left, rescan_detection, scan_package, unverifiable
 from themask.model import Case, Group, KeyEntry, MaskedFile, MaskPlan, Replacement
 from themask.pdf.extractor import PdfReport
@@ -199,13 +200,22 @@ def export_case(
     plans = _plans(review.mask_plan(), combined)
     twins = _plans(_whole_plan(review.groups), combined)
     not_checkable = unverifiable(key)
+    _check_labels(key, combined.text)
+    named = any(entry.label is not None for entry in key)
+    instruction = ai_instruction(named)
     # The files in the order they are listed: by source, a redline's version before first.
     order = sorted(range(len(views)), key=lambda i: (views[i].index, views[i].side == "after"))
     staging = Path(tempfile.mkdtemp(prefix=_TEMP_PREFIX))
     try:
         checked = [
             _checked(
-                views[i], plans[i], twins[i], key, staging, names[views[i].index, views[i].side]
+                views[i],
+                plans[i],
+                twins[i],
+                key,
+                staging,
+                names[views[i].index, views[i].side],
+                banner_text(named),
             )
             for i in order
         ]
@@ -218,17 +228,48 @@ def export_case(
                 [],
                 _named(leftovers, staged),
                 [],
-                AI_INSTRUCTION,
+                instruction,
                 True,
                 _named(visible, staged),
                 not_checkable,
             )
         unmarked = _unmarked(staged, engine, user_lists, key)
+        unmarked = _without_names(unmarked, key)
         outputs, case = _save(staged, sources, key, code, options, save_case)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     allowed = _named(visible, outputs)  # by the names the files were written under
-    return ExportResult(case, outputs, [], unmarked, AI_INSTRUCTION, False, allowed, not_checkable)
+    return ExportResult(case, outputs, [], unmarked, instruction, False, allowed, not_checkable)
+
+
+def _check_labels(key: list[KeyEntry], text: str) -> None:
+    """Raises ValueError, before anything is written, for a key whose owner-chosen names (ruling
+    R127) are not valid and distinct, or when the text already holds one of them in square
+    brackets: a restore could not tell that from the placeholder the masker writes.
+    """
+    try:
+        validate_key_labels(entry.label for entry in key)
+    except LabelError as error:
+        raise ValueError(str(error)) from error
+    names = {label_key(e.label): e.label for e in key if e.label is not None}
+    shapes = {normalize(f) for e in key for f in (e.value, *e.variants)}
+    for name in names.values():
+        needle = normalize(name)
+        if any(
+            shape == needle or (len(shape) >= 4 and shape in needle) for shape in shapes if shape
+        ):
+            raise ValueError(f"The name {name} is, or contains, a value that is being hidden.")
+    if names and find_labels(text, names):
+        raise ValueError(
+            "The files already hold a name chosen for a placeholder in square brackets; choose"
+            " another name."
+        )
+
+
+def _without_names(found: list[Group], key: list[KeyEntry]) -> list[Group]:
+    """``found`` without the groups that are only an owner-chosen name in the masked file."""
+    names = {label_key(e.label) for e in key if e.label is not None}
+    return [g for g in found if label_key(g.canonical) not in names]
 
 
 # ---- loading ------------------------------------------------------------------------------------
@@ -388,7 +429,7 @@ def _whole_plan(groups: list[Group]) -> MaskPlan:
     """
     return MaskPlan(
         [
-            Replacement(finding.start, finding.end, group.placeholder)
+            Replacement(finding.start, finding.end, group.token)
             for group in groups
             for finding in group.findings
         ]
@@ -436,7 +477,13 @@ def _numbers_used(case: Case) -> int:
 
 
 def _checked(
-    view: _View, plan: MaskPlan, twin_plan: MaskPlan, key: list[KeyEntry], folder: Path, name: str
+    view: _View,
+    plan: MaskPlan,
+    twin_plan: MaskPlan,
+    key: list[KeyEntry],
+    folder: Path,
+    name: str,
+    banner: str = BANNER_TEXT,
 ) -> tuple[Path, list[LeakHit], list[LeakHit]]:
     """The version ``view`` masked with ``plan`` and saved as ``name`` in ``folder``, with its
     leftovers and the places left visible on purpose (ruling R84).
@@ -445,13 +492,13 @@ def _checked(
     ``twin_plan``; where that replaces no more than ``plan``, the file is its own twin. The places
     left visible are what the leak check finds in the file itself beyond its twin.
     """
-    path = _mask(view, plan, key, folder / name)
+    path = _mask(view, plan, key, folder / name, banner)
     shown = _scanned(path, key)
     if twin_plan.replacements == plan.replacements:
         return path, shown, []
     twins = folder / "twins"
     twins.mkdir(exist_ok=True)
-    leftovers = _scanned(_mask(view, twin_plan, key, twins / name), key)
+    leftovers = _scanned(_mask(view, twin_plan, key, twins / name, banner), key)
     return path, leftovers, _left_visible(shown, leftovers)
 
 
@@ -463,7 +510,9 @@ def _scanned(path: Path, key: list[KeyEntry]) -> list[LeakHit]:
     return scan_package(path, key) + media_left(path)
 
 
-def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:
+def _mask(
+    view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path, banner: str = BANNER_TEXT
+) -> Path:
     """Masks a copy of the version ``view`` with ``plan`` and the case's ``key``, puts the banner
     on top and saves it at ``out``. The prepared package stays as it was, so the same sources can
     be exported again, and masked again for the twin.
@@ -473,7 +522,7 @@ def _mask(view: _View, plan: MaskPlan, key: list[KeyEntry], out: Path) -> Path:
     if doc_text.text != view.text.text:
         raise ValueError("A file has changed since it was read; load it again.")
     apply_mask(pkg, doc_text, plan, entries=key)
-    insert_banner(pkg)
+    insert_banner(pkg, banner)
     pkg.save(out)
     return out
 

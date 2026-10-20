@@ -519,7 +519,14 @@ class MainWindow(QMainWindow):
         case = run.case if run is not None else None
         case_lists = run.case_lists if run is not None else CaseLists([], [], set())
         reserved = [entry.placeholder for entry in case.entries] if case is not None else []
-        review = ReviewState.from_analysis(analysis, self.ctx.user_lists, case_lists, reserved)
+        reserved_labels = (
+            {e.placeholder: e.label for e in case.entries if e.label is not None}
+            if case is not None
+            else {}
+        )
+        review = ReviewState.from_analysis(
+            analysis, self.ctx.user_lists, case_lists, reserved, reserved_labels
+        )
         # The screen first: when it cannot show the review, nothing of the window has changed.
         self.review_screen.load(review, combined_text(sources))
         self.sources = sources

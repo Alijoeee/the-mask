@@ -62,7 +62,8 @@ def reviewed(
     key = case.entries if case is not None else []
     analysis = analyze(combined_text(sources), engine, user_lists, case_lists, seed_entries=key)
     reserved = [entry.placeholder for entry in key]
-    return sources, ReviewState.from_analysis(analysis, user_lists, case_lists, reserved)
+    names = {entry.placeholder: entry.label for entry in key if entry.label is not None}
+    return sources, ReviewState.from_analysis(analysis, user_lists, case_lists, reserved, names)
 
 
 def analysed(ctx: AppContext, paths: list[Path]) -> tuple[list[SourceDoc], ReviewState]:
@@ -109,14 +110,17 @@ def simulate_ai(masked: Path, out: Path) -> Path:
 
     Every other entry is copied as it is, in the zip's order. Returns ``out``.
     """
-    from themask.instruction import BANNER_TEXT
+    from themask.instruction import BANNER_TEXT, BANNER_TEXT_NAMED
 
     with zipfile.ZipFile(masked) as archive:
         entries = {info.filename: archive.read(info) for info in archive.infolist()}
     document = etree.fromstring(entries["word/document.xml"])
     body = document.find(_w("body"))
     banner = body.find(_w("p"))
-    if banner is None or "".join(banner.itertext()) != BANNER_TEXT:
+    if banner is None or "".join(banner.itertext()) not in (
+        BANNER_TEXT,
+        BANNER_TEXT_NAMED,
+    ):
         raise ValueError("The masked file does not start with the banner.")
 
     def first(token: str) -> etree._Element | None:
