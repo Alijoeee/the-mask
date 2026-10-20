@@ -1339,3 +1339,89 @@ def test_real_engine_keeps_capital_group_and_the_trading_company_hidden(engine, 
     names = {g.canonical for g in a.groups}
     assert "Capital Group" in names and any(n.startswith("Trading Company") for n in names)
     assert all(g.enabled for g in a.groups)
+
+
+# --- Fix round 2: short forms of a hidden company -----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("long", "long_score", "short", "text"),
+    [
+        (
+            "Software Services Group Ltd",
+            0.9,
+            "Software Services",
+            "Software Services Group Ltd signs. Software Services shall deliver.",
+        ),
+        (
+            "Bank Services Ltd",
+            0.95,
+            "Bank Services Group",
+            "Bank Services Ltd signs. Bank Services Group pays.",
+        ),
+        (
+            "Bank Services Holdings Ltd",
+            0.9,
+            "Bank Services",
+            "Bank Services Holdings Ltd guarantees; Bank Services pays.",
+        ),
+    ],
+)
+def test_a_short_form_beside_a_hidden_company_is_not_switched_off(
+    lists, long, long_score, short, text
+):
+    fake = FakeEngine((C, long, long_score, "model"), (C, short, 0.6, "model"))
+    a = analyze(one(text), fake, lists)
+    assert {g.canonical for g in a.groups} >= {long}
+    assert all(g.enabled for g in a.groups)
+
+
+def test_real_engine_short_forms_of_hidden_companies_stay_on(engine, lists):
+    t = (
+        "This Agreement is made between Software Services Group Ltd and John Carter. Software"
+        " Services shall deliver the Goods. Bank Services Holdings Ltd guarantees; Bank Services"
+        " pays."
+    )
+    a = analyze(one(t), engine, lists)
+    assert all(g.enabled for g in a.groups)
+    assert "Software Services shall" not in masked(a) and "Bank Services pays" not in masked(a)
+
+
+def test_a_term_phrase_that_is_a_short_form_of_a_found_company_is_not_dropped(lists):
+    fake = FakeEngine(
+        (C, "Equipment and Software Group Ltd", 0.9, "model"),
+        (C, "Equipment and Software", 0.6, "model"),
+    )
+    a = analyze(
+        one("Equipment and Software Group Ltd signs. Equipment and Software pays."), fake, lists
+    )
+    assert "Equipment and Software pays" not in masked(a)
+    assert all(g.enabled for g in a.groups)
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Page Vivi", "Page Xi", "Annex Vivi", "Schedule Xi", "Party Xi", "Article Ivi", "Part Vi"],
+)
+def test_mixed_case_roman_looking_words_are_not_references(lists, label):
+    from themask.detect.lists import CaseLists, is_never_hide
+
+    assert not is_never_hide(label, lists, CaseLists([], [], set()))
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Article LIV",
+        "Schedule XL",
+        "Schedule LX",
+        "Annex LIV",
+        "Schedule CC",
+        "Annex IV",
+        "Page XII",
+    ],
+)
+def test_valid_roman_references_stay_never_hide(lists, label):
+    from themask.detect.lists import CaseLists, is_never_hide
+
+    assert is_never_hide(label, lists, CaseLists([], [], set()))

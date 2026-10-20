@@ -198,13 +198,18 @@ def analyze(
         common = len(form.split()) == 1 and is_contract_wording(form)
         return is_searchable(form) and not never_hidden(form) and not common
 
+    name_keys = [_words_key(name) for name in names]
     surnames = _surnames_kept(found, text, user_lists, case, is_term)
     defined = {term_key(term) for term in case.defined_terms}
     found = [
         f
         for f in found
         if (f.start, f.end) in surnames
-        or not (never_hidden(f.text) or _names_nobody(f, is_term) or _starts_a_term(text, f))
+        or not (
+            never_hidden(f.text)
+            or (_names_nobody(f, is_term) and not _part_of_a_name(f, name_keys))
+            or _starts_a_term(text, f)
+        )
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
@@ -393,10 +398,28 @@ def _plain_words(text: str, whole: bool = False) -> str:
     return _WITH_FILLER if len(others) < len(words) else _PLAIN
 
 
+def _words_key(text: str) -> str:
+    """``text`` as its normalised words joined by single spaces: "Bank-Services  Ltd." gives
+    "bankservices ltd" (a word stays one word, so a run can be told from a part of a word).
+    """
+    return " ".join(filter(None, map(normalize, text.split())))
+
+
 def _inside(short: str, long: str) -> bool:
-    """Whether the words of ``short`` stand as a run in the words of ``long`` (both normalised)."""
+    """Whether the words of ``short`` stand as a run of whole words in ``long`` (both as
+    ``_words_key`` gives them).
+    """
     a, b = short.split(), long.split()
     return bool(a) and any(b[i : i + len(a)] == a for i in range(len(b) - len(a) + 1))
+
+
+def _part_of_a_name(finding: Finding, name_keys: list[str]) -> bool:
+    """Whether the words of ``finding`` stand as a run inside a name that is found in the text:
+    "Equipment and Software" of "Equipment and Software Group Ltd" is that company's short form,
+    not a phrase of the contract (R122 item 2 leaves it to the normal handling).
+    """
+    key = _words_key(finding.text)
+    return any(_inside(key, name) for name in name_keys)
 
 
 def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
@@ -421,7 +444,7 @@ def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
     asked = [g for g in groups if guess(g)]
     kept = {id(g) for g in asked}
     hidden = [
-        normalize(form)
+        _words_key(form)
         for g in groups
         if id(g) not in kept and g.type in _NAMES
         for form in {g.canonical, *g.variants}
@@ -430,7 +453,7 @@ def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
         g
         for g in asked
         if not any(
-            _inside(normalize(form), other) or _inside(other, normalize(form))
+            _inside(_words_key(form), other) or _inside(other, _words_key(form))
             for form in {g.canonical, *g.variants}
             for other in hidden
         )
