@@ -99,3 +99,24 @@ def test_a_name_that_clashes_with_a_value_stops_the_export_in_words(
     window.show_export()
     assert window.export_dialog is None
     assert shown == [state.label_problems()[0]]
+
+
+def test_several_problems_say_how_many_more_there_are(
+    qtbot: QtBot, window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ReviewState, "label_problems", lambda self: ["First.", "Second.", "Third."])
+    shown: list[str] = []
+    monkeypatch.setattr(main_window, "show_error", lambda parent, message: shown.append(message))
+    window.show_export()
+    assert window.export_dialog is None
+    assert shown == ["First. (2 more are listed in the review.)"]
+
+
+def test_loading_another_review_clears_the_name_panel(qtbot: QtBot, window: MainWindow) -> None:
+    type_without_return(qtbot, window, "Bad [x]")
+    window.review_screen.inspector.name_panel.show_error("old")
+    combined, state = custom_review(CONTRACT, FAMILY_SPECS)
+    window.review_screen.load(state, combined)
+    panel = window.review_screen.inspector.name_panel
+    assert panel.group_id() is None and not panel.name_field.isEnabled()
+    assert panel.message_label.text() == ""

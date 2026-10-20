@@ -583,7 +583,12 @@ class MainWindow(QMainWindow):
             return
         problems = self.review_screen.review.label_problems()
         if problems:
-            show_error(self, problems[0])
+            more = (
+                f" ({len(problems) - 1} more are listed in the review.)"
+                if len(problems) > 1
+                else ""
+            )
+            show_error(self, problems[0] + more)
             return
         try:
             codes = self._case_codes()

@@ -41,6 +41,8 @@ from themask.detect.lists import (
 )
 from themask.detect.sweep import Spans, existing_placeholders, is_searchable, occurrences, sweep
 from themask.labels import (
+    ClashProbe,
+    FormSet,
     LabelError,
     check_label,
     clash_message,
@@ -164,6 +166,7 @@ class ReviewState:
         # The names an existing case's key gives its placeholders (ruling R127). A group the
         # case holds keeps its name: the case's other masked files are written with it.
         self.reserved_labels = dict(reserved_labels or {})
+        self._problems: tuple[object, list[tuple[str, str]]] | None = None
         for g in groups:
             if g.label is None and g.placeholder in self.reserved_labels:
                 g.label = self.reserved_labels[g.placeholder]
@@ -573,19 +576,57 @@ class ReviewState:
         another name, clears the message; a name from the case's key cannot change, so for
         it the other group must go. Empty when all is well.
         """
+        return [message for _, message in self.label_problem_pairs()]
+
+    def label_problem_pairs(self) -> list[tuple[str, str]]:
+        """``label_problems`` as (id of the group whose name clashes, message) pairs.
+
+        The answer is kept until a name, a switch, a place, a value or a key name changes, so the
+        screen can ask after every redraw without paying for the test each time.
+        """
+        if not any(g.label is not None for g in self.groups):
+            return []
+        key = (
+            tuple(
+                (
+                    g.id,
+                    g.label,
+                    g.enabled,
+                    g.canonical,
+                    tuple(sorted(g.variants)),
+                    tuple((f.start, f.end) for f in g.findings),
+                    tuple(sorted(g.disabled)),
+                )
+                for g in self.groups
+            ),
+            tuple(sorted(self.reserved_labels.items())),
+        )
+        if self._problems is not None and self._problems[0] == key:
+            return list(self._problems[1])
+        pairs = self._find_label_problems()
+        self._problems = (key, pairs)
+        return list(pairs)
+
+    def _find_label_problems(self) -> list[tuple[str, str]]:
         masked = [g for g in self.groups if g.active_findings()]
-        messages = []
-        for g in masked:
-            if g.label is None:
-                continue
+        named = [g for g in masked if g.label is not None]
+        if not named:
+            return []
+        sets = {
+            g.id: FormSet([g.canonical, *g.variants, *(f.text for f in g.findings)]) for g in masked
+        }
+        pairs = []
+        for g in named:
+            assert g.label is not None
+            probe = ClashProbe(g.label)
+            stored = g.placeholder in self.reserved_labels
             for other in masked:
-                forms = [other.canonical, *other.variants, *(f.text for f in other.findings)]
-                if clashes_with_values(g.label, forms):
-                    stored = g.placeholder in self.reserved_labels
-                    messages.append(
-                        clash_message(g.label, g.placeholder, other.placeholder, stored)
+                forms = sets[other.id]
+                if probe.may_clash(forms) and probe.clashes(forms.forms):
+                    pairs.append(
+                        (g.id, clash_message(g.label, g.placeholder, other.placeholder, stored))
                     )
-        return messages
+        return pairs
 
     def _check_label_before_hiding(
         self, value: str, kind: PlaceholderType, label: str, retype: bool = True

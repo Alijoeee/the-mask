@@ -359,6 +359,8 @@ class ReviewScreen(QWidget):
         if review.text != combined.text:
             raise ValueError(LOADED_ON_ANOTHER_TEXT)
         self.review, self.combined = review, combined
+        self.inspector.name_panel.show_group(None)  # nothing of the last review stays
+        self.inspector.name_panel.clear_error()
         self._map = self._show_text(combined)
         self._stressed = set()
         self._answered = set()
@@ -1168,16 +1170,10 @@ class ReviewScreen(QWidget):
         return True
 
     def _clashing_groups(self) -> set[str]:
-        """The groups whose name clashes with a value that will be masked (``label_problems``)."""
-        messages = self.review.label_problems()
-        return {
-            g.id
-            for g in self.review.groups
-            if g.label is not None
-            and any(
-                m.startswith(f"The name {g.label} ") and f" {g.placeholder} " in m for m in messages
-            )
-        }
+        """The groups whose name clashes with a value that will be masked (the review keeps the
+        answer until something changes, so this is cheap to ask again).
+        """
+        return {group_id for group_id, _ in self.review.label_problem_pairs()}
 
     def _toggle_places(self) -> None:
         """Open the places of the selected group, or close them."""

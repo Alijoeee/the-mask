@@ -16,6 +16,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 from themask.errors import MaskError
 from themask.placeholders import find_placeholders
@@ -146,6 +147,97 @@ def _identifying(word: str) -> bool:
     return not (word.isdigit() and len(word) < 3)
 
 
+@dataclass(frozen=True)
+class _Facts:
+    """What the clash test needs of one form, worked out once (forms come back again and again)."""
+
+    words: frozenset[str]
+    text: str
+    long_words: tuple[str, ...]  # three letters or more, not a stop word
+    short_words: frozenset[str]  # two characters, not a stop word, not digits
+    digits: str
+
+
+@lru_cache(maxsize=1 << 17)
+def _facts(form: str) -> _Facts:
+    form_words, form_text = _spellings(form)
+    return _Facts(
+        frozenset(form_words),
+        form_text,
+        tuple(w for w in form_words if sum(c.isalpha() for c in w) >= 3 and w not in _STOP),
+        frozenset(w for w in form_words if len(w) == 2 and w not in _STOP and not w.isdigit()),
+        _digit_string(form),
+    )
+
+
+class FormSet:
+    """The forms of one value, with what their facts add up to, for ``ClashProbe.may_clash``."""
+
+    def __init__(self, forms: Iterable[str]) -> None:
+        self.forms = tuple(dict.fromkeys(forms))
+        facts = [_facts(form) for form in self.forms]
+        self.words = frozenset().union(*(f.words for f in facts))
+        self.long_words = frozenset().union(*(f.long_words for f in facts))
+        self.short_words = frozenset().union(*(f.short_words for f in facts))
+        self.text = "\x00".join(f.text for f in facts)
+        self.digits = "\x00".join(f.digits for f in facts)
+
+
+class ClashProbe:
+    """``clashes_with_values`` for one name against many values: the name's side is worked out
+    once. ``clashes`` is the test itself; ``may_clash`` is a cheaper test on a ``FormSet`` that
+    is False only when ``clashes`` is certainly False (it looks at all forms together).
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        name_words, _ = _spellings(label)
+        self.identifying = {w for w in name_words if _identifying(w)}
+        plain = "".join(words(label))
+        translit = "".join(words(label.translate(_GERMAN)))
+        self.joined = {plain, translit, _umlautless(plain), _umlautless(translit)}
+        texts = {" ".join(words(label)), " ".join(words(label.translate(_GERMAN)))}
+        self.texts = {t for t in texts if len(t.replace(" ", "")) >= 3}
+        self.runs = _uppercase_runs(label)
+        digits = _digit_string(label)
+        self.windows = {digits[i : i + 4] for i in range(len(digits) - 3)}
+
+    def _short(self, short: Iterable[str]) -> bool:
+        return any(
+            j.startswith(w)
+            or j.endswith(w)
+            or any(r.startswith(w) or r.endswith(w) for r in self.runs)
+            for w in short
+            for j in self.joined
+        )
+
+    def _long(self, long_words: Iterable[str]) -> bool:
+        return any(w in j for w in long_words for j in self.joined)
+
+    def may_clash(self, forms: FormSet) -> bool:
+        return bool(
+            self.identifying & forms.words
+            or self._short(forms.short_words)
+            or self._long(forms.long_words)
+            or any(t in forms.text for t in self.texts)
+            or any(w in forms.digits for w in self.windows)
+        )
+
+    def clashes(self, forms: Iterable[str]) -> bool:
+        facts = [_facts(form) for form in forms]
+        if self.windows and any(w in f.digits for f in facts for w in self.windows):
+            return True
+        for f in facts:
+            if (
+                self.identifying & f.words
+                or self._short(f.short_words)
+                or self._long(f.long_words)
+                or any(t in f.text for t in self.texts)
+            ):
+                return True
+        return False
+
+
 def clashes_with_values(label: str, forms: Iterable[str]) -> bool:
     """Whether ``label`` could carry a hidden value, or part of one, into a masked file.
 
@@ -156,27 +248,7 @@ def clashes_with_values(label: str, forms: Iterable[str]) -> bool:
     folded, may not be part of a form when it is three or more characters long. Case, accents
     and the German umlaut spellings are ignored throughout.
     """
-    name_words, _ = _spellings(label)
-    identifying = {w for w in name_words if _identifying(w)}
-    plain = "".join(words(label))
-    translit = "".join(words(label.translate(_GERMAN)))
-    joined = {plain, translit, _umlautless(plain), _umlautless(translit)}
-    name_texts = {" ".join(words(label)), " ".join(words(label.translate(_GERMAN)))}
-    forms = list(forms)
-    if _digits_clash(label, forms):
-        return True
-    for form in forms:
-        form_words, form_text = _spellings(form)
-        if identifying & form_words or _short_word_clash(label, joined, form_words):
-            return True
-        if any(
-            sum(c.isalpha() for c in w) >= 3 and w not in _STOP and any(w in j for j in joined)
-            for w in form_words
-        ):
-            return True
-        if any(len(t.replace(" ", "")) >= 3 and t in form_text for t in name_texts):
-            return True
-    return False
+    return ClashProbe(label).clashes(forms)
 
 
 def _digit_string(text: str) -> str:
