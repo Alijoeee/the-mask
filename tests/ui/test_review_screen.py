@@ -1091,10 +1091,12 @@ def test_show_always_in_the_menu_ignores_a_stale_page_selection(qtbot: QtBot) ->
     s, st = screen_of(qtbot, CONTRACT, UNSURE_SPECS)
     acme = group_named(st, "Acme Supplies Ltd")
     start = CONTRACT.index("Project Falcon")
-    select_text(s, start, start + len("Project Falcon"))  # left over from an earlier click
     s.tree.setCurrentItem(s.tree_item_for(acme.id))
     s.tree_item_for(acme.id).setSelected(True)
+    select_text(s, start, start + len("Project Falcon"))  # left over, survives the group's click
+    assert s.text.textCursor().hasSelection()
     s.context_menu()
+    assert s.text.textCursor().hasSelection()
     s.never_action.trigger()
     assert st.user_lists.never_hide == ["Acme Supplies Ltd"]
 
