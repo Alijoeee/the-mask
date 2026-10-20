@@ -52,7 +52,7 @@ asks you. A case you chose yourself is never replaced: if another case fits bett
 says so. The Cases section lists the saved cases (its toolbar's "New case" button takes you back
 to Mask to start one). Settings are in the application menu (The MASK, Settings…, ⌘,) and open in
 a window of their own: your always-hide and never-hide lists, how long a case is kept and the
-folder of the masked files. They are off while a file is analysed or an export runs.
+folder of the masked files. They are off while a file is analysed or the export sheet is open.
 
 ## Install on your Mac
 

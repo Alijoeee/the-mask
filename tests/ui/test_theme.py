@@ -517,7 +517,8 @@ def test_the_mono_font_is_fixed_pitch_for_codes_and_placeholders(
     untouched_look: QApplication,
 ) -> None:
     font = theme.mono_font()
-    assert "SF Mono" not in font.families()  # not a family Qt lists: it is the fixed font
+    # No family is asked for by name: it is the system's fixed font, whatever that is.
+    assert len(font.families()) <= 1
     assert (
         font.families()[0] == QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
     )

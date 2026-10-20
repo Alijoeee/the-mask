@@ -10,7 +10,7 @@ the very object, because the review and the analysis hold it. The settings the s
 ``reload`` shows what is kept now.
 
 The screen is shown in a window of its own (``SettingsWindow``) that stays open beside the main
-window (it is off while a file is analysed or an export runs). What is kept can change meanwhile (the review's "Always hide" puts a value on the list),
+window (it is off while a file is analysed or the export sheet is open). What is kept can change meanwhile (the review's "Always hide" puts a value on the list),
 so the screen knows when it shows something else than what is kept (``is_stale``) and when the
 owner has typed something that is not saved (``has_unsaved_edits``), and the window shows the
 lists again when it is activated, unless the owner has typed.

@@ -55,6 +55,7 @@ from PySide6.QtGui import (
     QResizeEvent,
 )
 from PySide6.QtWidgets import (
+    QDialog,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
@@ -303,7 +304,8 @@ class MainWindow(QMainWindow):
         self._engine_loader: EngineWorker | None = None
         self._engine_problem: str | None = None
         self._review_ready = False
-        self._review_exported = False  # the open review was saved as masked files
+        # The review as it was when its export was finished with "Done"; None if it has not.
+        self._exported_state: tuple[object, ...] | None = None
         self._closing = False
         self._fade: tuple[QPropertyAnimation, QLabel] | None = None
         self._titles = dict(DEFAULT_TITLES)
@@ -543,7 +545,7 @@ class MainWindow(QMainWindow):
         screen = self.current_screen_name()
         if screen == "restore":
             self.restore_screen.drop_zone.choose_files()
-        elif screen == "review" and self._review_ready and not self._review_exported:
+        elif screen == "review" and self._review_ready and not self._review_is_exported():
             if ask_discard_review(self):
                 self.home.drop_zone.choose_files()
         else:
@@ -616,7 +618,7 @@ class MainWindow(QMainWindow):
         self.redline_split = any(source.pkg_before is not None for source in sources)
         self.pending_case = case
         self._review_ready = True
-        self._review_exported = False
+        self._exported_state = None
         self._review_title_changed(*self.review_screen.title())
         self._show("review")
 
@@ -665,7 +667,6 @@ class MainWindow(QMainWindow):
         )
         dialog = ExportDialog(self)
         dialog.finished.connect(self._export_closed)
-        dialog.finishedExport.connect(self._export_finished)
         self.export_dialog = dialog
         # The export reads the owner's lists on its thread: the Settings cannot change them now.
         self.settings_action.setEnabled(False)
@@ -681,13 +682,23 @@ class MainWindow(QMainWindow):
         codes = [summary.id for summary in store.list()]  # also finds the files that do not open
         return codes + [path.stem for path in store.unreadable]
 
-    def _export_finished(self) -> None:
-        outcome = self.export_dialog.result if self.export_dialog is not None else None
-        if outcome is not None and not outcome.blocked:
-            self._review_exported = True
+    def _review_is_exported(self) -> bool:
+        """Whether the review is just as it was when an export of it was finished with "Done"."""
+        return (
+            self._exported_state is not None
+            and self._exported_state == self.review_screen.review.fingerprint()
+        )
 
-    def _export_closed(self) -> None:
+    def _export_closed(self, code: int = 0) -> None:
         dialog, self.export_dialog = self.export_dialog, None
+        saved = dialog is not None and dialog.result is not None and not dialog.result.blocked
+        # "Done" after a save: nothing of this review is left to lose. "Back to review", a block
+        # or a cancel: it is still being worked on.
+        self._exported_state = (
+            self.review_screen.review.fingerprint()
+            if saved and code == QDialog.DialogCode.Accepted.value
+            else None
+        )
         if not self.is_analysing():
             self.settings_action.setEnabled(True)
             self.settings_window.setEnabled(True)

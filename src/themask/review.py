@@ -355,9 +355,12 @@ class ReviewState:
         was_answered = any(g.id in self.answered for g in groups) and all(
             g.id in self.answered for g in asked
         )
+        # A guess the owner was asked about and did not answer is hidden along with the group it
+        # joins (they merged it to hide it): the safe direction, not left visible unasked.
+        unanswered = {g.id for g in asked if g.id not in self.answered}
         occurrences_off = sorted(
             (
-                (f, i in g.disabled or (enabled and not g.enabled))
+                (f, i in g.disabled or (enabled and not g.enabled and g.id not in unanswered))
                 for g in groups
                 for i, f in enumerate(g.findings)
             ),
@@ -427,6 +430,26 @@ class ReviewState:
         return new
 
     # --- What the owner decided ------------------------------------------------------------------
+
+    def fingerprint(self) -> tuple[object, ...]:
+        """What the owner has decided, as a value to compare: it differs after any switch, name,
+        merge, split, hide or answer. Used to tell whether a review is as it was when exported.
+        """
+        return (
+            tuple(
+                (
+                    g.id,
+                    g.placeholder,
+                    g.enabled,
+                    g.label,
+                    g.canonical,
+                    tuple(sorted(g.disabled)),
+                    tuple((f.start, f.end) for f in g.findings),
+                )
+                for g in self.groups
+            ),
+            frozenset(self.answered),
+        )
 
     def mask_plan(self) -> MaskPlan:
         """The replacements to make: every finding of a group that is on, but the single
