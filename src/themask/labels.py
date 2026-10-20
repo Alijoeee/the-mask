@@ -162,9 +162,12 @@ def clashes_with_values(label: str, forms: Iterable[str]) -> bool:
     translit = "".join(words(label.translate(_GERMAN)))
     joined = {plain, translit, _umlautless(plain), _umlautless(translit)}
     name_texts = {" ".join(words(label)), " ".join(words(label.translate(_GERMAN)))}
+    forms = list(forms)
+    if _digits_clash(label, forms):
+        return True
     for form in forms:
         form_words, form_text = _spellings(form)
-        if identifying & form_words:
+        if identifying & form_words or _short_word_clash(label, joined, form_words):
             return True
         if any(
             sum(c.isalpha() for c in w) >= 3 and w not in _STOP and any(w in j for j in joined)
@@ -174,6 +177,52 @@ def clashes_with_values(label: str, forms: Iterable[str]) -> bool:
         if any(len(t.replace(" ", "")) >= 3 and t in form_text for t in name_texts):
             return True
     return False
+
+
+def _digit_string(text: str) -> str:
+    """Every digit of ``text`` in order, as ASCII digits, without anything between them."""
+    return "".join(
+        str(d)
+        for c in unicodedata.normalize("NFKD", text)
+        if (d := unicodedata.digit(c, None)) is not None
+    )
+
+
+def _digits_clash(label: str, forms: list[str]) -> bool:
+    """Whether four digits in a row of the name's digits are inside the digits of a form: an
+    account, phone, tax or amount number carried into the name ("Acct 37040044", "Fee1250000").
+    """
+    digits = _digit_string(label)
+    windows = {digits[i : i + 4] for i in range(len(digits) - 3)}
+    return bool(windows) and any(any(w in _digit_string(form) for w in windows) for form in forms)
+
+
+def _uppercase_runs(label: str) -> list[str]:
+    """The folded runs of capitals and digits of ``label`` as written ("BPSide" gives "bps")."""
+    runs, current = [], ""
+    for char in label:
+        if char.isupper() or char.isdigit():
+            current += char
+        else:
+            if current:
+                runs.append(fold(current))
+            current = ""
+    return [*runs, fold(current)] if current else runs
+
+
+def _short_word_clash(label: str, joined: set[str], form_words: set[str]) -> bool:
+    """Whether a two-character word of a form (BP, HP, 3M) starts or ends the name, or starts or
+    ends a run of capitals in it: "BPSide", "SideHP", "3MCo".
+    """
+    short = {w for w in form_words if len(w) == 2 and w not in _STOP and not w.isdigit()}
+    if not short:
+        return False
+    runs = _uppercase_runs(label)
+    return any(
+        j.startswith(w) or j.endswith(w) or any(r.startswith(w) or r.endswith(w) for r in runs)
+        for w in short
+        for j in joined
+    )
 
 
 def clash_message(label: str, placeholder: str, other: str, stored: bool) -> str:

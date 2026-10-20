@@ -323,6 +323,15 @@ class ReviewState:
                 " cannot be given to it; remove the name before merging."
             )
         label = named[0].label if named else None
+        if label is not None and clashes_with_values(
+            label,
+            [f for g in groups for f in (g.canonical, *g.variants, *(x.text for x in g.findings))],
+        ):
+            raise ValueError(
+                f"The name {label} contains, or is part of, a value in the groups you are"
+                " merging, so the merged group would show part of it. Remove the name first, or"
+                " do not merge these groups."
+            )
         enabled = any(g.enabled for g in groups)
         occurrences_off = sorted(
             (

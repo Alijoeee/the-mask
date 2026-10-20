@@ -1024,3 +1024,94 @@ def test_g_lookalike_letters_fold_to_latin() -> None:
 
     assert label_key("\u0432") == label_key("b") and label_key("\u03b2") == "b"
     assert label_key("\u03b7\u03bc") == "nu"
+
+
+# ---- fix round 3 ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("BPSide", "BP plc"), ("HPTeam", "HP Inc"), ("3MCo", "3M Company"), ("SideBP", "BP plc"),
+     ("SideBPTeam", "BP plc"), ("Tel12345678", "+49 30 12345678"),
+     ("Acct 37040044", "DE89 3704 0044 0532 0130 00"), ("VAT123456789", "NL123456789B01"),
+     ("Fee1250000", "EUR 1250000"), ("Side 1250000", "EUR 1,250,000")],
+)  # fmt: skip
+def test_n1_short_values_and_digit_runs_cannot_ride_in_a_name(name: str, value: str) -> None:
+    from themask.labels import clashes_with_values
+
+    assert clashes_with_values(name, [value])
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("Party 12", "12 pm"), ("Party 1", "1 January 2024"), ("Seller B", "B2B GmbH"),
+     ("Provider", "Thamesgate Catering plc"), ("Fee 125", "EUR 1250000")],
+)  # fmt: skip
+def test_n1_ordinary_names_stay_usable(name: str, value: str) -> None:
+    from themask.labels import clashes_with_values
+
+    assert not clashes_with_values(name, [value])
+
+
+def test_n1_the_review_and_the_export_refuse_them(
+    make_docx: MakeDocx, tmp_path: Path, engine: Engine, lists: UserLists
+) -> None:
+    from themask.labels import LabelClashError
+
+    text = "BP plc owes EUR 1,250,000 to HP Inc."
+    a = group(COMPANY, "[COMPANY_1]", "BP plc", text)
+    b = group(PlaceholderType.AMOUNT, "[AMOUNT_1]", "EUR 1,250,000", text)
+    review = review_of(text, lists, a, b)
+    for name in ("BPSide", "Side 1250000"):
+        with pytest.raises(LabelError):
+            review.set_label(a.id, name)
+    sources = one_file(make_docx, text)
+    for name in ("BPSide", "Fee1250000"):
+        review = review_of(
+            combined_text(sources).text, lists,
+            group(COMPANY, "[COMPANY_1]", "BP plc", text),
+            group(PlaceholderType.AMOUNT, "[AMOUNT_1]", "EUR 1,250,000", text),
+        )  # fmt: skip
+        review.groups[0].label = name
+        with pytest.raises(LabelClashError):
+            export(sources, review, tmp_path / "x", engine, lists)
+
+
+def test_m1_merging_into_a_name_that_clashes_is_refused(lists: UserLists) -> None:
+    text = "Northwind Trading B.V. and Provider Holdings Ltd and Provider."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    b = group(COMPANY, "[COMPANY_2]", "Provider Holdings Ltd", text)
+    review = review_of(
+        text, lists, a, b, reserved=["[COMPANY_1]"], reserved_labels={"[COMPANY_1]": "Provider"}
+    )
+    with pytest.raises(ValueError, match="merging"):
+        review.merge([a.id, b.id])
+    assert [g.placeholder for g in review.groups] == ["[COMPANY_1]", "[COMPANY_2]"]
+    assert a.label == "Provider" and b.canonical == "Provider Holdings Ltd"
+
+
+def test_m2_a_failure_after_a_retype_puts_the_group_back(
+    lists: UserLists, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = "Northwind Trading B.V. signs; Northwind again."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    a.variants.add("Northwind")
+    review = review_of(text, lists, a)
+    state = (a.type, a.placeholder, a.canonical, set(a.variants), list(a.findings), a.enabled)
+
+    def refuse(self: ReviewState, group_id: str, label: str | None) -> str | None:
+        raise LabelError("late failure")
+
+    monkeypatch.setattr(ReviewState, "set_label", refuse)
+    with pytest.raises(LabelError, match="late"):
+        review.hide_text("Northwind Trading B.V.", PlaceholderType.CUSTOM, label="Codename")
+    assert review.groups == [a]
+    assert (
+        a.type,
+        a.placeholder,
+        a.canonical,
+        set(a.variants),
+        list(a.findings),
+        a.enabled,
+    ) == state
+    assert {f.type for f in a.findings} == {COMPANY}
