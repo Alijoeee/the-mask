@@ -10,7 +10,7 @@ the very object, because the review and the analysis hold it. The settings the s
 ``reload`` shows what is kept now.
 
 The screen is shown in a window of its own (``SettingsWindow``) that stays open beside the main
-window. What is kept can change meanwhile (the review's "Always hide" puts a value on the list),
+window (it is off while a file is analysed or an export runs). What is kept can change meanwhile (the review's "Always hide" puts a value on the list),
 so the screen knows when it shows something else than what is kept (``is_stale``) and when the
 owner has typed something that is not saved (``has_unsaved_edits``), and the window shows the
 lists again when it is activated, unless the owner has typed.
@@ -286,10 +286,11 @@ class SettingsScreen(QWidget):
 
 
 class SettingsWindow(QDialog):
-    """The settings in a window of their own, titled "Settings": a tool window that does not
+    """The settings in a window of their own, titled "Settings": a plain window that does not
     block the main window, closed with Esc. ``settings_screen`` is the screen it holds.
 
-    It shows what is kept each time it opens, and again when it becomes the active window after
+    It shows what is kept each time it opens (unless the owner typed something not saved: a
+    window hidden and shown again keeps that), and again when it becomes the active window after
     what is kept changed meanwhile, unless the owner has typed something that is not saved: that
     is never thrown away. Return saves (and does nothing else, whatever button has the focus).
     """
@@ -297,7 +298,15 @@ class SettingsWindow(QDialog):
     def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setWindowFlag(Qt.WindowType.Tool, True)
+        # A plain window, not a tool window: a tool window floats over the review and hides when
+        # the app is inactive.
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+        )
         self.setModal(False)
         self.settings_screen = SettingsScreen(ctx)
         layout = QVBoxLayout(self)
@@ -311,7 +320,8 @@ class SettingsWindow(QDialog):
         self.resize(680, 640)
 
     def showEvent(self, event: QShowEvent) -> None:
-        self.settings_screen.reload()
+        if not self.settings_screen.has_unsaved_edits():
+            self.settings_screen.reload()
         super().showEvent(event)
 
     def event(self, event: QEvent) -> bool:

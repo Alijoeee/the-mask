@@ -40,7 +40,9 @@ def test_the_window_is_a_dialog_called_settings_that_does_not_block(window: Sett
     assert isinstance(window, QDialog)
     assert window.windowTitle() == "Settings"
     assert not window.isModal()  # the owner can go on working in the main window
-    assert window.windowType() == Qt.WindowType.Tool  # a tool window, as the brief says
+    # A plain window: a tool window floats over the review and hides when the app is inactive.
+    assert window.windowType() == Qt.WindowType.Window
+    assert window.windowType() != Qt.WindowType.Tool
 
 
 def test_the_window_holds_the_settings_screen(window: SettingsWindow) -> None:
@@ -70,8 +72,13 @@ def test_the_window_shows_the_lists_as_they_are_kept_when_it_opens(
     assert window.settings_screen.always_edit.toPlainText() == "Project Falcon"
     window.settings_screen.always_edit.setPlainText("typed, not saved")
     window.hide()
-    window.show()  # what was typed and not saved is dropped, as when the screen was left
-    assert window.settings_screen.always_edit.toPlainText() == "Project Falcon"
+    window.show()  # fix wave 1 (I3): what was typed and not saved is NOT thrown away on re-show
+    assert window.settings_screen.always_edit.toPlainText() == "typed, not saved"
+    window.settings_screen.always_edit.setPlainText("Project Falcon")  # back to what is kept
+    window.hide()
+    app_ctx.user_lists.add_always("Other Name")  # a clean window shows what is kept now
+    window.show()
+    assert window.settings_screen.always_edit.toPlainText() == "Project Falcon\nOther Name"
 
 
 # ---- the lists that changed meanwhile -----------------------------------------------------------

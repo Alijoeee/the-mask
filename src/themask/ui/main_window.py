@@ -662,6 +662,9 @@ class MainWindow(QMainWindow):
         dialog.finished.connect(self._export_closed)
         dialog.finishedExport.connect(self._export_finished)
         self.export_dialog = dialog
+        # The export reads the owner's lists on its thread: the Settings cannot change them now.
+        self.settings_action.setEnabled(False)
+        self.settings_window.setEnabled(False)
         dialog.open()
         dialog.run(self.sources, self.review_screen.review, options, self.ctx)
 
@@ -680,6 +683,9 @@ class MainWindow(QMainWindow):
 
     def _export_closed(self) -> None:
         dialog, self.export_dialog = self.export_dialog, None
+        if not self.is_analysing():
+            self.settings_action.setEnabled(True)
+            self.settings_window.setEnabled(True)
         if dialog is not None:
             dialog.deleteLater()
 

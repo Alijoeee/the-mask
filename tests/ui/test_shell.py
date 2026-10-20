@@ -829,3 +829,19 @@ def test_cmd_o_means_the_screen_s_own_file(
     window.show_home()
     window.choose_action.trigger()
     assert chosen[-1] == "mask" and len(asked) == 2
+
+
+def test_the_settings_are_off_while_the_export_dialog_is_open(
+    qtbot: QtBot, window: MainWindow, corpus: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from themask.ui.export_dialog import ExportDialog
+
+    monkeypatch.setattr(ExportDialog, "run", lambda self, *args: None)
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+    window.show_settings()
+    window.show_export()
+    assert window.export_dialog is not None
+    assert not window.settings_action.isEnabled() and not window.settings_window.isEnabled()
+    window.export_dialog.reject()
+    assert window.settings_action.isEnabled() and window.settings_window.isEnabled()
