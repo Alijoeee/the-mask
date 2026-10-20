@@ -400,9 +400,11 @@ def _plain_words(text: str, whole: bool = False) -> str:
 
 def _words_key(text: str) -> str:
     """``text`` as its normalised words joined by single spaces: "Bank-Services  Ltd." gives
-    "bankservices ltd" (a word stays one word, so a run can be told from a part of a word).
+    "bank services ltd". A hyphen, a dash or a slash parts words, and "and" and "&" are left
+    out, so "Software & Services" and "Software-and-Services" key alike.
     """
-    return " ".join(filter(None, map(normalize, text.split())))
+    words = map(normalize, re.split(r"[\s/\-\N{HYPHEN}-\N{HORIZONTAL BAR}]+", text))
+    return " ".join(word for word in words if word and word != "and")
 
 
 def _inside(short: str, long: str) -> bool:

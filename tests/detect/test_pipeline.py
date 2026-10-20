@@ -1425,3 +1425,29 @@ def test_valid_roman_references_stay_never_hide(lists, label):
     from themask.detect.lists import CaseLists, is_never_hide
 
     assert is_never_hide(label, lists, CaseLists([], [], set()))
+
+
+@pytest.mark.parametrize(
+    ("long", "short"),
+    [
+        ("Software-Services Group Ltd", "Software Services"),
+        ("Software/Services Group Ltd", "Software Services"),
+        ("Software & Services Group Ltd", "Software and Services"),
+        ("Equipment-and-Software Group Ltd", "Equipment and Software"),
+    ],
+)
+def test_hyphen_slash_and_ampersand_do_not_hide_the_containment(lists, long, short):
+    fake = FakeEngine((C, long, 0.9, "model"), (C, short, 0.6, "model"))
+    a = analyze(one(f"{long} signs. {short} pays."), fake, lists)
+    assert all(g.enabled for g in a.groups)
+    assert f"{short} pays" not in masked(a)
+
+
+def test_real_engine_hyphenated_company_keeps_its_short_form_on(engine, lists):
+    t = (
+        "This Agreement is made between Software-Services Group Ltd and Anna Weber."
+        " Software Services shall pay."
+    )
+    a = analyze(one(t), engine, lists)
+    assert all(g.enabled for g in a.groups)
+    assert "Software Services shall" not in masked(a)
