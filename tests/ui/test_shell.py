@@ -845,3 +845,17 @@ def test_the_settings_are_off_while_the_export_dialog_is_open(
     assert not window.settings_action.isEnabled() and not window.settings_window.isEnabled()
     window.export_dialog.reject()
     assert window.settings_action.isEnabled() and window.settings_window.isEnabled()
+
+
+def test_the_note_of_the_cases_screen_follows_a_save_made_while_it_shows(
+    window: MainWindow, app_ctx: AppContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))  # the lists and settings files are written here
+    app_ctx.settings.retention_days = 14
+    window.show_cases()
+    assert "expires 14 days after" in window.sidebar.cases_note.text()
+    window.show_settings()
+    window.settings_screen.retention_spin.setValue(30)
+    window.settings_screen.save_button.click()
+    assert window.current_screen_name() == "cases"
+    assert "expires 30 days after" in window.sidebar.cases_note.text()

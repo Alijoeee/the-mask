@@ -22,7 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QEvent, Qt
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
     QDialog,
@@ -107,8 +107,11 @@ class SettingsScreen(QWidget):
     """The settings of ``ctx``: ``always_edit`` and ``never_edit`` hold the two lists, one value
     on each line, ``retention_spin`` the days a case is kept (1 to 365) and ``folder_edit`` the
     folder of the masked files, which ``folder_button`` changes. ``save_button`` keeps it all,
-    and ``status_label`` says how that went. ``about_label`` is the About box.
+    and ``status_label`` says how that went. ``about_label`` is the About box. ``saved`` is sent
+    when a save has gone through.
     """
+
+    saved = Signal()
 
     def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -283,6 +286,7 @@ class SettingsScreen(QWidget):
         self.ctx.settings.out_dir = wanted.out_dir
         self.reload()
         set_status(self.status_label, SAVED)
+        self.saved.emit()
 
 
 class SettingsWindow(QDialog):

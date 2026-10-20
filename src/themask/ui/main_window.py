@@ -319,6 +319,8 @@ class MainWindow(QMainWindow):
         self.cases_screen = CasesScreen(ctx)
         self.settings_window = SettingsWindow(ctx, self)
         self.settings_screen = self.settings_window.settings_screen
+        # The note in the sidebar follows a save at once, also while the Cases screen shows.
+        self.settings_screen.saved.connect(self._settings_saved)
         self.sidebar = Sidebar()
         self._stack = QStackedWidget()
         self._stack.setObjectName("screenStack")
@@ -546,6 +548,9 @@ class MainWindow(QMainWindow):
                 self.home.drop_zone.choose_files()
         else:
             self.home.drop_zone.choose_files()
+
+    def _settings_saved(self) -> None:
+        self.sidebar.set_retention_days(self.ctx.settings.retention_days)
 
     def _settings_triggered(self) -> None:
         if self.settings_action.isEnabled():
