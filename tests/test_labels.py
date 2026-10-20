@@ -442,6 +442,25 @@ def test_a_stored_name_not_in_this_file_is_still_taken(lists: UserLists) -> None
         review.set_label(c.id, "Provider")
 
 
+def test_a_stored_name_already_in_brackets_in_the_added_file_is_said_in_the_review(
+    lists: UserLists,
+) -> None:
+    text = "Northwind Trading B.V. met the [Provider] and Acme Corp."
+    a = group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", text)
+    review = review_of(
+        text, lists, a, reserved=["[COMPANY_1]"], reserved_labels={"[COMPANY_1]": "Provider"}
+    )
+    problems = review.label_problems()  # not first at the export
+    assert len(problems) == 1 and "[Provider]" in problems[0]
+    assert review.label_problem_pairs()[0][0] == a.id
+    clean = review_of(
+        "Northwind Trading B.V. signs.", lists,
+        group(COMPANY, "[COMPANY_1]", "Northwind Trading B.V.", "Northwind Trading B.V. signs."),
+        reserved=["[COMPANY_1]"], reserved_labels={"[COMPANY_1]": "Provider"},
+    )  # fmt: skip
+    assert clean.label_problems() == []
+
+
 # ---- the export ---------------------------------------------------------------------------------
 
 

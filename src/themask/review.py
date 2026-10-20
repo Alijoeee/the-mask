@@ -178,6 +178,9 @@ class ReviewState:
         # case holds keeps its name: the case's other masked files are written with it.
         self.reserved_labels = dict(reserved_labels or {})
         self._problems: tuple[object, list[tuple[str, str]]] | None = None
+        # A name the case's key holds that this text already writes in square brackets: a restore
+        # could not tell the two apart, and the export refuses it. Said here, in the review.
+        self._bracketed = self._stored_names_in_text()
         for g in groups:
             if g.label is None and g.placeholder in self.reserved_labels:
                 g.label = self.reserved_labels[g.placeholder]
@@ -607,7 +610,7 @@ class ReviewState:
         screen can ask after every redraw without paying for the test each time.
         """
         if not any(g.label is not None for g in self.groups):
-            return []
+            return list(self._bracketed)
         key = (
             tuple(
                 (
@@ -625,9 +628,27 @@ class ReviewState:
         )
         if self._problems is not None and self._problems[0] == key:
             return list(self._problems[1])
-        pairs = self._find_label_problems()
+        pairs = [*self._bracketed, *self._find_label_problems()]
         self._problems = (key, pairs)
         return list(pairs)
+
+    def _stored_names_in_text(self) -> list[tuple[str, str]]:
+        """(id of the group that has the name, or "" if the text has none; message) for each name
+        of the case's key that the text already holds in square brackets.
+        """
+        pairs = []
+        for placeholder, label in self.reserved_labels.items():
+            if find_labels(self.text, {label_key(label): label}):
+                owner = next((g.id for g in self.groups if g.placeholder == placeholder), "")
+                pairs.append(
+                    (
+                        owner,
+                        f"The file already contains [{label}] in square brackets, the name"
+                        f" {placeholder} has in the case. A restore could not tell them apart;"
+                        " take it out of the file in Word and open the file again.",
+                    )
+                )
+        return pairs
 
     def _find_label_problems(self) -> list[tuple[str, str]]:
         masked = [g for g in self.groups if g.active_findings()]
