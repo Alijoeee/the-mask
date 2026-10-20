@@ -466,11 +466,18 @@ def name_test(groups: Iterable[Group]) -> Callable[[str], bool]:
     return lambda word: normalize(word) in names
 
 
+def _within(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    """Whether ``start``-``end`` lies wholly inside one of the ordered, separate ``spans``."""
+    index = bisect_right(spans, (start, 1 << 62)) - 1
+    return index >= 0 and spans[index][0] <= start and end <= spans[index][1]
+
+
 def sweep(
     text: str,
     groups: list[Group],
     fixed: Collection[Group] = (),
     is_term: Callable[[str], bool] = is_default_term,
+    public: Collection[tuple[int, int]] = (),
 ) -> None:
     """Add to ``groups`` every further occurrence in ``text`` of their variants (see the module).
 
@@ -479,6 +486,11 @@ def sweep(
     (``stands_as_a_name``): the pipeline passes the owner's lists and the defined terms. New findings are appended to each group's findings, so the ones already there
     keep their order (a finding taken over leaves its group, and the indexes of the occurrences
     switched off follow). Sweeping again adds nothing.
+
+    ``public`` are stretches of public text (references to laws, task D7): an occurrence that lies
+    wholly inside one is left alone, so the 6698 of an agreement is not swept out of "Law No.
+    6698". The owner's own values (always-hide entries, selections, the case's key) are swept
+    there too.
     """
     places = _Places(groups, fixed)
     placeholders = Spans((p.start, p.end) for p in existing_placeholders(text))
@@ -493,8 +505,11 @@ def sweep(
         ),
         key=lambda pair: (-len(pair[0]), pair[1], pair[0]),
     )
+    public_spans = sorted(public)
+    fixed_ids = {id(g) for g in fixed}
     for variant, index in variants:
         group = groups[index]
+        owners = id(group) in fixed_ids or any(f.source in ("list", "user") for f in group.findings)
         as_a_name = is_bare_name(group.type, variant)
         pattern = flexible_pattern(variant)
         position = 0
@@ -505,6 +520,7 @@ def sweep(
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
+                or (not owners and _within(public_spans, start, end))
                 or (as_a_name and not stands_as_a_name(text, start, end, is_term, is_name=is_name))
                 or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
