@@ -25,16 +25,19 @@ uv run python -m themask
 `uv sync` needs the network once, to download the dependencies. The finished app never does.
 
 The window opens at once and says "Loading…" for a few seconds while it loads the language model.
-Drop a Word or PDF contract on it (or use "Choose files…") to analyse it and review what it found.
+A sidebar on the left has three sections: Mask, Restore and Cases. On Mask, drop a Word or PDF
+contract on the window (or use "Choose file…", also ⌘O) to analyse it and review what it found.
 The toolbar's "Export…" button saves the masked copy in `~/Documents/The MASK` and keeps its key in a case on
 this Mac, locked with a key in your Keychain. Links to web pages and e-mail addresses are removed
 from the masked copy; the link text stays. When the AI tool gives you its Word file or its text
-back, the Restore screen puts the real values back. It never guesses which case a file belongs to:
+back, the Restore section puts the real values back (the toolbar's "Restore" button). It never
+guesses which case a file belongs to:
 it takes the case whose code is in the file's name (`MASKED-<code>.docx`, which many AI tools keep),
 and when two cases fit the file equally well it asks you. A case you chose yourself is never replaced:
-if another case fits better, the screen says so. The Cases screen lists the saved cases, and
-Settings holds your always-hide and never-hide lists, how long a case is kept and the folder of the
-masked files.
+if another case fits better, the screen says so. The Cases section lists the saved cases (its
+toolbar's "New case" button takes you back to Mask to start one). Settings are in the application
+menu (The MASK, Settings…, ⌘,) and open in a window of their own: your always-hide and never-hide
+lists, how long a case is kept and the folder of the masked files.
 
 ## Install on your Mac
 
