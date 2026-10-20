@@ -1232,3 +1232,14 @@ def test_a_place_in_a_low_confidence_guess_keeps_it_hidden(lists):
     fake = FakeEngine((C, "Bank of Ireland", 0.6, "model"))
     (g,) = analyze(one("Payment to Bank of Ireland follows."), fake, lists).groups
     assert g.enabled is True
+
+
+def test_page_footers_in_a_real_contract_hide_nobody_but_the_parties(engine, lists):
+    t = (
+        "This Agreement is made between Acme Supplies Ltd and John Carter.\n"
+        "Page PAGE1\nPage 1 of 3\nPAGE1 NUMPAGES\nSeite 2 von 5\nPagina 3\nBladzijde 4\n"
+        "Seite PAGE2\nPagina PAGE3\nSee Section 3, Article 5, Exhibit A, Schedule 2, Clause 4.1,\n"
+        "Appendix B, Table 1 and Figure 2.\n"
+    )
+    a = analyze(one(t), engine, lists)
+    assert sorted(g.canonical for g in a.groups) == ["Acme Supplies Ltd", "John Carter"]

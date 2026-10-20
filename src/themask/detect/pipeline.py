@@ -52,13 +52,15 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
-from themask.detect.grouping import PersonName, SurnamePolicy, group_findings
+from themask.detect.grouping import CHECK_BELOW, PersonName, SurnamePolicy, group_findings
 from themask.detect.identity import value_key
 from themask.detect.lists import (
     CaseLists,
     UserLists,
     always_hide_entry,
     is_default_term,
+    is_place_term,
+    is_vocabulary_word,
     never_hide_check,
     on_never_hide_list,
     term_key,
@@ -203,7 +205,7 @@ def analyze(
         f
         for f in found
         if (f.start, f.end) in surnames
-        or not (never_hidden(f.text) or _names_nobody(f) or _starts_a_term(text, f))
+        or not (never_hidden(f.text) or _names_nobody(f, is_term) or _starts_a_term(text, f))
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
@@ -237,6 +239,10 @@ def analyze(
             is_bare_name(group.type, f.text) and _ordinary(f.text, defined) for f in group.findings
         ):
             group.needs_check = True
+    stored = {seed.id for seed in seeds}
+    for group in groups:
+        if _asks_the_owner(group, is_term, stored):
+            group.enabled, group.needs_check = False, True
     groups.sort(key=lambda g: g.findings[0].start)
     _number(groups, seed_entries or [], placeholders)
     return Analysis(text, groups, _warnings(placeholders))
@@ -331,11 +337,77 @@ def _starts_a_term(text: str, finding: Finding) -> bool:
     return following is not None and is_default_term(f"{finding.text} {following[1]}")
 
 
-def _names_nobody(finding: Finding) -> bool:
+def _names_nobody(finding: Finding, is_term: Callable[[str], bool]) -> bool:
     """Whether the language model found a text made of the contract's own words only, which
-    names nobody: "GOVERNING LAW", "the Recipient for the Purpose" (``is_contract_wording``).
+    names nobody: "GOVERNING LAW", "the Recipient for the Purpose" (``is_contract_wording``), or
+    a never-hide term with filler words: "the Confidential Information of the other" (ruling
+    R122, item 2).
     """
-    return finding.source == "model" and is_contract_wording(finding.text)
+    if finding.source != "model":
+        return False
+    if is_contract_wording(finding.text):
+        return True
+    return finding.type in _NAMES and _plain_words(finding.text, is_term) == _WITH_FILLER
+
+
+# Small words that join the ordinary words of a phrase without naming anybody.
+_FILLER = frozenset(
+    {"the", "of", "a", "an", "and", "or", "to", "in", "on", "for", "by", "with", "from", "other"}
+    | {"another", "any", "each", "either", "neither", "such", "this", "that", "these", "those"}
+    | {"its", "their", "his", "her", "as", "at", "between", "under", "upon", "&"}
+)
+_PLAIN_WORD = re.compile(r"[^\W\d_]+(?:['\N{RIGHT SINGLE QUOTATION MARK}\-][^\W\d_]+)*")
+# What ``_plain_words`` reports: made of ordinary words with at least one filler word and at
+# least one other (``_WITH_FILLER``); made of ordinary words with no filler (``_PLAIN``); not
+# made of ordinary words only (``_NAME_SHAPED``).
+_WITH_FILLER, _PLAIN, _NAME_SHAPED = "filler", "plain", "name"
+
+
+def _plain_word(word: str, is_term: Callable[[str], bool]) -> bool:
+    """Whether ``word`` is an ordinary word of a contract: a word of a default role, document
+    or legal term, a COMMON_WORDS word, a word of the contract's own, or a never-hide term that
+    is not a place, a month or a body (those are names in other combinations).
+    """
+    return (
+        is_vocabulary_word(word)
+        or word.casefold() in _COMMON_WORDS
+        or is_contract_wording(word)
+        or (is_term(word) and not is_place_term(word))
+    )
+
+
+def _plain_words(text: str, is_term: Callable[[str], bool]) -> str:
+    """How ``text`` reads: ``_WITH_FILLER``, ``_PLAIN`` or ``_NAME_SHAPED`` (see above). A word
+    with a digit, or one that is not an ordinary word, makes it name-shaped.
+    """
+    words = [word.strip(".,:;()\"'") for word in text.split()]
+    words = [word for word in words if word]
+    if not words or any(not _PLAIN_WORD.fullmatch(word) for word in words):
+        return _NAME_SHAPED
+    filler = [word for word in words if word.casefold() in _FILLER]
+    others = [word for word in words if word.casefold() not in _FILLER]
+    if not others or not all(_plain_word(word, is_term) for word in others):
+        return _NAME_SHAPED
+    return _WITH_FILLER if filler else _PLAIN
+
+
+def _asks_the_owner(group: Group, is_term: Callable[[str], bool], keys: set[str]) -> bool:
+    """Whether ``group`` is a low-confidence guess of the language model made of ordinary words
+    only ("Personal Services"): it is shown, not hidden, and the owner is asked (ruling R122,
+    item 1). A value the owner, a contract rule or a pattern found, a stored key and anything
+    name-shaped are not.
+    """
+    if group.type not in _NAMES or group.id in keys:
+        return False
+    found = [f for f in group.findings if f.source != "sweep"]
+    return (
+        bool(found)
+        and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
+        and all(
+            _plain_words(form, is_term) != _NAME_SHAPED
+            for form in {group.canonical, *group.variants}
+        )
+    )
 
 
 def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bool]) -> list[str]:
@@ -348,7 +420,9 @@ def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bo
     for finding in found:
         if finding.source == "list":
             names.append(finding.text)
-        elif finding.type in _NAMES and not (is_term(finding.text) or _names_nobody(finding)):
+        elif finding.type in _NAMES and not (
+            is_term(finding.text) or _names_nobody(finding, is_term)
+        ):
             names += [finding.text, strip_legal_form(finding.text)]
             names += variants_of(finding.text, finding.type)
             if finding.type is PlaceholderType.PERSON:
