@@ -71,7 +71,7 @@ def test_the_home_picture_is_in_the_colours_of_its_appearance(
     assert image.pixelColor(600, 4) == QColor(t.chrome)  # the tool bar
     assert image.pixelColor(5, 400) == QColor(t.chrome)  # the sidebar
     assert image.pixelColor(300, 400) == QColor(t.ground)  # the screen
-    assert image.pixelColor(700, 340) == QColor(t.panel)  # the card
+    assert image.pixelColor(500, 120) == QColor(t.panel)  # the card, clear of its buttons
     assert image.pixelColor(150, 80) == QColor(t.accent)  # the chosen section
     assert image.pixelColor(1170, 25) == QColor(t.border)  # the primary action: off at first
 

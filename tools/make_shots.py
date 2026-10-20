@@ -106,6 +106,7 @@ def take(
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")  # nothing opens on the screen
     existing = QApplication.instance()
     application = existing if isinstance(existing, QApplication) else QApplication(sys.argv)
+    application.setStyle("Fusion")  # the pictures look the same on every machine, not native
     if review is not None and engine is None:
         from themask.detect.engine import Engine as DefaultEngine
 

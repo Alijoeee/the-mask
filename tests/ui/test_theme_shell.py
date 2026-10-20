@@ -66,8 +66,8 @@ def test_the_tool_bar_is_the_chrome_with_a_line_under_it(qtbot: QtBot, appearanc
     t = theme.tokens(appearance)
     bar = QToolBar()
     bar.setObjectName("mainToolBar")
-    bar.setMinimumSize(300, 52)
     styled(qtbot, bar, appearance)
+    bar.resize(300, 52)  # an unparented tool bar has no size of its own on every style
     image = bar.grab().toImage()
     assert image.pixelColor(150, 20) == QColor(t.chrome)
     assert image.pixelColor(150, image.height() - 1) == QColor(t.border)
