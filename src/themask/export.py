@@ -48,7 +48,9 @@ from themask.docx.revisions import accept_all, reject_all
 from themask.errors import UnsupportedFileError
 from themask.instruction import BANNER_TEXT, ai_instruction, banner_text
 from themask.labels import (
+    LabelClashError,
     LabelError,
+    clash_message,
     clashes_with_values,
     find_labels,
     label_key,
@@ -206,7 +208,11 @@ def export_case(
     plans = _plans(review.mask_plan(), combined)
     twins = _plans(_whole_plan(review.groups), combined)
     not_checkable = unverifiable(key)
-    _check_labels(key, combined.text)
+    _check_labels(
+        key,
+        combined.text,
+        {e.placeholder for e in existing.entries if e.label is not None} if existing else (),
+    )
     named = any(entry.label is not None for entry in key)
     instruction = ai_instruction(named)
     # The files in the order they are listed: by source, a redline's version before first.
@@ -248,20 +254,30 @@ def export_case(
     return ExportResult(case, outputs, [], unmarked, instruction, False, allowed, not_checkable)
 
 
-def _check_labels(key: list[KeyEntry], text: str) -> None:
-    """Raises ValueError, before anything is written, for a key whose owner-chosen names (ruling
-    R127) are not valid and distinct, or when the text already holds one of them in square
-    brackets: a restore could not tell that from the placeholder the masker writes.
+def _check_labels(key: list[KeyEntry], text: str, stored: Collection[str] = ()) -> None:
+    """Raises, before anything is written, for a key whose owner-chosen names (ruling R127) are
+    not valid and distinct (ValueError), that clash with a value of the key (LabelClashError, with
+    a message that says which and what to do), or that the text already holds in square brackets
+    (ValueError): a restore could not tell that from the placeholder the masker writes.
     """
     try:
         validate_key_labels(entry.label for entry in key)
     except LabelError as error:
         raise ValueError(str(error)) from error
+    for entry in key:
+        if entry.label is None:
+            continue
+        for other in key:
+            if clashes_with_values(entry.label, [other.value, *other.variants]):
+                raise LabelClashError(
+                    clash_message(
+                        entry.label,
+                        entry.placeholder,
+                        other.placeholder,
+                        entry.placeholder in stored,
+                    )
+                )
     names = {label_key(e.label): e.label for e in key if e.label is not None}
-    forms = [form for e in key for form in (e.value, *e.variants)]
-    for name in names.values():
-        if clashes_with_values(name, forms):
-            raise ValueError(f"The name {name} is, or contains a word of, a value being hidden.")
     if names and find_labels(text, names):
         raise ValueError(
             "The files already hold a name chosen for a placeholder in square brackets; choose"

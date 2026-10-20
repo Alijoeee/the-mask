@@ -17,6 +17,7 @@ import unicodedata
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from themask.errors import MaskError
 from themask.placeholders import find_placeholders
 
 MAX_LABEL_LENGTH = 32
@@ -24,6 +25,12 @@ MAX_LABEL_LENGTH = 32
 
 class LabelError(ValueError):
     """A label that cannot be used; the message says why, in plain words."""
+
+
+class LabelClashError(MaskError, ValueError):
+    """An export refused because a name clashes with a value: the message says which and what to
+    do. A MaskError, so the interface shows it instead of its "unexpected error" line.
+    """
 
 
 # A space, or one of the spaces a Word file or an AI tool may put in its place.
@@ -39,8 +46,8 @@ def _is_letter_or_digit(char: str) -> bool:
 # Letters of other scripts that look like a Latin letter; a name is compared by what it looks like.
 _LOOKALIKES = str.maketrans(
     {
-        **dict(zip("асеіјорхуѕкмнт", "aceijopxyskmht", strict=True)),
-        **dict(zip("αεικνορτυχ", "aeiknoptux", strict=True)),
+        **dict(zip("асеіјорхуѕкмнтв", "aceijopxyskmhtb", strict=True)),
+        **dict(zip("αβεηικμνορτυχζ", "abenikuvoptuxz", strict=True)),
     }
 )
 
@@ -55,20 +62,26 @@ def fold(text: str) -> str:
     return kept.casefold().translate(_LOOKALIKES)
 
 
+_GERMAN = str.maketrans({"\u00e4": "ae", "\u00f6": "oe", "\u00fc": "ue", "\u00c4": "Ae",
+                         "\u00d6": "Oe", "\u00dc": "Ue"})  # fmt: skip
+
+
+def _umlautless(folded: str) -> str:
+    return folded.replace("ae", "a").replace("oe", "o").replace("ue", "u")
+
+
 def label_key(label: str) -> str:
-    """What two labels are compared by (``fold``), with a run of spaces, hyphens and underscores
-    one space, so "Data-Provider", "data provider" and "Kiracı" / "KIRACI" / "Kiraci" are one.
+    """What two names are compared by, for uniqueness and for finding them in a text: ``fold``
+    with the German umlaut spellings one (Müller, Muller and Mueller), and a run of spaces,
+    hyphens and underscores one space, so "Data-Provider", "data provider" and "Kiracı" /
+    "KIRACI" / "Kiraci" are one name.
     """
-    return _RUNS.sub(" ", fold(label)).strip()
+    return _RUNS.sub(" ", _umlautless(fold(label.translate(_GERMAN)))).strip()
 
 
 def words(text: str) -> list[str]:
     """The folded words (runs of letters and digits) of ``text``."""
     return re.findall(r"[^\W_]+", fold(text))
-
-
-_GERMAN = str.maketrans({"\u00e4": "ae", "\u00f6": "oe", "\u00fc": "ue", "\u00c4": "Ae",
-                         "\u00d6": "Oe", "\u00dc": "Ue"})  # fmt: skip
 
 
 def _spellings(text: str) -> tuple[set[str], str]:
@@ -83,23 +96,99 @@ def _spellings(text: str) -> tuple[set[str], str]:
     return every, " | ".join({" ".join(plain), " ".join(translit)})
 
 
+# Words that carry no identity: articles, joiners and legal forms. They are left out of the
+# rules that compare a name with the hidden values, so "The Buyer" is a usable name when a value
+# is "The Coca-Cola Company". "Group", "Holdings" and "Company" are NOT in the list: a name that
+# is one of them while a value holds it is refused (the strict side; the owner picks another).
+_STOP = frozenset(
+    [
+        "the",
+        "and",
+        "of",
+        "for",
+        "de",
+        "la",
+        "le",
+        "van",
+        "von",
+        "ve",
+        "ltd",
+        "limited",
+        "plc",
+        "co",
+        "inc",
+        "corp",
+        "corporation",
+        "gmbh",
+        "bv",
+        "nv",
+        "ag",
+        "sa",
+        "llc",
+        "llp",
+        "kg",
+        "ab",
+        "oy",
+        "srl",
+        "spa",
+        "sti",
+        "as",
+    ]
+)
+
+
+def _identifying(word: str) -> bool:
+    """Whether a folded word tells one value from another: not one character, not a stop word,
+    not a number of fewer than three digits.
+    """
+    if len(word) < 2 or word in _STOP:
+        return False
+    return not (word.isdigit() and len(word) < 3)
+
+
 def clashes_with_values(label: str, forms: Iterable[str]) -> bool:
     """Whether ``label`` could carry a hidden value, or part of one, into a masked file.
 
-    A name is known text, so the test is strict: it fails when any word of the name is a word of
-    any of the ``forms`` (legal forms and common words included; case, accents and the German
-    umlaut spellings ignored), or when the whole name, folded, is part of a form and at least
-    three characters long.
+    A name is known text, so the test is strict, in three ways. A word of the name that tells
+    values apart (``_identifying``) may not be a word of any of the ``forms``. Any word of a
+    form with at least three letters that is not a stop word may not stand *inside* the name
+    written without separators ("IBMSide", "AhmetTaraf", "Northwinds"). And the whole name,
+    folded, may not be part of a form when it is three or more characters long. Case, accents
+    and the German umlaut spellings are ignored throughout.
     """
     name_words, _ = _spellings(label)
+    identifying = {w for w in name_words if _identifying(w)}
+    plain = "".join(words(label))
+    translit = "".join(words(label.translate(_GERMAN)))
+    joined = {plain, translit, _umlautless(plain), _umlautless(translit)}
     name_texts = {" ".join(words(label)), " ".join(words(label.translate(_GERMAN)))}
     for form in forms:
         form_words, form_text = _spellings(form)
-        if name_words & form_words:
+        if identifying & form_words:
+            return True
+        if any(
+            sum(c.isalpha() for c in w) >= 3 and w not in _STOP and any(w in j for j in joined)
+            for w in form_words
+        ):
             return True
         if any(len(t.replace(" ", "")) >= 3 and t in form_text for t in name_texts):
             return True
     return False
+
+
+def clash_message(label: str, placeholder: str, other: str, stored: bool) -> str:
+    """Why the name ``label`` of ``placeholder`` cannot stand beside the value of ``other``."""
+    if stored:
+        return (
+            f"The name {label} of {placeholder} is in the case already and cannot change, but it"
+            f" contains or is part of a value of {other} in this file. Switch off {other} (or"
+            f" leave the words out of it) to continue."
+        )
+    return (
+        f"The name {label} given to {placeholder} contains or is part of a value of {other}, so"
+        f" the masked file would still show part of it. Choose another name, or switch off"
+        f" {other}."
+    )
 
 
 def mixed_script(label: str) -> bool:
@@ -173,8 +262,15 @@ def check_label(
         raise LabelError(
             f"{text} looks like a placeholder such as [COMPANY_1]. Choose a different name."
         )
-    if label_key(text) in other_labels:
+    key = label_key(text)
+    if key in other_labels:
         raise LabelError(f"The name {text} is already used for another value. Choose another.")
+    for other in other_labels:
+        if f" {other} " in f" {key} " or f" {key} " in f" {other} ":
+            raise LabelError(
+                f"The name {text} contains, or is part of, the name of another value, which a"
+                " restore could confuse. Choose a name that does not."
+            )
     return text
 
 
@@ -257,6 +353,10 @@ def find_labels(text: str, labels: Mapping[str, str], near: bool = False) -> lis
 def _holds_a_name(key: str, labels: Mapping[str, str]) -> bool:
     """Whether the folded token text ``key`` holds one of the names (see ``LabelMatch``)."""
     token_words = key.split()
+    squeezed = key.replace(" ", "")
     return any(
-        name in key if len(name.replace(" ", "")) >= 4 else name in token_words for name in labels
+        name in key or name.replace(" ", "") in squeezed
+        if len(name.replace(" ", "")) >= 4
+        else name in token_words
+        for name in labels
     )
