@@ -1077,7 +1077,7 @@ def test_groups_switched_off_are_told_apart_from_what_nobody_marked(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
     (source,) = load_sources([make_docx(para(CHOICES))], False)
-    review, person, guess = _review_with_choices(source, lists)
+    review, _, _ = _review_with_choices(source, lists)
     res = export_case(
         [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
     )
@@ -1093,13 +1093,16 @@ def test_a_show_answer_moves_the_guess_to_shown_on_purpose(
     make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
     (source,) = load_sources([make_docx(para(CHOICES))], False)
-    review, person, guess = _review_with_choices(source, lists)
+    review, _, guess = _review_with_choices(source, lists)
     review.answered.add(guess.id)
     res = export_case(
         [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
     )
     assert res.still_asked == []
-    assert {g.canonical for g in res.shown_on_purpose} == {"Mr Halvard Brennick", "Equipment Services"}
+    assert {g.canonical for g in res.shown_on_purpose} == {
+        "Mr Halvard Brennick",
+        "Equipment Services",
+    }
 
 
 def test_show_answers_survive_a_merge_and_a_split(lists: UserLists) -> None:

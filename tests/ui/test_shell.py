@@ -801,9 +801,7 @@ def test_cmd_o_means_the_screen_s_own_file(
     from themask.ui import main_window
 
     chosen: list[str] = []
-    monkeypatch.setattr(
-        window.home.drop_zone, "choose_files", lambda: chosen.append("mask")
-    )
+    monkeypatch.setattr(window.home.drop_zone, "choose_files", lambda: chosen.append("mask"))
     monkeypatch.setattr(
         window.restore_screen.drop_zone, "choose_files", lambda: chosen.append("restore")
     )

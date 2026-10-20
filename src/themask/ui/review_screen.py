@@ -69,7 +69,7 @@ from themask.detect.lists import CaseLists, UserLists, on_never_hide_list
 from themask.detect.pipeline import CombinedText
 from themask.labels import LabelError, clean_label
 from themask.model import Finding, Group, PlaceholderType
-from themask.review import ReviewState
+from themask.review import ReviewState, asks_about
 from themask.ui.review_inspector import (
     CHECK_TIP,
     NAME_STORED,
@@ -78,7 +78,6 @@ from themask.ui.review_inspector import (
     Inspector,
     RowData,
     Section,
-    asks_about,
     collapse,
     sections,
 )

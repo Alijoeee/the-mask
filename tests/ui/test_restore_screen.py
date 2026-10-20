@@ -2273,7 +2273,9 @@ def test_a_file_whose_placeholders_are_all_owner_names_does_not_say_none_found(
         [],
         [
             KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "Alice Smith", [], "Provider"),
-            KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Northwind Trading B.V.", [], "Customer"),
+            KeyEntry(
+                "[COMPANY_1]", PlaceholderType.COMPANY, "Northwind Trading B.V.", [], "Customer"
+            ),
         ],
     )
     app_ctx.case_store.save(named)

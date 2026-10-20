@@ -562,7 +562,7 @@ def test_a_name_that_clashes_with_a_masked_value_is_listed_and_marked(qtbot: QtB
 def test_loading_another_review_clears_the_typed_name_the_find_and_the_refusal(
     qtbot: QtBot,
 ) -> None:
-    screen, state = screen_of(qtbot)
+    screen, _ = screen_of(qtbot)
     screen.hide_name_field.setText("Codename")
     screen.find_field.setText("payment")
     screen.inspector.show_hide_error("That name is taken.")

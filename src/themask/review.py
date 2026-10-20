@@ -643,9 +643,11 @@ class ReviewState:
                 pairs.append(
                     (
                         owner,
-                        f"The file already contains [{label}] in square brackets, the name"
-                        f" {placeholder} has in the case. A restore could not tell them apart;"
-                        " take it out of the file in Word and open the file again.",
+                        (
+                            f"The file already contains [{label}] in square brackets, the name"
+                            f" {placeholder} has in the case. A restore could not tell them"
+                            " apart; take it out of the file in Word and open the file again."
+                        ),
                     )
                 )
         return pairs
