@@ -36,9 +36,10 @@ def test_only_the_allowed_qt_modules_are_imported() -> None:
 
 
 def test_no_core_module_imports_qt() -> None:
-    # The core stays usable without a screen: only themask.ui may import Qt.
+    # The core stays usable without a screen: only themask.ui may import Qt (its subfolders too,
+    # such as ui/art).
     source = Path(themask.__file__).parent
     for path in sorted(source.rglob("*.py")):
-        if path.parent.name == "ui":
+        if "ui" in path.relative_to(source).parts[:-1]:
             continue
         assert not any(m.startswith(("PySide6", "shiboken6")) for m in imported_modules(path)), path

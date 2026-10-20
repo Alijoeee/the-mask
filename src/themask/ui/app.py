@@ -30,8 +30,8 @@ from themask.keystore.secrets import KeychainKeyStore
 from themask.logging_setup import setup_logging
 from themask.netguard import install_network_guard
 from themask.paths import cases_dir, data_dir, lists_path
+from themask.ui import theme
 from themask.ui.main_window import MainWindow, show_error
-from themask.ui.theme import apply_theme
 
 if TYPE_CHECKING:
     from themask.detect.engine import Engine
@@ -186,7 +186,7 @@ def main() -> int:
     application = existing if isinstance(existing, QApplication) else QApplication(sys.argv)
     application.setApplicationName(APP_NAME)
     application.setApplicationVersion(VERSION)
-    apply_theme(application)
+    theme.apply(application)
     try:
         ctx = build_context()
     except MaskError as error:
