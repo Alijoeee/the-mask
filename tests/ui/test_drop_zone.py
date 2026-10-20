@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
-from PySide6.QtWidgets import QApplication, QFileDialog
+from PySide6.QtCore import QMimeData, QPointF, QSize, Qt, QUrl
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDropEvent
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
 
+from themask.ui import theme
+from themask.ui.art import Illustration
 from themask.ui.drop_zone import FILE_FILTER, DropZone, ask_for_files, contract_paths
 
 if TYPE_CHECKING:
@@ -152,7 +154,7 @@ def test_the_button_opens_the_file_dialog_and_gives_the_chosen_files(
         return ["/somewhere/a.docx", "/somewhere/b.pdf", "/somewhere/notes.txt"], FILE_FILTER
 
     monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(choose))
-    assert zone.choose_button.text() == "Choose files…"
+    assert zone.choose_button.text() == "Choose file…"
     refused: list[list[Path]] = []
     zone.filesRefused.connect(refused.append)
     with qtbot.waitSignal(zone.filesDropped, timeout=1000) as chosen:
@@ -171,7 +173,7 @@ def test_a_cancelled_dialog_gives_nothing(
 
 
 def test_it_tells_what_it_takes(zone: DropZone) -> None:
-    assert ".docx" in zone.hint_label.text() and "PDF" in zone.hint_label.text()
+    assert "Word" in zone.hint_label.text() and "PDF" in zone.hint_label.text()
 
 
 def test_the_button_goes_with_the_zone(zone: DropZone) -> None:
@@ -256,10 +258,95 @@ def test_the_zone_for_contracts_keeps_its_own_words_and_dialog(
     )
     qtbot.mouseClick(zone.choose_button, Qt.MouseButton.LeftButton)
     assert "Choose contracts" in asked[0] and FILE_FILTER in asked[0]
-    assert zone.title_label.text() == "Drop your contracts here"
+    assert zone.title_label.text() == "Drop a contract here"
 
 
 def test_contract_paths_goes_by_the_suffixes_it_is_given() -> None:
     paths = [Path("/x/a.docx"), Path("/x/b.PDF"), Path("/x/c.txt")]
     assert contract_paths(paths) == [Path("/x/a.docx"), Path("/x/b.PDF")]
     assert contract_paths(paths, frozenset({".txt"})) == [Path("/x/c.txt")]
+
+
+# ---- the card ------------------------------------------------------------------------------------
+
+
+def test_the_zone_for_contracts_says_what_the_mockup_says(zone: DropZone) -> None:
+    assert zone.title_label.text() == "Drop a contract here"
+    assert zone.hint_label.text() == (
+        "Word or PDF. Confidential values are swapped for placeholders before anything leaves"
+        " this Mac."
+    )
+    assert zone.choose_button.text() == "Choose file…"
+    assert zone.illustration is None and zone.shortcut_label.isHidden()  # the screen adds its own
+
+
+def test_a_zone_can_have_an_illustration_its_own_button_words_and_a_hint_at_a_shortcut(
+    qtbot: QtBot,
+) -> None:
+    z = DropZone(art="mask", choose_text="Choose another file…", shortcut_hint="or press ⌘O")
+    qtbot.addWidget(z)
+    z.show()
+    assert isinstance(z.illustration, Illustration) and z.illustration.size() == QSize(112, 88)
+    assert z.choose_button.text() == "Choose another file…"
+    assert z.shortcut_label.text() == "or press ⌘O" and not z.shortcut_label.isHidden()
+    assert z.shortcut_label.objectName() == "dropShortcut"
+    check = DropZone(art="check")
+    qtbot.addWidget(check)
+    assert check.illustration is not None and check.illustration.size() == QSize(64, 64)
+
+
+def test_the_title_is_set_a_little_tight_like_the_mockups(qtbot: QtBot, zone: DropZone) -> None:
+    assert zone.title_label.font().letterSpacing() == pytest.approx(-0.2, abs=0.02)
+    zone.setStyleSheet(theme.stylesheet("light"))  # the stylesheet sets its size and weight
+    zone.show()
+    qtbot.wait(20)
+    assert zone.title_label.font().pixelSize() == 22
+    assert zone.title_label.font().letterSpacing() == pytest.approx(-0.2, abs=0.02)
+
+
+def test_the_zone_is_named_for_a_screen_reader(zone: DropZone) -> None:
+    assert zone.accessibleName() == "Drop a contract here"
+    assert zone.accessibleDescription() == zone.hint_label.text()
+
+
+def test_the_card_has_the_padding_of_the_mockup(zone: DropZone) -> None:
+    margins = zone.layout().contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (32, 44, 32, 36)
+
+
+def test_a_screen_can_put_its_status_under_the_caption_and_above_the_button(
+    qtbot: QtBot,
+) -> None:
+    z = DropZone(art="mask")
+    qtbot.addWidget(z)
+    status = QLabel("Analysing…")
+    z.status_layout.addWidget(status)
+    z.show()
+    assert z.title_label.y() < z.hint_label.y() < status.y() < z.choose_button.y()
+    assert z.isAncestorOf(status)
+
+
+@pytest.mark.parametrize("appearance", ["light", "dark"])
+def test_the_card_is_a_panel_with_a_border_and_a_drag_over_it_takes_the_accent(
+    qtbot: QtBot, appearance: str
+) -> None:
+    t = theme.tokens(appearance)
+    z = DropZone()
+    qtbot.addWidget(z)
+    z.setPalette(theme.palette(appearance))
+    z.setStyleSheet(theme.stylesheet(appearance))
+    z.resize(400, 260)
+    z.show()
+
+    def look() -> tuple[QColor, QColor]:
+        image = z.grab().toImage()
+        return image.pixelColor(200, 3), image.pixelColor(0, 130)  # inside, and the left edge
+
+    inside, edge = look()
+    assert inside == QColor(t.panel) and edge == QColor(t.border)
+    assert drag_over(z, urls("a.docx"))
+    inside, edge = look()
+    assert inside == QColor(t.accent_soft) and edge == QColor(t.accent)
+    z.dragLeaveEvent(QDragLeaveEvent())
+    inside, edge = look()
+    assert inside == QColor(t.panel) and edge == QColor(t.border)

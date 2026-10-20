@@ -8,6 +8,12 @@ the lists and then the settings, and puts the new lists into the ``UserLists`` t
 the very object, because the review and the analysis hold it. The settings the screen changes
 (``ctx.settings``) are kept in place the same way. Nothing is kept until the owner saves, and
 ``reload`` shows what is kept now.
+
+The screen is shown in a window of its own (``SettingsWindow``) that stays open beside the main
+window. What is kept can change meanwhile (the review's "Always hide" puts a value on the list),
+so the screen knows when it shows something else than what is kept (``is_stale``) and when the
+owner has typed something that is not saved (``has_unsaved_edits``), and the window shows the
+lists again when it is activated, unless the owner has typed.
 """
 
 from __future__ import annotations
@@ -16,8 +22,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QShowEvent
 from PySide6.QtWidgets import (
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -154,6 +162,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(keeping)
         layout.addLayout(save)
         layout.addWidget(about)
+        self._shown: tuple[str, str, int, str] = self._kept()
         self.reload()
 
     # ---- the interface the rest of the app uses --------------------------------------------
@@ -163,12 +172,38 @@ class SettingsScreen(QWidget):
         changed since the screen was last shown (the review can put a value on one), and what
         was typed and not saved is dropped.
         """
-        lists, settings = self.ctx.user_lists, self.ctx.settings
-        self.always_edit.setPlainText("\n".join(lists.always_hide))
-        self.never_edit.setPlainText("\n".join(lists.never_hide))
-        self.retention_spin.setValue(settings.retention_days)
-        self.folder_edit.setText(str(settings.out_dir))
+        always, never, days, folder = self._shown = self._kept()
+        self.always_edit.setPlainText(always)
+        self.never_edit.setPlainText(never)
+        self.retention_spin.setValue(days)
+        self.folder_edit.setText(folder)
         set_status(self.status_label, "")
+
+    def has_unsaved_edits(self) -> bool:
+        """Whether the owner has typed or chosen something since the screen last showed what is
+        kept, that is not saved.
+        """
+        form = (
+            self.always_edit.toPlainText(),
+            self.never_edit.toPlainText(),
+            self.retention_spin.value(),
+            self.folder_edit.text(),
+        )
+        return form != self._shown
+
+    def is_stale(self) -> bool:
+        """Whether what is kept is not what the screen last showed (it changed meanwhile)."""
+        return self._kept() != self._shown
+
+    def _kept(self) -> tuple[str, str, int, str]:
+        """What ``reload`` shows: the two lists as text, the days and the folder."""
+        lists, settings = self.ctx.user_lists, self.ctx.settings
+        return (
+            "\n".join(lists.always_hide),
+            "\n".join(lists.never_hide),
+            settings.retention_days,
+            str(settings.out_dir),
+        )
 
     # ---- building the screen ---------------------------------------------------------------
 
@@ -248,3 +283,40 @@ class SettingsScreen(QWidget):
         self.ctx.settings.out_dir = wanted.out_dir
         self.reload()
         set_status(self.status_label, SAVED)
+
+
+class SettingsWindow(QDialog):
+    """The settings in a window of their own, titled "Settings": a tool window that does not
+    block the main window, closed with Esc. ``settings_screen`` is the screen it holds.
+
+    It shows what is kept each time it opens, and again when it becomes the active window after
+    what is kept changed meanwhile, unless the owner has typed something that is not saved: that
+    is never thrown away. Return saves (and does nothing else, whatever button has the focus).
+    """
+
+    def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setWindowFlag(Qt.WindowType.Tool, True)
+        self.setModal(False)
+        self.settings_screen = SettingsScreen(ctx)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.settings_screen)
+        # A dialog presses its default button on Return. That is Save here, and no other button:
+        # Return in the folder field must not open the folder dialog.
+        for button in self.settings_screen.findChildren(QPushButton):
+            button.setAutoDefault(False)
+        self.settings_screen.save_button.setDefault(True)
+        self.resize(680, 640)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        self.settings_screen.reload()
+        super().showEvent(event)
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.WindowActivate:
+            screen = self.settings_screen
+            if screen.is_stale() and not screen.has_unsaved_edits():
+                screen.reload()
+        return super().event(event)

@@ -5,7 +5,11 @@ The first four tests are the brief's: a contract goes from the home screen to th
 what the brief leaves to the builder: the question about tracked changes, a file added to a case,
 the engine that is still loading, and the old cases that are deleted when the window opens. The
 last section is what the review of the window left open: one request at a time, an error while
-the review is built, the tool bar during an analysis, and the files that were not opened.
+the review is built, the sidebar during an analysis, and the files that were not opened.
+
+The window was rebuilt for the design pass (a sidebar and a tool bar with one primary action, the
+Settings in a window of their own): the tests that went through the old five-button tool bar go
+through the sidebar, the primary action and the Settings action now, and say so where they do.
 """
 
 from __future__ import annotations
@@ -20,8 +24,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 from PySide6.QtCore import QMimeData, QPointF, Qt, QUrl
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
-from PySide6.QtWidgets import QApplication, QToolBar, QToolButton, QWidget
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtWidgets import QApplication, QWidget
 
 from themask.errors import KeyStoreError
 from themask.keystore.cases import CaseStore
@@ -96,24 +100,33 @@ def test_the_window_opens_on_the_home_screen_with_every_screen_in_its_stack(
     w.show()
     assert w.windowTitle() == "The MASK"
     assert w.current_screen_name() == "home"
-    assert w.screen_names() == ["home", "review", "restore", "cases", "settings"]
+    # The Settings are a window of their own now (themask.ui.settings_screen.SettingsWindow), not a
+    # screen of the stack.
+    assert w.screen_names() == ["home", "review", "restore", "cases"]
     assert w.home.status_label.text() == "Ready" and w.home.drop_zone.isEnabled()
 
 
 @pytest.mark.parametrize(
     ("show", "name"),
-    [
-        ("show_restore", "restore"),
-        ("show_cases", "cases"),
-        ("show_settings", "settings"),
-        ("show_home", "home"),
-    ],
+    [("show_restore", "restore"), ("show_cases", "cases"), ("show_home", "home")],
 )
 def test_each_screen_can_be_shown(qtbot: QtBot, app_ctx: AppContext, show: str, name: str) -> None:
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
     getattr(w, show)()
     assert w.current_screen_name() == name
+
+
+def test_the_settings_can_be_shown_as_a_window_over_the_screen_that_shows(
+    qtbot: QtBot, app_ctx: AppContext
+) -> None:
+    # Was one of the screens above ("show_settings", "settings"); the Settings are a window now.
+    w = MainWindow(app_ctx)
+    qtbot.addWidget(w)
+    w.show_cases()
+    w.show_settings()
+    assert w.settings_window.isVisible() and w.settings_screen.isVisibleTo(w.settings_window)
+    assert w.current_screen_name() == "cases"
 
 
 def test_progress_is_shown_on_the_home_screen_and_the_drop_zone_waits(
@@ -479,26 +492,6 @@ def test_closing_the_window_waits_for_the_analysis_to_end(
 # ---- what the review of this window left open ------------------------------------------------------
 
 
-def toolbar(w: MainWindow) -> QToolBar:
-    bar = w.findChild(QToolBar)
-    assert bar is not None
-    return bar
-
-
-def toolbar_actions(w: MainWindow) -> dict[str, QAction]:
-    """The actions of the window's tool bar, by their text."""
-    return {action.text(): action for action in toolbar(w).actions()}
-
-
-def click_in_tool_bar(w: MainWindow, text: str) -> None:
-    """Click the tool bar's button of the action called ``text``, as the owner does (a disabled
-    button takes no click; ``QAction.trigger`` would not ask).
-    """
-    button = toolbar(w).widgetForAction(toolbar_actions(w)[text])
-    assert isinstance(button, QToolButton)
-    button.click()
-
-
 def test_a_second_request_while_the_engine_loads_is_refused(
     qtbot: QtBot, app_ctx: AppContext, corpus: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -547,29 +540,36 @@ def test_an_error_while_the_review_is_built_is_told_and_only_its_type_is_logged(
     # Nothing of the window was changed on the way: it is as if the file had never been opened.
     assert w.sources == [] and w.pending_case is None and w.current_screen_name() == "home"
     assert not w.is_analysing() and w.home.drop_zone.isEnabled()
-    actions = toolbar_actions(w)
-    assert not actions["Review"].isEnabled() and actions["Home"].isEnabled()
+    # Was the tool bar's Review button (off: nothing to go back to) and Home button (on).
+    assert w.primary_action.text() == "Review" and not w.primary_action.isEnabled()
+    assert all(item.isEnabled() for item in w.sidebar.items.values())
 
 
-def test_the_tool_bar_is_off_while_a_file_is_analysed_and_on_again_after(
+# Renamed from test_the_tool_bar_is_off_while_a_file_is_analysed_and_on_again_after: the screens
+# are reached through the sidebar now, and the Settings through their own action.
+def test_the_sidebar_and_the_settings_are_off_while_a_file_is_analysed_and_on_again_after(
     qtbot: QtBot, app_ctx: AppContext, corpus: Path
 ) -> None:
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
-    actions = toolbar_actions(w)
-    assert actions["Cases"].isEnabled() and not actions["Review"].isEnabled()
+    items = list(w.sidebar.items.values())
+    assert all(item.isEnabled() for item in items) and not w.primary_action.isEnabled()
     with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
         w.open_files([corpus / "supply-01.docx"], redline_split=False)
-        assert w.is_analysing() and not any(a.isEnabled() for a in actions.values())
-        click_in_tool_bar(w, "Settings")
-        click_in_tool_bar(w, "Cases")
+        assert w.is_analysing() and not any(item.isEnabled() for item in items)
+        assert not w.settings_action.isEnabled() and not w.primary_action.isEnabled()
+        w.settings_action.trigger()  # nothing the analysis reads may change under it
+        w.sidebar.items["cases"].click()
+        assert not w.settings_window.isVisible()
         assert w.current_screen_name() == "home"  # the analysis is what the owner waits for
-    assert all(a.isEnabled() for a in actions.values())  # the review included: there is one now
-    click_in_tool_bar(w, "Cases")
+    assert all(item.isEnabled() for item in items)
+    assert w.settings_action.isEnabled() and w.primary_action.isEnabled()  # "Export…": a review
+    w.sidebar.items["cases"].click()
     assert w.current_screen_name() == "cases"
 
 
-def test_the_tool_bar_comes_back_when_the_analysis_fails(
+# Renamed from test_the_tool_bar_comes_back_when_the_analysis_fails (see above).
+def test_the_sidebar_comes_back_when_the_analysis_fails(
     qtbot: QtBot, app_ctx: AppContext, fixtures: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(main_window, "show_error", lambda parent, msg: None)
@@ -577,10 +577,9 @@ def test_the_tool_bar_comes_back_when_the_analysis_fails(
     qtbot.addWidget(w)
     with qtbot.waitSignal(w.analysisFailed, timeout=10000):
         w.open_files([fixtures / "not-a-docx.doc"], redline_split=False)
-        assert not toolbar_actions(w)["Cases"].isEnabled()
-    actions = toolbar_actions(w)
-    assert actions["Cases"].isEnabled() and actions["Restore"].isEnabled()
-    assert not actions["Review"].isEnabled()  # still nothing to go back to
+        assert not w.sidebar.items["cases"].isEnabled()
+    assert w.sidebar.items["cases"].isEnabled() and w.sidebar.items["restore"].isEnabled()
+    assert not w.primary_action.isEnabled()  # "Review": still nothing to go back to
 
 
 def test_opening_files_from_another_screen_shows_the_progress_on_the_home_screen(
@@ -588,7 +587,7 @@ def test_opening_files_from_another_screen_shows_the_progress_on_the_home_screen
 ) -> None:
     w = MainWindow(app_ctx)
     qtbot.addWidget(w)
-    w.show_settings()
+    w.show_restore()  # was show_settings: the Settings are not a screen of the stack any more
     screens: list[str] = []
     w.analysisProgress.connect(lambda percent, step: screens.append(w.current_screen_name()))
     with qtbot.waitSignal(w.analysisFinished, timeout=ANALYSIS_TIMEOUT):
@@ -627,7 +626,7 @@ def test_the_home_screen_is_shown_again_when_a_waiting_request_starts(
     w = MainWindow(replace(app_ctx, engine=None), load_engine=load_engine)
     qtbot.addWidget(w)
     w.open_files([corpus / "supply-01.docx"], redline_split=False)
-    w.show_settings()  # the owner looks at something else while the engine loads
+    w.show_cases()  # the owner looks at something else while the engine loads (was show_settings)
     gate.set()
     qtbot.waitUntil(w.is_analysing, timeout=ANALYSIS_TIMEOUT)
     assert w.current_screen_name() == "home"  # the progress is where the owner can see it

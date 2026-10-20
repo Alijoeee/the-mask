@@ -43,8 +43,13 @@ def svg_path(data: str) -> QPainterPath:
                 continue
         elif command in ("M", "m"):  # numbers after a move go on as lines
             command = "L" if command == "M" else "l"
+        if not command:
+            raise ValueError("The path must begin with a command (M, L, ...), not a number.")
         n = _ARITY[command.upper()]
-        numbers = [float(token) for token in tokens[i : i + n]]
+        chunk = tokens[i : i + n]
+        if len(chunk) < n or any(token.isalpha() for token in chunk):
+            raise ValueError(f"The path command {command} needs {n} numbers.")
+        numbers = [float(token) for token in chunk]
         i += n
         dx, dy = (x, y) if command.islower() else (0.0, 0.0)
         kind = command.upper()
