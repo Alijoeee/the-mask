@@ -2261,3 +2261,25 @@ def test_the_restore_screen_is_drawn_for_a_text_and_for_a_narrow_window_too(
     qtbot.wait(50)
     image = d3_shot(s, "restore-text-narrow", d3_appearance)
     assert image.width() == 640 and s.result_box.isVisibleTo(s) and s.restore_button.isVisibleTo(s)
+
+
+def test_a_file_whose_placeholders_are_all_owner_names_does_not_say_none_found(
+    qtbot: QtBot, app_ctx: AppContext, make_docx: MakeDocx
+) -> None:
+    named = Case(
+        "N4M3",
+        NOW,
+        ["Named.docx"],
+        [],
+        [
+            KeyEntry("[PERSON_1]", PlaceholderType.PERSON, "Alice Smith", [], "Provider"),
+            KeyEntry("[COMPANY_1]", PlaceholderType.COMPANY, "Northwind Trading B.V.", [], "Customer"),
+        ],
+    )
+    app_ctx.case_store.save(named)
+    s = RestoreScreen(app_ctx)
+    qtbot.addWidget(s)
+    s.load_file(make_docx(body("The [Provider] shall deliver to the [Customer].")))
+    assert s.file_fit_label.text() == "2 of 2 placeholders found in this case."
+    caption = s.drop_zone.hint_label.text()
+    assert "No placeholders found" not in caption and "2 placeholders found" in caption
