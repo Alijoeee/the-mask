@@ -104,7 +104,9 @@ LEGAL_TERMS = LegalTerms(
         hour, weeks, week, kg, tons, tonnes, pallets, licences, licenses, users, employees,
         Ltd, Limited, LLC, LLP, Inc, Corp, plc, AG, SA, SAS, SARL, NV, BV, N.V., B.V., GmbH, KG,
         GmbH & Co, A.Ş., AŞ, A.S., Anonim, Holding, Holdings, Group, Bank, Capital, Partners,
-        Industries, Trading, Logistics, Services, Solutions, Technologies, Foods, Insurance
+        Industries, Trading, Logistics, Services, Solutions, Technologies, Foods, Insurance,
+        Şti, Ltd. Şti., Sp. z o.o., S.r.l., Srl, S.p.A., SpA, Pty, Co., Oy, AB, ApS, Kft., Kft,
+        s.r.o., SE, Sdn, Pte, Ventures, Systems, Consulting, Investments, Properties, Enterprises
         """
     ),
 )

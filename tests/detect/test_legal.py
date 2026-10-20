@@ -288,3 +288,38 @@ def test_the_sweep_takes_a_user_selection_inside_a_legal_reference():
     )
     sweep(text, [plain], public=legal_spans(text))
     assert len(plain.findings) == 1
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "S.r.l.",
+        "Sp. z o.o.",
+        "Pty",
+        "Co.",
+        "S.p.A.",
+        "Oy",
+        "AB",
+        "ApS",
+        "Kft.",
+        "s.r.o.",
+        "SE",
+        "Sdn Bhd",
+        "Pte Ltd",
+        "Ventures",
+        "Systems",
+        "Consulting",
+        "Investments",
+        "Properties",
+        "Enterprises",
+        "Ltd. Şti.",
+    ],
+)
+def test_a_number_before_a_company_form_is_not_a_law_number(form):
+    from themask.detect.legal import legal_spans
+
+    text = f"Act No. 5237 {form} shall deliver the Goods."
+    assert all(
+        "5237" not in text[s:e]
+        for s, e in [(x.start, x.end) if hasattr(x, "start") else x for x in legal_spans(text)]
+    )
