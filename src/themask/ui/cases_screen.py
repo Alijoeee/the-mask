@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 TITLE = ("Cases", "The keys that put real values back \N{MIDDLE DOT} kept on this Mac, encrypted")
 COLUMNS = ("Code", "Files", "Exported", "Expires", "Values")
 CODE_COLUMN, FILES_COLUMN, EXPORTED_COLUMN, EXPIRES_COLUMN, VALUES_COLUMN = range(5)
-COLUMN_WIDTHS = {CODE_COLUMN: 84, EXPORTED_COLUMN: 140, EXPIRES_COLUMN: 160, VALUES_COLUMN: 92}
+COLUMN_WIDTHS = {CODE_COLUMN: 84, EXPORTED_COLUMN: 150, EXPIRES_COLUMN: 210, VALUES_COLUMN: 92}
 ROW_HEIGHT = 40  # points
 HEADER_HEIGHT = 32
 TOOLBAR_HEIGHT = 30  # the filter and the buttons above the table
@@ -605,6 +605,8 @@ class CasesScreen(QWidget):
                 item.setFont(font)
                 item.setData(CASE_ROLE, row.id)
                 item.setData(SEARCH_ROLE, " ".join([row.id, *row.source_files]).casefold())
+            if column in (EXPORTED_COLUMN, EXPIRES_COLUMN):
+                item.setToolTip(text)  # whole, should the native style's wider text not fit
             if column == FILES_COLUMN:
                 item.setToolTip("\n".join(row.source_files))
                 font = item.font()
