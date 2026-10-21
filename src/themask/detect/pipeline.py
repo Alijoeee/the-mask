@@ -16,7 +16,9 @@ back to its file. ``analyze`` runs the whole analysis on it:
 3. A finding that is a never-hide term is dropped; a finding longer than the term is not. The
    names in the text beat its defined terms: in a text that defines ``"Acme" means Acme
    Supplies Ltd``, every "Acme" is still hidden. The owner's never-hide lists and the defaults
-   always win, over the always-hide lists too. What the language model finds that is made of
+   always win over what the engine finds; a value the owner asked to hide (an always-hide entry,
+   a stored key's value) loses to a default never-hide term only when it is not hers (training
+   round 1): only her own never-hide lists beat it. What the language model finds that is made of
    the contract's own words only ("GOVERNING LAW") is dropped as well. No never-hide term, and
    no single word of the contract's own ("Quality" of Quality Foods Ltd), becomes a variant for
    the sweep.
@@ -60,6 +62,9 @@ from themask.detect.lists import (
     UserLists,
     always_hide_entry,
     is_default_term,
+    is_it_acronym,
+    is_it_guess,
+    is_it_word,
     is_vocabulary_word,
     never_hide_check,
     on_never_hide_list,
@@ -186,6 +191,7 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
+    found = _vendor_trimmed(_extended_people(found, text), text)
     unlegal_source = found
     legal = legal_spans(text)
     unlegal = _without_legal_references(found, legal)
@@ -200,12 +206,24 @@ def analyze(
     if legal != legal_spans(text):
         found = _people_among_parties(_without_legal_references(unlegal_source, legal), text)
     never_hidden = never_hide_check(user_lists, case, names=names)
+    owners_never = never_hide_check(user_lists, case, names=names, owners_only=True)
+    stems = _legal_stems(found, seeds)
+
+    def is_term_here(form: str, whole: bool) -> bool:
+        """A default never-hide term, unless it is (a part of) the name of a company with a legal
+        form found in the text: "SIEM Ltd" makes "SIEM" its short name (training round 1).
+        """
+        return never_hidden(form) and not _of_a_legal_name(form, stems, whole)
 
     def keep(form: str) -> bool:
         # A single word of the contract's own ("Quality" of Quality Foods Ltd) would be swept
         # out of every clause that uses it.
         common = len(form.split()) == 1 and is_contract_wording(form)
-        return is_searchable(form) and not never_hidden(form) and not common
+        blocked = owners_never(form) or is_term_here(form, True)
+        return is_searchable(form) and not blocked and not common
+
+    def keep_owned(form: str) -> bool:
+        return is_searchable(form) and not owners_never(form)
 
     name_keys = [_words_key(name) for name in names]
     surnames = _surnames_kept(found, text, user_lists, case, is_term)
@@ -215,13 +233,13 @@ def analyze(
         for f in found
         if (f.start, f.end) in surnames
         or not (
-            never_hidden(f.text)
+            _is_a_term(f, owners_never, is_term_here)
             or (_names_nobody(f, is_term) and not _part_of_a_name(f, name_keys))
             or _starts_a_term(text, f)
         )
     ]
     for seed in seeds:
-        seed.variants = {v for v in seed.variants if keep(v)}
+        seed.variants = {v for v in seed.variants if keep_owned(v)}
     _keep_shared_variants_out(seeds)
     found += _seed_matches(text, seeds, placeholders, is_term, names)
 
@@ -230,29 +248,45 @@ def analyze(
         only_one=is_default_term,
         is_term=is_term,
     )
+    placed, united = _one_per_place(found, text)
+    placed_spans = {(f.start, f.end) for f in placed}
+    lost = [
+        f
+        for f in [*_lost_companies(found, placed), *united]
+        if (f.start, f.end) not in placed_spans
+    ]
     groups = group_findings(
-        _one_per_place(found),
+        [*placed, *lost],
         text,
         seeds=seeds,
         keep=keep,
         aliases=case.defined_terms,
         surnames=policy,
     )
+    stored = {seed.id for seed in seeds}
+    lost_spans = {(f.start, f.end) for f in lost}
+    for group in groups:  # a lost company is a group of variants only: its place is the model's
+        group.findings = [f for f in group.findings if (f.start, f.end) not in lost_spans]
     for group in groups:
         # No never-hide word is swept, but a person's bare name, which the sweep takes only
-        # where it stands as a name (rulings R42, R50).
+        # where it stands as a name (rulings R42, R50). What the owner asked to hide (her
+        # always-hide entries, her key) loses only to her own never-hide lists.
+        owned = group.id in stored or any(f.source == "list" for f in group.findings)
         group.variants = {
-            v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
+            v
+            for v in group.variants
+            if is_bare_name(group.type, v)
+            or not (owners_never(v) if owned else is_term_here(v, True))
         }
     sweep(text, groups, fixed=seeds, is_term=is_term, public=legal)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
+    groups = _with_own_groups(groups, stored)
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
         if any((f.start, f.end) in surnames for f in group.findings) or any(
             is_bare_name(group.type, f.text) and _ordinary(f.text, defined) for f in group.findings
         ):
             group.needs_check = True
-    stored = {seed.id for seed in seeds}
     for group in _unsure_guesses(groups, stored):
         group.enabled, group.needs_check = False, True
     groups.sort(key=lambda g: g.findings[0].start)
@@ -353,6 +387,264 @@ def _loose(text: str, start: int, end: int, mark: str, partners: dict[str, str])
 
 
 # --- Never-hide terms and the names that beat them ----------------------------------------------
+
+
+def _is_a_term(
+    finding: Finding,
+    owners_never: Callable[[str], bool],
+    is_term_here: Callable[[str, bool], bool],
+) -> bool:
+    """Whether ``finding`` is a never-hide term and is dropped. The owner's own never-hide lists
+    beat everything; a value she asked to hide (an always-hide match) is beaten by nothing else;
+    a person is never dropped for being an IT acronym ("PAM", "DAM"); the rest is dropped when it
+    is a default term and not (part of) the name of a company with a legal form.
+    """
+    if owners_never(finding.text):
+        return True
+    if finding.source == "list":
+        return False
+    if finding.type is PlaceholderType.PERSON and is_it_acronym(finding.text):
+        return False
+    return is_term_here(finding.text, False)
+
+
+def _legal_stems(found: list[Finding], seeds: list[Group]) -> set[str]:
+    """The names of the companies with a legal form that the text names, without the legal form,
+    as ``_words_key`` gives them: "SIEM Ltd" gives "siem".
+    """
+    forms = [f.text for f in found if f.type is PlaceholderType.COMPANY]
+    for seed in seeds:
+        if seed.type is PlaceholderType.COMPANY:
+            forms += [seed.canonical, *seed.variants]
+    return {
+        key
+        for form in forms
+        if has_legal_form(form) and (key := _words_key(strip_legal_form(form)))
+    }
+
+
+def _of_a_legal_name(form: str, stems: set[str], whole: bool) -> bool:
+    """Whether ``form`` is the name of a company with a legal form (``stems``), or, unless
+    ``whole``, a run of two words or more inside it: "Integration Services" of "Advanced
+    Integration Services Ltd". Such a form is a name, whatever its words are.
+    """
+    key = _words_key(form)
+    if not key:
+        return False
+    if key in stems:
+        return True
+    return not whole and len(key.split()) > 1 and any(_inside(key, stem) for stem in stems)
+
+
+# What a product name is made of besides the vendor's own name ("Kron PAM User Subscription").
+_PRODUCT_WORDS = frozenset(
+    [
+        "privileged",
+        "access",
+        "management",
+        "data",
+        "classification",
+        "protection",
+        "prevention",
+        "loss",
+        "suite",
+        "user",
+        "users",
+        "subscription",
+        "security",
+        "digital",
+        "platform",
+        "enterprise",
+        "edition",
+        "server",
+        "client",
+        "agent",
+        "module",
+        "end",
+        "point",
+        "cloud",
+        "web",
+        "email",
+        "network",
+        "application",
+        "applications",
+        "identity",
+        "governance",
+        "monitoring",
+        "analytics",
+        "threat",
+        "detection",
+        "response",
+        "insight",
+        "vault",
+        "console",
+        "manager",
+        "studio",
+        "pro",
+        "plus",
+        "lite",
+        "core",
+        "standard",
+        "advanced",
+        "service",
+        "services",
+        "product",
+        "products",
+        "solution",
+        "solutions",
+    ]
+)
+
+
+def _ordinary_around(text: str, finding: Finding, owned: list[Finding]) -> bool:
+    """Whether ``finding``, besides the owner's values it holds, has only ordinary words: filler,
+    numbers, lower case words, IT words, product words ("Kron PAM User Subscription").
+    """
+    rest = list(text[finding.start : finding.end])
+    for value in owned:
+        for position in range(value.start - finding.start, value.end - finding.start):
+            rest[position] = " "
+    for word in re.findall(r"[^\W_]+", "".join(rest)):
+        if not (
+            word.casefold() in _FILLER
+            or word.casefold() in _PRODUCT_WORDS
+            or (word.isdigit() and len(word) < 4)
+            or word[0].islower()
+            or is_it_word(word)
+        ):
+            return False
+    return True
+
+
+def _vendor_trimmed(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` without the language model's guesses of a company that hold a value of the
+    owner's own and nothing else but ordinary words: "Kron PAM User Subscription" with Kron on
+    her always-hide list is hidden as Kron alone, which the list finding already does. A name with
+    a legal form, and anything a rule found, is never cut this way.
+    """
+    owned = [f for f in found if f.source == "list"]
+    if not owned:
+        return found
+    kept = []
+    for finding in found:
+        if (
+            finding.source == "model"
+            and finding.type is PlaceholderType.COMPANY
+            and not has_legal_form(finding.text)
+        ):
+            inside = [
+                o
+                for o in owned
+                if finding.start <= o.start
+                and o.end <= finding.end
+                and (o.start, o.end) != (finding.start, finding.end)
+            ]
+            if inside and _ordinary_around(text, finding, inside):
+                continue
+        kept.append(finding)
+    return kept
+
+
+_POSSESSIVE_END = re.compile(r"['\N{RIGHT SINGLE QUOTATION MARK}][sS]\Z")
+# The next word of a name, with the apostrophes inside it ("O'Brien", "D'Souza'nın").
+_NAME_WORD = re.compile(r"[ \t]+([^\W\d_][\w\-]*(?:['\N{RIGHT SINGLE QUOTATION MARK}][\w\-]+)*)")
+# A Turkish case suffix after the last apostrophe of a name: "Ahmet'in", "Berg'in", "O'Brien'ın".
+_TURKISH_SUFFIX = re.compile(
+    r"['\N{RIGHT SINGLE QUOTATION MARK}](?:n?[ıiuü]n|n?[ae]|[dt][ae]|[dt][ae]n|l[ae]|y[ae]|y[ıiuü])\Z",
+    re.IGNORECASE,
+)
+_TITLE_WORDS = frozenset(
+    [
+        "director",
+        "managing",
+        "ceo",
+        "cfo",
+        "coo",
+        "cto",
+        "chairman",
+        "president",
+        "manager",
+        "secretary",
+        "counsel",
+        "general",
+        "genel",
+        "müdürü",
+        "müdür",
+        "müşaviri",
+        "mr",
+        "mrs",
+        "ms",
+        "mx",
+        "dr",
+        "prof",
+        "sir",
+        "dame",
+        "mah",
+        "mahallesi",
+        "cad",
+        "cadde",
+        "sok",
+        "sokak",
+        "street",
+    ]
+)
+
+
+def _extended_people(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` with each person of the language model's that ends on a capitalised word extended
+    to the capitalised word after it, when the two together are a full name found elsewhere in
+    the text: the model's "A.Ş. Genel Müdürü Ahmet" in front of "Yılmaz" must not leave the surname
+    visible where "Ahmet Yılmaz" is hidden at the next sentence. A name that ends on a job title or an honorific is not extended, and neither over a word that
+    belongs to another finding.
+    """
+    full_names = {
+        normalize(f.text)
+        for f in found
+        if f.type is PlaceholderType.PERSON and len(f.text.split()) > 1
+    }
+    extended = []
+    for finding in found:
+        words = finding.text.split()
+        following = _NAME_WORD.match(text, finding.end)
+        if (
+            finding.type is PlaceholderType.PERSON
+            and finding.source == "model"
+            and words
+            and words[-1][:1].isupper()
+            and words[-1].casefold().strip(".,") not in _TITLE_WORDS
+            and following is not None
+            and following[1][:1].isupper()
+        ):
+            word = _POSSESSIVE_END.sub("", following[1])
+            word = _TURKISH_SUFFIX.sub("", word)
+            end = following.start(1) + len(word)
+            if normalize(f"{words[-1]} {word}") in full_names and not any(
+                o is not finding and o.start < end and following.start(1) < o.end for o in found
+            ):
+                finding = replace(finding, end=end, text=text[finding.start : end])
+        extended.append(finding)
+    return extended
+
+
+def _lost_companies(found: list[Finding], placed: list[Finding]) -> list[Finding]:
+    """The companies with a legal form that a contract rule found and that lost their place to a
+    longer finding of the language model ("Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında
+    imzalanmıştır" over two companies). The model's span is hidden as it is found, nothing is cut;
+    these companies are grouped as well, without their finding in that place, so that their other
+    occurrences are swept ("GLOBAL Teknoloji öder").
+    """
+    taken = {(f.start, f.end) for f in placed}
+    models = [f for f in placed if f.source == "model" and f.type in _NAMES]
+    return [
+        f
+        for f in found
+        if f.type is PlaceholderType.COMPANY
+        and f.source == "rule"
+        and f.score >= RULE_NAME_SCORE
+        and has_legal_form(f.text)
+        and (f.start, f.end) not in taken
+        and any(m.start < f.end and f.start < m.end for m in models)
+    ]
 
 
 def _starts_a_term(text: str, finding: Finding) -> bool:
@@ -466,7 +758,10 @@ def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
             and group.id not in stored
             and bool(found)
             and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
-            and all(_plain_words(form) == _PLAIN for form in {group.canonical, *group.variants})
+            and all(
+                _plain_words(form) == _PLAIN or is_it_guess(form) or is_it_word(form)
+                for form in {group.canonical, *group.variants}
+            )
         )
 
     asked = [g for g in groups if guess(g)]
@@ -656,27 +951,192 @@ def _seed_matches(
     return found
 
 
+def _with_own_groups(groups: list[Group], stored: set[str]) -> list[Group]:
+    """``groups`` where each finding that is no form of its group (the words of its text are not
+    all words of the group's canonical form and it is none of the forms the group lists, as a union
+    a growth made) is moved to a group of its
+    own, with that text as its canonical form and its only variant. A restore writes the
+    canonical form back in every place: a place whose words the canonical form does not hold
+    would lose them. A short form of the value (fewer words, all of them the canonical form's)
+    stays. The case's key is left as it is.
+    """
+
+    def words(text: str) -> set[str]:
+        return {normalize(word) for word in re.findall(r"[^\W_]+", text)}
+
+    out: list[Group] = []
+    for group in groups:
+        out.append(group)
+        if group.id in stored:
+            continue
+        held = words(group.canonical)
+        forms = {normalize(form) for form in (group.canonical, *group.variants)}
+        foreign: dict[str, list[Finding]] = defaultdict(list)
+        for finding in group.findings:
+            if not words(finding.text) <= held and normalize(finding.text) not in forms:
+                foreign[normalize(finding.text)].append(finding)
+        if not foreign:
+            continue
+        moved = {id(f) for found in foreign.values() for f in found}
+        group.findings = [f for f in group.findings if id(f) not in moved]
+        group.disabled = set()
+        for found in foreign.values():
+            first = found[0]
+            out.append(
+                Group(
+                    uuid.uuid4().hex,
+                    group.type,
+                    first.text,
+                    {f.text for f in found},
+                    found,
+                    "",
+                    enabled=group.enabled,
+                    needs_check=group.needs_check,
+                )
+            )
+    return [g for g in out if g.findings]
+
+
 # --- Overlaps, numbers, warnings --------------------------------------------------------------
 
 
-def _one_per_place(found: list[Finding]) -> list[Finding]:
-    """Of the findings that overlap, the one that wins (see the module), in text order."""
+# The types whose findings carry text to hide, and so are grown to the union when they overlap
+# (``_one_per_place``).
+_WORDS = frozenset(
+    {
+        PlaceholderType.PERSON,
+        PlaceholderType.COMPANY,
+        PlaceholderType.ADDRESS,
+        PlaceholderType.CUSTOM,
+    }
+)
+_EDGE_DOTS = ".,;:"
+
+
+def _one_per_place(found: list[Finding], text: str) -> tuple[list[Finding], list[Finding]]:
+    """Of the findings that overlap, the one that wins (see the module), in text order, and the
+    findings that lost their place or were changed by it, to be grouped for the sweep.
+
+    Hiding only grows. A person, company or address that loses to a finding it overlaps only in
+    part is not dropped: the winner grows to the union of the two spans (and takes in what that
+    reaches). A value (an amount, a phone number, an identifier) that loses to a person, company or
+    address is not dropped either: the winner is trimmed to stop where the value starts or ends.
+    The owner's own values never grow and are never trimmed. Each loser is visited once.
+    """
     spans: dict[tuple[int, int], list[Finding]] = defaultdict(list)
     for finding in _without_overruns(found):
         spans[(finding.start, finding.end)].append(finding)
     taken = Spans()
-    kept = []
+    kept: list[Finding] = []
+    rejected: list[Finding] = []
     for finding in sorted(map(_span_winner, spans.values()), key=_strength):
         if not taken.overlaps(finding.start, finding.end):
             taken.add(finding.start, finding.end)
             kept.append(finding)
-    return sorted(kept, key=lambda f: (f.start, f.end))
+        else:
+            rejected.append(finding)
+    kept.sort(key=lambda f: f.start)
+    starts = [f.start for f in kept]
+    registered: list[Finding] = []
+    stands = {(f.type, normalize(f.text)) for f in kept}
+    for loser in rejected:
+        block = _span_block(kept, starts, loser.start, loser.end)
+        inside_a_rule = any(
+            kept[i].source == "rule" and kept[i].start <= loser.start and loser.end <= kept[i].end
+            for i in block
+        )
+        if (
+            loser.type in _WORDS
+            and not inside_a_rule  # a company's own words are its variants already
+            and (loser.type, normalize(loser.text)) not in stands
+        ):
+            registered.append(loser)  # its value is swept elsewhere, whatever happens here
+        if not block:
+            continue
+        if loser.type in _WORDS:
+            _grow(kept, starts, block, loser, text, registered)
+        else:
+            _trim(kept, starts, block, loser, text)
+    return kept, registered
+
+
+def _span_block(kept: list[Finding], starts: list[int], start: int, end: int) -> list[int]:
+    """The indexes of the kept findings that overlap ``start``-``end``."""
+    first = max(0, bisect_right(starts, start) - 1)
+    out = []
+    for i in range(first, len(kept)):
+        if kept[i].start >= end:
+            break
+        if start < kept[i].end:
+            out.append(i)
+    return out
+
+
+def _grow(
+    kept: list[Finding],
+    starts: list[int],
+    block: list[int],
+    loser: Finding,
+    text: str,
+    registered: list[Finding],
+) -> None:
+    """Grow the first winner of ``block`` that holds ``loser`` in part to the union with it and
+    with everything the union reaches (a person's, a company's or an address, never the owner's
+    own); nothing changes when the union would reach an owner's value or a value of another kind,
+    or when ``loser`` lies within a winner.
+    """
+    winner = next((kept[i] for i in block if kept[i].type in _WORDS), None)
+    if winner is None or winner.source in _OWNERS:
+        return
+    if all(kept[i].start <= loser.start and loser.end <= kept[i].end for i in block):
+        return  # held whole by a winner: hidden already
+    start, end = min(winner.start, loser.start), max(winner.end, loser.end)
+    while True:
+        reached = _span_block(kept, starts, start, end)
+        if any(kept[i].source in _OWNERS or kept[i].type not in _WORDS for i in reached):
+            return
+        low = min([start] + [kept[i].start for i in reached])
+        high = max([end] + [kept[i].end for i in reached])
+        if (low, high) == (start, end):
+            break
+        start, end = low, high
+    registered += [kept[i] for i in reached]
+    grown = replace(winner, start=start, end=end, text=text[start:end])
+    kept[reached[0] : reached[-1] + 1] = [grown]
+    starts[reached[0] : reached[-1] + 1] = [start]
+
+
+def _trim(
+    kept: list[Finding], starts: list[int], block: list[int], value: Finding, text: str
+) -> None:
+    """Make room for ``value`` (an amount, a phone number, an identifier) that lost its place to
+    names: each person, company or address of ``block`` is trimmed to stop where the value starts
+    and ends, and the value takes its place. Nothing changes when the owner's own values or a
+    finding of another kind are in the way."""
+    if any(kept[i].source in _OWNERS or kept[i].type not in _WORDS for i in block):
+        return
+    if all(kept[i].start <= value.start and value.end <= kept[i].end for i in block):
+        return  # held whole by a winner: hidden already
+    pieces: list[Finding] = []
+    for i in block:
+        winner = kept[i]
+        for lo, hi in ((winner.start, value.start), (value.end, winner.end)):
+            if lo < hi:
+                lo, hi = _trimmed(text, lo, hi)
+                while lo < hi and text[lo] in _EDGE_DOTS:
+                    lo, hi = _trimmed(text, lo + 1, hi)
+                if lo < hi and any(c.isalnum() for c in text[lo:hi]):
+                    pieces.append(replace(winner, start=lo, end=hi, text=text[lo:hi]))
+    pieces.append(value)
+    pieces.sort(key=lambda f: f.start)
+    kept[block[0] : block[-1] + 1] = pieces
+    starts[block[0] : block[-1] + 1] = [f.start for f in pieces]
 
 
 def _without_overruns(found: list[Finding]) -> list[Finding]:
     """``found`` without the model's findings that run on past a contract rule's name with its
-    legal form, from the same start and of the same type (ruling R45): the rule knows where the
-    company ends, and the model's "Acme Supplies Ltd. Passport" would become the canonical form
+    legal form and a full stop that ends the sentence, from the same start and of the same type
+    (ruling R45): the rule knows where the company ends, and the model's "Acme Supplies Ltd. Passport" would become the canonical form
     that a restore writes back everywhere.
     """
     ends: dict[tuple[PlaceholderType, int], list[int]] = defaultdict(list)
@@ -686,7 +1146,13 @@ def _without_overruns(found: list[Finding]) -> list[Finding]:
     return [
         f
         for f in found
-        if not (f.source == "model" and any(end < f.end for end in ends.get((f.type, f.start), ())))
+        if not (
+            f.source == "model"
+            and any(
+                end < f.end and f.text[end - f.start : end - f.start + 1] == "."
+                for end in ends.get((f.type, f.start), ())
+            )
+        )
     ]
 
 

@@ -157,6 +157,19 @@ def test_legal_forms_are_the_agreed_list() -> None:
         "A.Ş.",
         "Ltd. Şti.",
         "Ltd. Sti.",
+        "Ltd.Şti.",
+        "Ltd.Sti.",
+        "Şti.",
+        "Sti.",
+        "AŞ",
+        "Anonim Şirketi",
+        "Anonim Sirketi",
+        "Limited Şirketi",
+        "Limited Sirketi",
+        "Kollektif Şirket",
+        "Kollektif Sirket",
+        "Komandit Şirket",
+        "Komandit Sirket",
         "Oy",
         "AB",
         "ApS",
@@ -497,7 +510,9 @@ def test_company_variants_in_full(value: str, expected: set[str]) -> None:
     [
         # A first token needs at least four letters ...
         ("BP Chemicals Ltd", {"BP Chemicals Ltd", "BP Chemicals"}),
-        ("IBM Nederland B.V.", {"IBM Nederland B.V.", "IBM Nederland"}),
+        # ... except three capitals in front of a legal form (training round 1) ...
+        ("IBM Nederland B.V.", {"IBM Nederland B.V.", "IBM Nederland", "IBM"}),
+        ("THE Nederland B.V.", {"THE Nederland B.V.", "THE Nederland"}),
         ("Abc Parts Ltd", {"Abc Parts Ltd", "Abc Parts"}),
         ("Abcd Parts Ltd", {"Abcd Parts Ltd", "Abcd Parts", "Abcd"}),
         # ... and when a legal form leaves a single word, that word is a first token too.

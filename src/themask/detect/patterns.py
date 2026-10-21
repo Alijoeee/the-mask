@@ -144,6 +144,28 @@ _UNIT_WORDS = (
 )
 _UNIT = "(?:(?i:" + _UNIT_WORDS + r")|t|l|L|m)(?!\w)"
 
+# The units a licence, a seat or a capacity is counted in ("2500 EPS", "300 users", "500 GB"). A bare
+# number before one is no amount (training round 1: the owner shows licence and capacity counts).
+# Not "units": "10,000 units" is a quantity of goods and stays hidden (QuantityRecognizer). Only
+# a count: a number glued to a fee word after the unit ("60,000 licence fee", "users-based"), or
+# after a price or reference word ("fee 45,000 users", "Invoice 12345 users") is not one.
+_CAPACITY_UNIT = (
+    r"(?i:eps|fpm|users?|devices?|endpoints?|seats?|nodes?|licen[cs]es?|[kmgtp]b|[mg]bps|[mg]bit/s)"
+    r"(?!\w)"
+)
+_CAPACITY_AFTER = re.compile(
+    "(?:"
+    + _SPACE
+    + "++|-)"
+    + _CAPACITY_UNIT
+    + r"(?![ \t]*+(?:-[ \t]*+)?(?i:fees?|prices?|charges?|costs?|payments?|rates?|amounts?|keys?|based)(?!\w))"
+    + r"(?![ \t]*+:)"
+)
+_CAPACITY_BEFORE_A_PRICE = re.compile(
+    r"(?i:fees?|prices?|costs?|charges?|pay(?:ments?|able)?|amounts?|total|sum|no\.?|nr\.?"
+    r"|number|invoice|contract|order|ref\.?|reference|id)[ \t:#.\N{NO-BREAK SPACE}]*+\Z"
+)
+
 # What makes a figure a duration, which stays visible: "1,000 days", "2,500 working days",
 # "a 1,000-day period", "ten thousand (10,000) days".
 _DAY_KIND = "(?i:(?:business|working|calendar|banking)" + _SPACE + "+)?"
@@ -285,8 +307,70 @@ _PERCENT_AFTER_WORDS = _any_of(
 )
 
 
+# A public tax rate is no secret (training round 1): the percentage right before or right after the
+# name of the tax, with nothing but spaces between, is not a percentage to hide: "20% VAT", "VAT at
+# 20%", "KDV (18%)", "withholding tax of 15%". A rate of the contract (a discount, a commission, a
+# fee, interest) is hidden even beside VAT: "15%, VAT excluded", "commission of 15% VAT extra",
+# "fee 5% VAT exclusive". Every part is possessive, so a long run of spaces costs nothing.
+_TAX_NAME = (
+    r"(?i:vat|kdv|mwst|ust|btw|tva|iva|gst|sales"
+    + _SPACE
+    + r"++tax|withholding(?:"
+    + _SPACE
+    + r"++tax)?+)"
+)
+_TAX_AFTER = re.compile(
+    _SPACE
+    + "++"
+    + _TAX_NAME
+    + r"(?![\w\-])"
+    + "(?!"
+    + _SPACE
+    + r"*+[,;:\-\N{EN DASH}]?"
+    + _SPACE
+    + r"*+(?i:exclu\w*|excl\b|extra|exempt\w*|free|to"
+    + _SPACE
+    + "++be"
+    + _SPACE
+    + "++added|not"
+    + _SPACE
+    + "++included|on"
+    + _SPACE
+    + r"++top|deduct\w*|additional|payable|separate\w*)(?!\w))"
+)
+_TAX_BEFORE = re.compile(
+    r"(?<![\w\-])"
+    + _TAX_NAME
+    + "(?:"
+    + _SPACE
+    + r"++(?i:rates?|tax))?"
+    + _SPACE
+    + r"*+(?:(?i:of|at|is|are|was|equals?|:|=|\-|\N{EN DASH})"
+    + _SPACE
+    + r"*+)*+\(?"
+    + _SPACE
+    + r"*+\Z"
+)
+# A rate of the contract named just before the figure: "commission of 15%", "fee 5%".
+_RATE_NOUN_BEFORE = re.compile(
+    r"(?<![\w\-])(?i:fees?|commissions?|discounts?|margins?|rebates?|royalt(?:y|ies)|interest"
+    r"|bonus(?:es)?|share|premium|rates?|surcharges?|mark-?ups?)(?:"
+    + _SPACE
+    + r"++(?i:rate|percentage))?"
+    + _SPACE
+    + r"*+(?:(?i:of|at|is|are|was|equals?|:|=|\-|\N{EN DASH})"
+    + _SPACE
+    + r"*+)*+\(?"
+    + _SPACE
+    + r"*+\Z"
+)
+
+
 class PercentRecognizer(CheckedPatternRecognizer):
-    """Percentages: 12.5% · 12,5 % · 5-10% · 8 per cent · 8 percent · "five (5) per cent"."""
+    """Percentages: 12.5% · 12,5 % · 5-10% · 8 per cent · 8 percent · "five (5) per cent".
+
+    Not the rate of a public tax next to its name: "20% VAT", "VAT at 20%", "KDV 18%".
+    """
 
     def __init__(self) -> None:
         super().__init__(
@@ -298,8 +382,23 @@ class PercentRecognizer(CheckedPatternRecognizer):
                     0.85,
                 ),
                 Pattern("Percentage in words", _NUMBER_WORDS + _PERCENT_AFTER_WORDS, 0.85),
+                # The Turkish way: the sign first, "%15".
+                Pattern(
+                    "Percentage, sign first",
+                    _ALONE_BEFORE + "%" + _SPACE + "?" + _PERCENT_FIGURE + _ALONE_AFTER,
+                    0.85,
+                ),
             ],
         )
+
+    def score_match(self, text: str, match: re.Match[str], pattern: Pattern) -> float:
+        start, end = match.span()
+        before = text[max(0, start - 40) : start]
+        if _TAX_BEFORE.search(before):
+            return 0.0
+        if _TAX_AFTER.match(text, end) and not _RATE_NOUN_BEFORE.search(before):
+            return 0.0
+        return pattern.score
 
 
 # The words that make the figure after them a reference into the contract, whatever unit follows
@@ -741,6 +840,8 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
         start, end = match.span()
         if _DURATION_AFTER.match(text, end):
             return 0.0
+        if _CAPACITY_AFTER.match(text, end) and _is_a_capacity(text, match):
+            return 0.0
         words = match.groupdict().get("words")
         if words is not None:
             return pattern.score if _THOUSANDS_WORD.search(words) else 0.0
@@ -766,6 +867,17 @@ class BareNumberRecognizer(CheckedPatternRecognizer):
         if _is_a_clause_number(text, match):
             return 0.0
         return pattern.score
+
+
+def _is_a_capacity(text: str, match: re.Match[str]) -> bool:
+    """Whether the bare figure ``match``, before a capacity unit, is a count: not after a price or
+    reference word, and not six plain digits or more (an identifier: "784512 seats").
+    """
+    start = match.start()
+    if _CAPACITY_BEFORE_A_PRICE.search(text, max(0, start - 24), start):
+        return False
+    integer = match.groupdict().get("integer") or ""
+    return not (integer.isdigit() and len(integer) >= 6)
 
 
 def _is_a_clause_number(text: str, match: re.Match[str]) -> bool:

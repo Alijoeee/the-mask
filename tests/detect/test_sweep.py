@@ -171,7 +171,9 @@ def test_what_the_owner_switched_off_is_never_taken_over():
     assert texts(group_off) == ["Falcon"]
 
 
-def test_equal_or_partial_overlaps_keep_the_find_in_place():
+def test_equal_overlaps_keep_the_find_and_a_partial_overlap_grows_it():
+    # Hiding only grows (training round 1): "Project Falcon" half over "Falcon starts" is no
+    # longer skipped; the find grows to the union, in its own group.
     txt = "ACME LTD signs. Acme Ltd pays. Project Falcon starts."
     same = G(C, ["Acme Ltd"], F(C, "Acme Ltd", txt))
     other = G(C, ["ACME LTD"], F(C, "ACME LTD", txt))
@@ -179,7 +181,7 @@ def test_equal_or_partial_overlaps_keep_the_find_in_place():
     whole = G(C, ["Project Falcon"])
     sweep(txt, [same, other, partial, whole])
     assert texts(other) == ["ACME LTD"] and texts(same) == ["Acme Ltd"]
-    assert texts(partial) == ["Falcon starts"] and whole.findings == []
+    assert texts(partial) == ["Project Falcon starts"] and whole.findings == []
 
 
 def test_taking_over_keeps_the_switched_off_indexes_right():

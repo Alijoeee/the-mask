@@ -45,6 +45,19 @@ LEGAL_FORMS: tuple[str, ...] = (
     "A.Ş.",
     "Ltd. Şti.",
     "Ltd. Sti.",  # "Ltd. Şti." typed without the Turkish letter
+    "Ltd.Şti.",  # written without the space
+    "Ltd.Sti.",
+    "Şti.",
+    "Sti.",
+    "AŞ",
+    "Anonim Şirketi",  # Turkish joint-stock company, in full
+    "Anonim Sirketi",  # ... typed without the Turkish letters
+    "Limited Şirketi",
+    "Limited Sirketi",
+    "Kollektif Şirket",
+    "Kollektif Sirket",
+    "Komandit Şirket",
+    "Komandit Sirket",
     "Oy",
     "AB",
     "ApS",
@@ -217,6 +230,67 @@ _HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
 _COMMON_WORDS_FOLDED = frozenset(word.casefold() for word in COMMON_WORDS)
 _EDGE_PUNCTUATION = re.compile(r"^[\W_]+|[\W_]+$")
 _MIN_LETTERS_IN_FIRST_TOKEN = 4
+# A name of three capitals in front of a legal form is a short name all the same ("EPM Ltd"), unless
+# it is an ordinary word written in capitals.
+_SHORT_NAME_LETTERS = 3
+_SHORT_CAPS_WORDS = frozenset(
+    [
+        "the",
+        "and",
+        "our",
+        "all",
+        "new",
+        "old",
+        "one",
+        "two",
+        "usa",
+        "for",
+        "not",
+        "any",
+        "can",
+        "its",
+        "his",
+        "her",
+        "you",
+        "was",
+        "are",
+        "but",
+        "out",
+        "off",
+        "day",
+        "way",
+        "who",
+        "how",
+        "why",
+        "may",
+        "per",
+        "via",
+        "yes",
+        "use",
+        "buy",
+        "get",
+        "set",
+        "let",
+        "see",
+        "own",
+        "now",
+        "due",
+        "net",
+        "non",
+        "pre",
+        "sub",
+        "pro",
+        "tax",
+        "law",
+        "inc",
+        "ltd",
+        "plc",
+        "llc",
+        "llp",
+        "ltd",
+        "gmbh",
+    ]
+)
 
 _AMOUNT = re.compile(
     r"""
@@ -280,6 +354,14 @@ def _company_variants(value: str) -> set[str]:
         letters = sum(character.isalpha() for character in first)
         if letters >= _MIN_LETTERS_IN_FIRST_TOKEN and first.casefold() not in _COMMON_WORDS_FOLDED:
             variants.add(first)
+        elif (
+            letters == _SHORT_NAME_LETTERS
+            and without_form is not None
+            and first.isalpha()
+            and first.isupper()
+            and first.casefold() not in _SHORT_CAPS_WORDS
+        ):
+            variants.add(first)  # "EPM Ltd", "ABB Ltd": a three-letter name in capitals
     return variants
 
 

@@ -118,7 +118,14 @@ _CURRENCIES = _vocabulary(
 # the parties clause neither are countries, currencies and "the Company" ("made between Monday and
 # Friday", "between England and Wales", "(1) The Company").
 _NOT_IN_A_NAME = _FUNCTION_WORDS | _LABEL_WORDS | _ROLE_WORDS
-_NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS
+# A currency code is never a word of a company's name: "42.000,00 TL. Acme Ltd" starts at Acme.
+_CURRENCY_CODES = _vocabulary(
+    """
+    tl try eur usd gbp chf jpy cny rmb sek nok dkk pln czk huf ron bgn aud cad nzd sgd hkd inr zar
+    aed sar isk lira liras
+    """
+)
+_NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS | _CURRENCY_CODES
 _NOT_A_PARTY = _NOT_IN_A_COMPANY | _COUNTRIES | _CURRENCIES | frozenset({"company", "companies"})
 
 # The words of a contract's own headings ("TERMINATION", "GOVERNING LAW") and titles ("LOGISTICS
@@ -153,6 +160,28 @@ _NAME_PARTICLES = _vocabulary(
     """
 )
 _HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
+
+# "ve" ("and") joins the two trade words of a Turkish company name: "Sanayi ve Ticaret A.Ş.", "San.
+# ve Tic. Ltd. Şti.". Only between these words (compared by normalize, so "Ticaret" and "TİCARET"
+# are one): "Acme ve Beta A.Ş." is two names.
+_TURKISH_TRADE_WORDS = frozenset(
+    normalize(word)
+    for word in [
+        "Sanayi",
+        "San",
+        "Ticaret",
+        "Tic",
+        "Turizm",
+        "İnşaat",
+        "Insaat",
+        "Taahhüt",
+        "Pazarlama",
+        "Dış",
+        "Dis",
+        "Mühendislik",
+        "Danışmanlık",
+    ]
+)
 
 # Job titles and departments: a "Name:" or "Attention:" line that holds one names nobody. A title is
 # made of these words only, with at least one of the first kind ("Head of Sales", "Legal Counsel").
@@ -409,7 +438,20 @@ def _joins_forward(doc: _Document, j: int, stop: frozenset[str]) -> bool:
         )
     if word in _NAME_PARTICLES:
         return _is_name_word(doc.word(following), stop) or doc.word(following) in _NAME_PARTICLES
+    if word == "ve":
+        return _between_trade_words(doc, j)
     return False
+
+
+def _between_trade_words(doc: _Document, j: int) -> bool:
+    """Whether the "ve" at word ``j`` stands between two Turkish trade words ("Sanayi ve Ticaret")."""
+    return (
+        0 < j < len(doc) - 1
+        and doc.joined(j)
+        and doc.joined(j + 1)
+        and normalize(_core(doc.word(j - 1))) in _TURKISH_TRADE_WORDS
+        and normalize(_core(doc.word(j + 1))) in _TURKISH_TRADE_WORDS
+    )
 
 
 def _read_name(doc: _Document, i: int, stop: frozenset[str] = _NOT_IN_A_NAME) -> _Name | None:
@@ -452,6 +494,8 @@ def _joins_backward(doc: _Document, j: int, words: int, form: int) -> bool:
     backward from its legal form at word ``form``, ``words`` name words having been read so far.
     """
     word = doc.word(j).casefold()
+    if word == "ve":
+        return words > 0 and _between_trade_words(doc, j)
     if words == 0:  # straight before the legal form: only "Smith & Co." and "Smith and Co."
         if not (word in {"&", "and"} and normalize(doc.word(form)) == "co"):
             return False
@@ -465,6 +509,17 @@ def _joins_backward(doc: _Document, j: int, words: int, form: int) -> bool:
         doc.joined(j)
         and _is_name_word(doc.word(before), _NOT_IN_A_COMPANY)
         and not _legal_form_length(doc, before)
+        and not _ends_a_legal_form(doc, before)
+    )
+
+
+def _ends_a_legal_form(doc: _Document, i: int) -> bool:
+    """Whether word ``i`` is the last word of a legal form ("Şirketi" of "Anonim Şirketi"): the
+    name ends there, and what a "&" joins after it is another name.
+    """
+    return any(
+        j >= 0 and j + (length := _legal_form_length(doc, j)) - 1 == i and length > 0
+        for j in (i, i - 1)
     )
 
 
