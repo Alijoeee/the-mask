@@ -497,7 +497,7 @@ def _ordinary_around(text: str, finding: Finding, owned: list[Finding]) -> bool:
         if not (
             word.casefold() in _FILLER
             or word.casefold() in _PRODUCT_WORDS
-            or word.isdigit()
+            or (word.isdigit() and len(word) < 4)
             or word[0].islower()
             or is_it_word(word)
         ):
@@ -539,7 +539,8 @@ def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
     rule's company with a legal form that they overlap: the rule knows where the name ends. The
     model's "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında imzalanmıştır" must not take two
     companies down with it. What is left of a model finding, outside the companies, is kept when
-    it still has a capitalised word, without the lower case words ("ile", "ve", "and") at the cut.
+    it still has a capitalised word, without the lower case words ("ile", "ve", "and") and the bare
+    legal forms at the cut. Every piece is kept, before, between and after the companies.
     """
     companies = [
         f
@@ -562,6 +563,7 @@ def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
             or finding.type not in _NAMES
             or not over
             or any((c.start, c.end) == (finding.start, finding.end) for c in over)
+            or any(_overruns_a_sentence_end(text, finding, c) for c in over)
             or _extends_name_leftwards(text, finding, over[0], over[-1])
         ):
             kept.append(finding)
@@ -569,12 +571,9 @@ def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
         position = finding.start
         for c in [*over, None]:
             end = finding.end if c is None else min(c.start, finding.end)
-            # Only what stands before the first company is kept: after it, the model ran on.
-            piece = (
-                _left_over(text, position, end, c is not None and c.start > position, False)
-                if position == finding.start
-                else None
-            )
+            # Every piece that is left, before, between and after the companies, keeps its own
+            # finding: a person next to a company must never be lost with the cut.
+            piece = _left_over(text, position, end, c is not None, position > finding.start)
             if piece is not None:
                 kept.append(
                     replace(finding, start=piece[0], end=piece[1], text=text[piece[0] : piece[1]])
@@ -582,6 +581,19 @@ def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
             if c is not None:
                 position = max(position, c.end)
     return kept
+
+
+def _overruns_a_sentence_end(text: str, finding: Finding, company: Finding) -> bool:
+    """Whether ``finding`` starts with ``company``, of its own type, and runs on past a full stop
+    that ends the sentence ("Acme Supplies Ltd. Passport"): the rule knows where the company ends
+    and ``_without_overruns`` takes the rest away (ruling R45).
+    """
+    return (
+        finding.start == company.start
+        and finding.type is company.type
+        and finding.end > company.end
+        and text[company.end : company.end + 1] == "."
+    )
 
 
 def _extends_name_leftwards(text: str, finding: Finding, first: Finding, last: Finding) -> bool:
@@ -608,7 +620,7 @@ def _left_over(
 
     def capital(word: re.Match[str]) -> bool:
         first = next((ch for ch in word.group() if ch.isalnum()), "")
-        return first.isupper() or first.isdigit()
+        return (first.isupper() or first.isdigit()) and not has_legal_form(word.group().strip(",;"))
 
     while cut_at_end and words and not capital(words[-1]):
         words.pop()

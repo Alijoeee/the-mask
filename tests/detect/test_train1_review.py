@@ -40,6 +40,18 @@ def run(text, engine, always=(), never=(), seeds=None, case=None):
     return a
 
 
+def masked_text(a):
+    """The text with every enabled finding replaced by its placeholder."""
+    out = a.text
+    spans = sorted(
+        ((f.start, f.end, g.placeholder) for g in a.groups if g.enabled for f in g.findings),
+        reverse=True,
+    )
+    for start, end, placeholder in spans:
+        out = out[:start] + placeholder + out[end:]
+    return out
+
+
 def shown(a):
     return [(g.type, sorted({f.text for f in g.findings}), g.enabled) for g in a.groups]
 
@@ -354,9 +366,8 @@ def test_two_turkish_companies_are_not_lost_to_a_model_span(engine):
 def test_two_turkish_companies_with_the_real_engine(engine):
     a = run(TURKISH, engine)
     assert [g.type for g in a.groups] == [C, C]
-    assert "GLOBAL" not in " ".join(a.text.split()) or True
-    covered = sorted(f.text for g in a.groups for f in g.findings)
-    assert covered.count("GLOBAL Teknoloji") + covered.count("GLOBAL Teknoloji A.Ş.") == 2
+
+    assert "GLOBAL" not in masked_text(a)
 
 
 @pytest.mark.parametrize(
@@ -420,3 +431,83 @@ def test_a_vendor_company_with_a_legal_form_is_never_cut():
 def test_a_vendor_guess_with_a_name_in_it_stays_whole():
     a = run("We use Zetavolt Hartmann here.", ModelStub((C, "Zetavolt Hartmann")), always=VENDOR)
     assert "Zetavolt Hartmann" in hidden_texts(a)
+
+
+# --- Round 3: nothing next to a company is lost with the model's span -----------------------------
+
+
+@pytest.mark.parametrize(
+    "text,model,gone",
+    [
+        (
+            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz imzalar.",
+            (P, "A.Ş. Genel Müdürü Ahmet"),
+            ["Ahmet"],
+        ),
+        (
+            "Acme Ltd and Mary O'Hara sign.",
+            (P, "Acme Ltd and Mary O'Hara"),
+            ["Acme", "Mary", "O'Hara"],
+        ),
+        (
+            "Mavi Teknoloji A.Ş. ile Ahmet Yılmaz sign.",
+            (P, "Mavi Teknoloji A.Ş. ile Ahmet Yılmaz"),
+            ["Ahmet", "Yılmaz"],
+        ),
+        (
+            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz",
+            (P, "A.Ş. Genel Müdürü Ahmet Yılmaz"),
+            ["Ahmet", "Yılmaz"],
+        ),
+        (
+            "Supplies Ltd Zetaflow Analytics sign.",
+            (C, "Supplies Ltd Zetaflow Analytics"),
+            ["Zetaflow", "Analytics"],
+        ),
+        (
+            "Bright Ltd Bright Star Division signs.",
+            (C, "Ltd Bright Star Division"),
+            ["Star", "Division"],
+        ),
+        ("Acme B.V. en Jan de Vries tekenen.", (C, "Acme B.V. en Jan de Vries"), ["Jan", "Vries"]),
+        (
+            "Acme Ltd John Carter Beta Ltd sign.",
+            (P, "Acme Ltd John Carter Beta Ltd"),
+            ["Acme", "John", "Carter", "Beta"],
+        ),
+    ],
+)
+def test_nothing_next_to_a_company_leaks_with_a_model_span(text, model, gone):
+    out = masked_text(run(text, ModelStub(model)))
+    for word in gone:
+        assert word not in out, out
+
+
+def test_a_person_beside_a_turkish_company_with_the_real_engine(engine):
+    out = masked_text(run("Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz imzalar.", engine))
+    assert "Ahmet" not in out and "Mavi" not in out  # "Yılmaz": the model's own miss, as before
+
+
+def test_a_vendor_guess_with_a_number_in_it_stays_whole():
+    t = "Order Zetavolt PAM User Subscription 2024558713 today."
+    guess = "Zetavolt PAM User Subscription 2024558713"
+    out = masked_text(run(t, ModelStub((C, guess)), always=["Zetavolt"]))
+    assert "2024558713" not in out
+
+
+@pytest.mark.parametrize("name", ["EPM", "IBM", "ABB"])
+def test_a_three_letter_company_name_is_hidden_when_it_stands_alone(name):
+    t = f"This is between {name} Ltd and Beta Corp.\n{name} shall deliver.\n"
+    out = masked_text(run(t, ModelStub()))
+    assert name not in out, out
+
+
+def test_two_companies_sharing_a_three_letter_name_do_not_lose_either():
+    t = "This is between ABB Ltd and ABB Holding B.V.\nABB shall deliver.\n"
+    out = masked_text(run(t, ModelStub()))
+    assert "ABB" not in out
+
+
+def test_a_capital_word_that_is_no_name_is_not_a_short_form():
+    t = "This is between THE Ltd and Zeta Corp.\nTHE parties sign.\n"
+    assert "THE parties" in masked_text(run(t, ModelStub()))
