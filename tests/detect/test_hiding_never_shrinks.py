@@ -48,15 +48,36 @@ STEMS = [
     "Tessaro Gıda",
     "Delmar Logistics",
 ]
-FORMS = ["Ltd", "B.V.", "GmbH", "A.Ş.", "Anonim Şirketi", "Ltd. Şti.", "LLC", "AŞ", "S.A."]
+FORMS = [
+    "Ltd",
+    "B.V.",
+    "GmbH",
+    "A.Ş.",
+    "Anonim Şirketi",
+    "ANONİM ŞİRKETİ",
+    "Limited Şirketi",
+    "Ltd. Şti.",
+    "LLC",
+    "AŞ",
+    "S.A.",
+]
 CONNECTORS = ["&", "and", "ve", "ile", "en", "und", ",", "of", "-"]
 TITLES = ["Genel Müdürü", "Managing Director", "Hukuk Müşaviri", "CEO", "Director"]
 VERBS = ["shall pay", "imzalar", "tekent", "signs here", "will deliver"]
 CODE_NAME = "Zephyrion"
 ORDINARY = ["Delivery", "Payment", "Schedule"]
+VALUES = [
+    ("42.000,00", "after"),
+    ("35.750,00", "after"),
+    ("12,500.00", "after"),
+    ("42.000,00", "before"),
+    ("NL91ABNA0417164300", "after"),
+    ("+31 20 123 4567", "after"),
+]
+CURRENCIES = ["TL", "TRY", "USD", "EUR", "$"]
 
 
-def _make_cases(seed=20261021, count=480):
+def _make_cases(seed=20261021, count=600):
     rng = random.Random(seed)
     cases = []
     for number in range(count):
@@ -67,7 +88,7 @@ def _make_cases(seed=20261021, count=480):
             s2 = "Kestrelon"
         c1, c2 = f"{s1} {rng.choice(FORMS)}", f"{s2} {rng.choice(FORMS)}"
         conn, title, verb = rng.choice(CONNECTORS), rng.choice(TITLES), rng.choice(VERBS)
-        shape = number % 8
+        shape = number % 12
         secrets: list[str] = []
         model: list[tuple[PlaceholderType, str]] = []
         if shape == 0:
@@ -102,6 +123,17 @@ def _make_cases(seed=20261021, count=480):
             text = f"{c1} {title} {person}'s signature, {c2}."
             secrets = [s1, person, s2]
             model = [(P, f"{title} {first}"), (C, f"{c1} {title}"), (P, person)]
+        elif shape >= 8:
+            value, kind = rng.choice(VALUES)
+            cur = rng.choice(CURRENCIES)
+            before = f"{cur} {value}" if kind == "before" else f"{value} {cur}"
+            text = f"Total {before}. {c1} {verb}. {person} signs."
+            if value.startswith(("NL", "+")):
+                text = f"Reference {value}. {c1} {verb}. {person} signs."
+            secrets = [s1, person, f"value:{value}"]
+            model = [(P, person)]
+            if shape != 8:
+                model += [(C, f"{cur}. {s1}"), (P, f"{conn} {first}")]
         else:
             text = f"Between {c1} {conn} {person}: {CODE_NAME} {verb} to {c2}."
             secrets = [s1, person, s2, CODE_NAME]
@@ -132,18 +164,36 @@ class _Stub(Engine):
 _WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?")
 
 
-def leaks(text, model, secrets, config):
-    """The words of the secrets that are shown in the analysed ``text``."""
+class _OnTop:
+    """The real engine, with the stub's spans added to what its model finds."""
+
+    def __init__(self, base, model):
+        self.base, self.stub = base, _Stub(model)
+
+    def analyze(self, text):
+        return sorted(
+            [*self.base.analyze(text), *self.stub._presidio_findings(text)],
+            key=lambda f: (f.start, f.end, f.type),
+        )
+
+
+def leaks(text, model, secrets, config, base=None):
+    """The words of the secrets that are shown in the analysed ``text``. With ``base`` (the real
+    engine) the stub's spans come on top of the real model's."""
     always = [CODE_NAME] if config == 1 else []
     never = ORDINARY if config == 2 else []
-    a = analyze(CombinedText.join([("x", text)]), _Stub(model), UserLists(always, never))
+    engine = _Stub(model) if base is None else _OnTop(base, model)
+    a = analyze(CombinedText.join([("x", text)]), engine, UserLists(always, never))
     covered = [False] * len(a.text)
     for group in a.groups:
         if group.enabled:
             for f in group.findings:
                 for i in range(f.start, f.end):
                     covered[i] = True
-    required = {word.casefold() for secret in secrets for word in _WORD.findall(secret)}
+    # A value (an amount, an IBAN, a phone number) is found by the patterns of the real engine.
+    names = [x for x in secrets if not x.startswith("value:")]
+    values = [x[6:] for x in secrets if x.startswith("value:")] if base is not None else []
+    required = {word.casefold() for secret in [*names, *values] for word in _WORD.findall(secret)}
     if CODE_NAME in secrets and config != 1:
         required.discard(CODE_NAME.casefold())  # only the always-hide list knows it
     shown = []
@@ -162,3 +212,9 @@ def test_the_generator_is_deterministic_and_big_enough():
 def test_every_secret_of_a_template_is_hidden(case):
     text, model, secrets, config = case
     assert leaks(text, model, secrets, config) == [], text
+
+
+@pytest.mark.parametrize("case", CASES[::2], ids=[str(i) for i in range(0, len(CASES), 2)])
+def test_every_secret_is_hidden_with_the_stub_spans_on_top_of_the_real_model(engine, case):
+    text, model, secrets, config = case
+    assert leaks(text, model, secrets, config, engine) == [], text

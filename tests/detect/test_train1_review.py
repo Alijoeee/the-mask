@@ -565,3 +565,43 @@ def test_a_defined_short_name_inside_a_longer_model_span_is_still_swept():
     t = 'Ege Yazılım Ltd ("Ege") signs here. Ege pays.'
     out = masked_text(run(t, ModelStub((C, 'Ege Yazılım Ltd ("Ege'))))
     assert "Ege" not in out, out
+
+
+def test_a_grown_union_that_reaches_a_third_finding_takes_it_in():
+    from themask.detect.pipeline import _one_per_place
+    from themask.model import MaskPlan, Replacement
+
+    text = "x" * 200
+    company = Finding(C, 0, 50, text[0:50], 0.95, "rule")
+    person = Finding(P, 40, 75, text[40:75], 0.85, "model")  # overlaps the company in part
+    address = Finding(PlaceholderType.ADDRESS, 70, 100, text[70:100], 0.8, "model")
+    next_person = Finding(P, 96, 130, text[96:130], 0.85, "model")  # beside the address
+    kept, registered = _one_per_place([company, person, address, next_person], text)
+    MaskPlan([Replacement(f.start, f.end, "[X]") for f in kept])  # no overlap
+    assert [(f.start, f.end) for f in kept] == [(0, 130)]
+    # What the union took in, and the winner as it was, are grouped for the sweep.
+    assert {company, person, address, next_person} <= set(registered)
+
+
+def test_a_value_that_loses_to_a_name_trims_the_name_not_the_value():
+    from themask.detect.pipeline import _one_per_place
+
+    text = "Total 42.000,00 TL. Acme Teknoloji Anonim Şirketi öder."
+    amount = Finding(PlaceholderType.AMOUNT, 6, 18, text[6:18], 0.85, "pattern")
+    first = text.index("TL")
+    last = text.index("Şirketi") + len("Şirketi")
+    company = Finding(C, first, last, text[first:last], 0.95, "rule")
+    kept, _ = _one_per_place([amount, company], text)
+    assert [(f.type, f.text) for f in kept] == [
+        (PlaceholderType.AMOUNT, "42.000,00 TL"),
+        (C, "Acme Teknoloji Anonim Şirketi"),
+    ]
+
+
+def test_a_currency_code_does_not_start_a_company_name():
+    from themask.detect.contract_rules import find_legal_form_companies
+
+    found = find_legal_form_companies(
+        "Toplam 42.000,00 TL. Acmevolt Teknoloji Anonim Şirketi öder."
+    )
+    assert [f.text for f in found] == ["Acmevolt Teknoloji Anonim Şirketi"]

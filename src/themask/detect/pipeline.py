@@ -955,16 +955,18 @@ _WORDS = frozenset(
         PlaceholderType.CUSTOM,
     }
 )
+_EDGE_DOTS = ".,;:"
 
 
 def _one_per_place(found: list[Finding], text: str) -> tuple[list[Finding], list[Finding]]:
     """Of the findings that overlap, the one that wins (see the module), in text order, and the
-    findings that lost their place to one that held only a part of them.
+    findings that lost their place or were changed by it, to be grouped for the sweep.
 
-    Hiding only grows: a person, company or address that loses to a finding it overlaps only in
-    part is not dropped. The winner grows to the union of the two spans (and again, when that
-    reaches another finding), so that no word of the loser is shown. The owner's own values never
-    grow. What lost this way is returned too, to be grouped for the sweep.
+    Hiding only grows. A person, company or address that loses to a finding it overlaps only in
+    part is not dropped: the winner grows to the union of the two spans (and takes in what that
+    reaches). A value (an amount, a phone number, an identifier) that loses to a person, company or
+    address is not dropped either: the winner is trimmed to stop where the value starts or ends.
+    The owner's own values never grow and are never trimmed. Each loser is visited once.
     """
     spans: dict[tuple[int, int], list[Finding]] = defaultdict(list)
     for finding in _without_overruns(found):
@@ -978,60 +980,102 @@ def _one_per_place(found: list[Finding], text: str) -> tuple[list[Finding], list
             kept.append(finding)
         else:
             rejected.append(finding)
-    united: list[Finding] = []
-    progress = True
-    while progress:
-        progress = False
-        for loser in rejected:
-            if loser.type not in _WORDS:
-                continue
-            for index, winner in enumerate(kept):
-                if (
-                    winner.type in _WORDS
-                    and winner.source not in _OWNERS
-                    and loser.start < winner.end
-                    and winner.start < loser.end
-                    and not (winner.start <= loser.start and loser.end <= winner.end)
-                ):
-                    grown = _grown(kept, index, loser, text)
-                    if grown is not None:
-                        kept, absorbed = grown
-                        united += [loser, *absorbed]
-                        rejected = [r for r in rejected if r is not loser]
-                        progress = True
-                        break
-            if progress:
-                break
-    # What a contract rule found and a longer finding took in (a defined short name inside the
-    # model's span) is grouped for the sweep as well.
-    united += [r for r in rejected if r.type in _WORDS and r.source == "rule"]
-    return sorted(kept, key=lambda f: (f.start, f.end)), united
+    kept.sort(key=lambda f: f.start)
+    starts = [f.start for f in kept]
+    registered: list[Finding] = []
+    stands = {(f.type, normalize(f.text)) for f in kept}
+    for loser in rejected:
+        block = _span_block(kept, starts, loser.start, loser.end)
+        inside_a_rule = any(
+            kept[i].source == "rule" and kept[i].start <= loser.start and loser.end <= kept[i].end
+            for i in block
+        )
+        if (
+            loser.type in _WORDS
+            and not inside_a_rule  # a company's own words are its variants already
+            and (loser.type, normalize(loser.text)) not in stands
+        ):
+            registered.append(loser)  # its value is swept elsewhere, whatever happens here
+        if not block:
+            continue
+        if loser.type in _WORDS:
+            _grow(kept, starts, block, loser, text, registered)
+        else:
+            _trim(kept, starts, block, loser, text)
+    return kept, registered
 
 
-def _grown(
-    kept: list[Finding], index: int, loser: Finding, text: str
-) -> tuple[list[Finding], list[Finding]] | None:
-    """``kept`` with the finding at ``index`` grown to the union with ``loser`` and with every
-    finding that union reaches (a person's, a company's or an address, never the owner's own), and
-    the findings taken in; None when the union would reach one of the owner's values or a finding
-    of another kind.
-    """
-    winner = kept[index]
-    start, end = min(winner.start, loser.start), max(winner.end, loser.end)
-    others = [k for i, k in enumerate(kept) if i != index]
-    absorbed: list[Finding] = []
-    while True:
-        more = [k for k in others if k not in absorbed and k.start < end and start < k.end]
-        if not more:
+def _span_block(kept: list[Finding], starts: list[int], start: int, end: int) -> list[int]:
+    """The indexes of the kept findings that overlap ``start``-``end``."""
+    first = max(0, bisect_right(starts, start) - 1)
+    out = []
+    for i in range(first, len(kept)):
+        if kept[i].start >= end:
             break
-        for k in more:
-            if k.source in _OWNERS or k.type not in _WORDS:
-                return None
-            start, end = min(start, k.start), max(end, k.end)
-        absorbed += more
-    survivors = [k for k in others if k not in absorbed]
-    survivors.append(replace(winner, start=start, end=end, text=text[start:end]))
-    return survivors, absorbed
+        if start < kept[i].end:
+            out.append(i)
+    return out
+
+
+def _grow(
+    kept: list[Finding],
+    starts: list[int],
+    block: list[int],
+    loser: Finding,
+    text: str,
+    registered: list[Finding],
+) -> None:
+    """Grow the first winner of ``block`` that holds ``loser`` in part to the union with it and
+    with everything the union reaches (a person's, a company's or an address, never the owner's
+    own); nothing changes when the union would reach an owner's value or a value of another kind,
+    or when ``loser`` lies within a winner.
+    """
+    winner = next((kept[i] for i in block if kept[i].type in _WORDS), None)
+    if winner is None or winner.source in _OWNERS:
+        return
+    if all(kept[i].start <= loser.start and loser.end <= kept[i].end for i in block):
+        return  # held whole by a winner: hidden already
+    start, end = min(winner.start, loser.start), max(winner.end, loser.end)
+    while True:
+        reached = _span_block(kept, starts, start, end)
+        if any(kept[i].source in _OWNERS or kept[i].type not in _WORDS for i in reached):
+            return
+        low = min([start] + [kept[i].start for i in reached])
+        high = max([end] + [kept[i].end for i in reached])
+        if (low, high) == (start, end):
+            break
+        start, end = low, high
+    registered += [kept[i] for i in reached]
+    grown = replace(winner, start=start, end=end, text=text[start:end])
+    kept[reached[0] : reached[-1] + 1] = [grown]
+    starts[reached[0] : reached[-1] + 1] = [start]
+
+
+def _trim(
+    kept: list[Finding], starts: list[int], block: list[int], value: Finding, text: str
+) -> None:
+    """Make room for ``value`` (an amount, a phone number, an identifier) that lost its place to
+    names: each person, company or address of ``block`` is trimmed to stop where the value starts
+    and ends, and the value takes its place. Nothing changes when the owner's own values or a
+    finding of another kind are in the way."""
+    if any(kept[i].source in _OWNERS or kept[i].type not in _WORDS for i in block):
+        return
+    if all(kept[i].start <= value.start and value.end <= kept[i].end for i in block):
+        return  # held whole by a winner: hidden already
+    pieces: list[Finding] = []
+    for i in block:
+        winner = kept[i]
+        for lo, hi in ((winner.start, value.start), (value.end, winner.end)):
+            if lo < hi:
+                lo, hi = _trimmed(text, lo, hi)
+                while lo < hi and text[lo] in _EDGE_DOTS:
+                    lo, hi = _trimmed(text, lo + 1, hi)
+                if lo < hi and any(c.isalnum() for c in text[lo:hi]):
+                    pieces.append(replace(winner, start=lo, end=hi, text=text[lo:hi]))
+    pieces.append(value)
+    pieces.sort(key=lambda f: f.start)
+    kept[block[0] : block[-1] + 1] = pieces
+    starts[block[0] : block[-1] + 1] = [f.start for f in pieces]
 
 
 def _without_overruns(found: list[Finding]) -> list[Finding]:

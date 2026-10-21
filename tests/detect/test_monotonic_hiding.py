@@ -475,6 +475,76 @@ CASES = [
             "Berg@0",
         ),
     ),
+    (
+        "Toplam bedel 42.000,00 TL. Acmevolt Teknoloji Anonim Şirketi öder.",
+        None,
+        ("42@0", "000@0", "00@0", "TL@0", "Acmevolt@0", "Anonim@0", "Şirketi@0"),
+    ),
+    (
+        "Toplam bedel 42.000,00 TL. ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ öder.",
+        None,
+        ("42@0", "000@0", "00@0", "TL@0", "ACMEVOLT@0", "ŞİRKETİ@0"),
+    ),
+    (
+        "The Customer shall pay 35.750,00 TL. Anatolia Bilişim Limited Şirketi will deliver.",
+        None,
+        ("35@0", "750@0", "00@0", "TL@0", "Anatolia@0", "Bilişim@0", "Limited@0", "Şirketi@0"),
+    ),
+    (
+        "Toplam 12.500,00 TRY. Yıldız Enerji A.Ş. öder.",
+        None,
+        ("TRY@0", "Yıldız@0", "Enerji@0", "A@0", "Ş@0"),
+    ),
+    (
+        "Total 12,500.00 USD. Harbor Systems Ltd. Şti. pays.",
+        None,
+        ("USD@0", "Harbor@0", "Systems@0", "Ltd@0", "Şti@0"),
+    ),
+    (
+        "Fee $ 12,500.00. Zeta Global B.V. pays.",
+        None,
+        ("12@0", "500@0", "00@0", "Zeta@0", "Global@0", "B@0", "V@0"),
+    ),
+    (
+        "Bedrag EUR 35.750,00. Zeta Global B.V. betaalt.",
+        None,
+        ("EUR@0", "35@0", "750@0", "00@0", "Zeta@0", "Global@0", "B@0", "V@0"),
+    ),
+    (
+        "Betrag EUR 35.750,00. Zeta Global GmbH zahlt.",
+        None,
+        ("Betrag@0", "EUR@0", "35@0", "750@0", "00@0", "Zeta@0", "Global@0", "GmbH@0"),
+    ),
+    (
+        "Pay to IBAN NL91ABNA0417164300. Zeta Global B.V. receives.",
+        None,
+        ("NL91ABNA0417164300@0", "Zeta@0", "Global@0", "B@0", "V@0"),
+    ),
+    (
+        "Call +31 20 123 4567. Zeta Global B.V. answers.",
+        None,
+        ("31@0", "20@0", "123@0", "4567@0", "Zeta@0", "Global@0", "B@0", "V@0"),
+    ),
+    (
+        "Of Harborpoint Systems LLC. Harborpoint confirms.",
+        ((P, "of Harborpoint"),),
+        ("Harborpoint@0", "Systems@0", "LLC@0", "Harborpoint@1"),
+    ),
+    (
+        "Bramblecote Holdings Limited: Ayşe Demir, Genel Müdürü. Hukuk Müşaviri Ayşe Demir imzalar.",
+        ((C, "Bramblecote Holdings Limited: Ayşe Demir, Genel Müdürü"),),
+        ("Bramblecote@0", "Holdings@0", "Limited@0"),
+    ),
+    (
+        "Zetaflow Ltd and Quorix'ın CEO signs. Quorix'ın CEO pays.",
+        ((P, "Quorix"),),
+        ("Zetaflow@0", "Ltd@0"),
+    ),
+    (
+        "Acme Ltd Genel Müdürü Mary-Jane Pendleton signs. Mary-Jane Pendleton pays.",
+        ((C, "Acme Ltd Genel Müdürü Mary-Jane"),),
+        ("Acme@0", "Ltd@0"),
+    ),
 ]
 
 
@@ -558,3 +628,28 @@ def test_a_second_company_after_an_ampersand_is_not_lost_with_the_owners_vendor(
     for word in ("ACMEVOLT", "ŞİRKETİ", "Quorix"):
         start = t.index(word)
         assert all(i in covered for i in range(start, start + len(word))), word
+
+
+@pytest.mark.parametrize(
+    "text,value",
+    [
+        ("Toplam bedel 42.000,00 TL. Acmevolt Teknoloji Anonim Şirketi öder.", "42.000,00"),
+        ("Toplam bedel 42.000,00 TL. ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ öder.", "42.000,00"),
+        ("It shall pay 35.750,00 TL. Anatolia Bilişim Limited Şirketi will deliver.", "35.750,00"),
+        ("Toplam 12.500,00 TRY. Yıldız Enerji A.Ş. öder.", "12.500,00"),
+        ("Total 12,500.00 USD. Harbor Systems Ltd. Şti. pays.", "12,500.00"),
+        ("Fee $ 12,500.00. Zeta Global B.V. pays.", "12,500.00"),
+        ("Bedrag EUR 35.750,00. Zeta Global B.V. betaalt.", "35.750,00"),
+        ("Betrag EUR 35.750,00. Zeta Global GmbH zahlt.", "35.750,00"),
+    ],
+)
+def test_an_amount_before_a_company_is_hidden_and_so_is_the_company(engine, text, value):
+    a = analyze(CombinedText.join([("x", text)]), engine, UserLists([], []))
+    covered = {i for g in a.groups if g.enabled for f in g.findings for i in range(f.start, f.end)}
+    start = text.index(value)
+    assert all(i in covered for i in range(start, start + len(value))), text
+    word = next(
+        w for w in ("Teknoloji", "TEKNOLOJİ", "Anatolia", "Yıldız", "Harbor", "Zeta") if w in text
+    )
+    start = text.index(word)
+    assert all(i in covered for i in range(start, start + len(word))), text

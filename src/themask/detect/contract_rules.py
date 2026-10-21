@@ -118,7 +118,14 @@ _CURRENCIES = _vocabulary(
 # the parties clause neither are countries, currencies and "the Company" ("made between Monday and
 # Friday", "between England and Wales", "(1) The Company").
 _NOT_IN_A_NAME = _FUNCTION_WORDS | _LABEL_WORDS | _ROLE_WORDS
-_NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS
+# A currency code is never a word of a company's name: "42.000,00 TL. Acme Ltd" starts at Acme.
+_CURRENCY_CODES = _vocabulary(
+    """
+    tl try eur usd gbp chf jpy cny rmb sek nok dkk pln czk huf ron bgn aud cad nzd sgd hkd inr zar
+    aed sar isk lira liras
+    """
+)
+_NOT_IN_A_COMPANY = _NOT_IN_A_NAME | _MONTHS_AND_DAYS | _CURRENCY_CODES
 _NOT_A_PARTY = _NOT_IN_A_COMPANY | _COUNTRIES | _CURRENCIES | frozenset({"company", "companies"})
 
 # The words of a contract's own headings ("TERMINATION", "GOVERNING LAW") and titles ("LOGISTICS
