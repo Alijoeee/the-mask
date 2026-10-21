@@ -16,7 +16,9 @@ back to its file. ``analyze`` runs the whole analysis on it:
 3. A finding that is a never-hide term is dropped; a finding longer than the term is not. The
    names in the text beat its defined terms: in a text that defines ``"Acme" means Acme
    Supplies Ltd``, every "Acme" is still hidden. The owner's never-hide lists and the defaults
-   always win, over the always-hide lists too. What the language model finds that is made of
+   always win over what the engine finds; a value the owner asked to hide (an always-hide entry,
+   a stored key's value) loses to a default never-hide term only when it is not hers (training
+   round 1): only her own never-hide lists beat it. What the language model finds that is made of
    the contract's own words only ("GOVERNING LAW") is dropped as well. No never-hide term, and
    no single word of the contract's own ("Quality" of Quality Foods Ltd), becomes a variant for
    the sweep.
@@ -60,6 +62,9 @@ from themask.detect.lists import (
     UserLists,
     always_hide_entry,
     is_default_term,
+    is_it_acronym,
+    is_it_guess,
+    is_it_word,
     is_vocabulary_word,
     never_hide_check,
     on_never_hide_list,
@@ -186,6 +191,7 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
+    found = _vendor_trimmed(_cut_at_legal_companies(found, text), text)
     unlegal_source = found
     legal = legal_spans(text)
     unlegal = _without_legal_references(found, legal)
@@ -200,12 +206,24 @@ def analyze(
     if legal != legal_spans(text):
         found = _people_among_parties(_without_legal_references(unlegal_source, legal), text)
     never_hidden = never_hide_check(user_lists, case, names=names)
+    owners_never = never_hide_check(user_lists, case, names=names, owners_only=True)
+    stems = _legal_stems(found, seeds)
+
+    def is_term_here(form: str, whole: bool) -> bool:
+        """A default never-hide term, unless it is (a part of) the name of a company with a legal
+        form found in the text: "SIEM Ltd" makes "SIEM" its short name (training round 1).
+        """
+        return never_hidden(form) and not _of_a_legal_name(form, stems, whole)
 
     def keep(form: str) -> bool:
         # A single word of the contract's own ("Quality" of Quality Foods Ltd) would be swept
         # out of every clause that uses it.
         common = len(form.split()) == 1 and is_contract_wording(form)
-        return is_searchable(form) and not never_hidden(form) and not common
+        blocked = owners_never(form) or is_term_here(form, True)
+        return is_searchable(form) and not blocked and not common
+
+    def keep_owned(form: str) -> bool:
+        return is_searchable(form) and not owners_never(form)
 
     name_keys = [_words_key(name) for name in names]
     surnames = _surnames_kept(found, text, user_lists, case, is_term)
@@ -215,13 +233,13 @@ def analyze(
         for f in found
         if (f.start, f.end) in surnames
         or not (
-            never_hidden(f.text)
+            _is_a_term(f, owners_never, is_term_here)
             or (_names_nobody(f, is_term) and not _part_of_a_name(f, name_keys))
             or _starts_a_term(text, f)
         )
     ]
     for seed in seeds:
-        seed.variants = {v for v in seed.variants if keep(v)}
+        seed.variants = {v for v in seed.variants if keep_owned(v)}
     _keep_shared_variants_out(seeds)
     found += _seed_matches(text, seeds, placeholders, is_term, names)
 
@@ -238,11 +256,17 @@ def analyze(
         aliases=case.defined_terms,
         surnames=policy,
     )
+    stored = {seed.id for seed in seeds}
     for group in groups:
         # No never-hide word is swept, but a person's bare name, which the sweep takes only
-        # where it stands as a name (rulings R42, R50).
+        # where it stands as a name (rulings R42, R50). What the owner asked to hide (her
+        # always-hide entries, her key) loses only to her own never-hide lists.
+        owned = group.id in stored or any(f.source == "list" for f in group.findings)
         group.variants = {
-            v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
+            v
+            for v in group.variants
+            if is_bare_name(group.type, v)
+            or not (owners_never(v) if owned else is_term_here(v, True))
         }
     sweep(text, groups, fixed=seeds, is_term=is_term, public=legal)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
@@ -252,7 +276,6 @@ def analyze(
             is_bare_name(group.type, f.text) and _ordinary(f.text, defined) for f in group.findings
         ):
             group.needs_check = True
-    stored = {seed.id for seed in seeds}
     for group in _unsure_guesses(groups, stored):
         group.enabled, group.needs_check = False, True
     groups.sort(key=lambda g: g.findings[0].start)
@@ -353,6 +376,248 @@ def _loose(text: str, start: int, end: int, mark: str, partners: dict[str, str])
 
 
 # --- Never-hide terms and the names that beat them ----------------------------------------------
+
+
+def _is_a_term(
+    finding: Finding,
+    owners_never: Callable[[str], bool],
+    is_term_here: Callable[[str, bool], bool],
+) -> bool:
+    """Whether ``finding`` is a never-hide term and is dropped. The owner's own never-hide lists
+    beat everything; a value she asked to hide (an always-hide match) is beaten by nothing else;
+    a person is never dropped for being an IT acronym ("PAM", "DAM"); the rest is dropped when it
+    is a default term and not (part of) the name of a company with a legal form.
+    """
+    if owners_never(finding.text):
+        return True
+    if finding.source == "list":
+        return False
+    if finding.type is PlaceholderType.PERSON and is_it_acronym(finding.text):
+        return False
+    return is_term_here(finding.text, False)
+
+
+def _legal_stems(found: list[Finding], seeds: list[Group]) -> set[str]:
+    """The names of the companies with a legal form that the text names, without the legal form,
+    as ``_words_key`` gives them: "SIEM Ltd" gives "siem".
+    """
+    forms = [f.text for f in found if f.type is PlaceholderType.COMPANY]
+    for seed in seeds:
+        if seed.type is PlaceholderType.COMPANY:
+            forms += [seed.canonical, *seed.variants]
+    return {
+        key
+        for form in forms
+        if has_legal_form(form) and (key := _words_key(strip_legal_form(form)))
+    }
+
+
+def _of_a_legal_name(form: str, stems: set[str], whole: bool) -> bool:
+    """Whether ``form`` is the name of a company with a legal form (``stems``), or, unless
+    ``whole``, a run of two words or more inside it: "Integration Services" of "Advanced
+    Integration Services Ltd". Such a form is a name, whatever its words are.
+    """
+    key = _words_key(form)
+    if not key:
+        return False
+    if key in stems:
+        return True
+    return not whole and len(key.split()) > 1 and any(_inside(key, stem) for stem in stems)
+
+
+# What a product name is made of besides the vendor's own name ("Kron PAM User Subscription").
+_PRODUCT_WORDS = frozenset(
+    [
+        "privileged",
+        "access",
+        "management",
+        "data",
+        "classification",
+        "protection",
+        "prevention",
+        "loss",
+        "suite",
+        "user",
+        "users",
+        "subscription",
+        "security",
+        "digital",
+        "platform",
+        "enterprise",
+        "edition",
+        "server",
+        "client",
+        "agent",
+        "module",
+        "end",
+        "point",
+        "cloud",
+        "web",
+        "email",
+        "network",
+        "application",
+        "applications",
+        "identity",
+        "governance",
+        "monitoring",
+        "analytics",
+        "threat",
+        "detection",
+        "response",
+        "insight",
+        "vault",
+        "console",
+        "manager",
+        "studio",
+        "pro",
+        "plus",
+        "lite",
+        "core",
+        "standard",
+        "advanced",
+        "service",
+        "services",
+        "product",
+        "products",
+        "solution",
+        "solutions",
+    ]
+)
+
+
+def _ordinary_around(text: str, finding: Finding, owned: list[Finding]) -> bool:
+    """Whether ``finding``, besides the owner's values it holds, has only ordinary words: filler,
+    numbers, lower case words, IT words, product words ("Kron PAM User Subscription").
+    """
+    rest = list(text[finding.start : finding.end])
+    for value in owned:
+        for position in range(value.start - finding.start, value.end - finding.start):
+            rest[position] = " "
+    for word in re.findall(r"[^\W_]+", "".join(rest)):
+        if not (
+            word.casefold() in _FILLER
+            or word.casefold() in _PRODUCT_WORDS
+            or word.isdigit()
+            or word[0].islower()
+            or is_it_word(word)
+        ):
+            return False
+    return True
+
+
+def _vendor_trimmed(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` without the language model's guesses of a company that hold a value of the
+    owner's own and nothing else but ordinary words: "Kron PAM User Subscription" with Kron on
+    her always-hide list is hidden as Kron alone, which the list finding already does. A name with
+    a legal form, and anything a rule found, is never cut this way.
+    """
+    owned = [f for f in found if f.source == "list"]
+    if not owned:
+        return found
+    kept = []
+    for finding in found:
+        if (
+            finding.source == "model"
+            and finding.type is PlaceholderType.COMPANY
+            and not has_legal_form(finding.text)
+        ):
+            inside = [
+                o
+                for o in owned
+                if finding.start <= o.start
+                and o.end <= finding.end
+                and (o.start, o.end) != (finding.start, finding.end)
+            ]
+            if inside and _ordinary_around(text, finding, inside):
+                continue
+        kept.append(finding)
+    return kept
+
+
+def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` with the language model's people and companies cut at the edges of a contract
+    rule's company with a legal form that they overlap: the rule knows where the name ends. The
+    model's "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında imzalanmıştır" must not take two
+    companies down with it. What is left of a model finding, outside the companies, is kept when
+    it still has a capitalised word, without the lower case words ("ile", "ve", "and") at the cut.
+    """
+    companies = [
+        f
+        for f in found
+        if f.type is PlaceholderType.COMPANY
+        and f.source == "rule"
+        and f.score >= RULE_NAME_SCORE
+        and has_legal_form(f.text)
+    ]
+    if not companies:
+        return found
+    kept: list[Finding] = []
+    for finding in found:
+        over = sorted(
+            (c for c in companies if c.start < finding.end and finding.start < c.end),
+            key=lambda c: c.start,
+        )
+        if (
+            finding.source != "model"
+            or finding.type not in _NAMES
+            or not over
+            or any((c.start, c.end) == (finding.start, finding.end) for c in over)
+            or _extends_name_leftwards(text, finding, over[0], over[-1])
+        ):
+            kept.append(finding)
+            continue
+        position = finding.start
+        for c in [*over, None]:
+            end = finding.end if c is None else min(c.start, finding.end)
+            # Only what stands before the first company is kept: after it, the model ran on.
+            piece = (
+                _left_over(text, position, end, c is not None and c.start > position, False)
+                if position == finding.start
+                else None
+            )
+            if piece is not None:
+                kept.append(
+                    replace(finding, start=piece[0], end=piece[1], text=text[piece[0] : piece[1]])
+                )
+            if c is not None:
+                position = max(position, c.end)
+    return kept
+
+
+def _extends_name_leftwards(text: str, finding: Finding, first: Finding, last: Finding) -> bool:
+    """Whether ``finding`` is the company ``last`` with more words in front, joined to it by
+    capitalised words ("Supplier Logistics Ltd" for the rule's "Logistics Ltd"): the model
+    extended the name, and keeps it (ruling R45). A lower case word before the company ("Acme ve
+    Beta A.Ş.") parts the two names instead.
+    """
+    if finding.end != last.end or finding.start >= first.start:
+        return False
+    word = _WORD_AT_THE_CUT.findall(text[finding.start : first.start])
+    return bool(word) and word[-1][:1].isupper()
+
+
+_WORD_AT_THE_CUT = re.compile(r"\S+")
+
+
+def _left_over(
+    text: str, start: int, end: int, cut_at_end: bool, cut_at_start: bool
+) -> tuple[int, int] | None:
+    """The part of ``start``-``end`` that is left of a model finding beside a company: without
+    the lower case words at a cut, None when no capitalised word is left."""
+    words = list(_WORD_AT_THE_CUT.finditer(text, start, end))
+
+    def capital(word: re.Match[str]) -> bool:
+        first = next((ch for ch in word.group() if ch.isalnum()), "")
+        return first.isupper() or first.isdigit()
+
+    while cut_at_end and words and not capital(words[-1]):
+        words.pop()
+    while cut_at_start and words and not capital(words[0]):
+        words.pop(0)
+    if not words or not any(capital(word) for word in words):
+        return None
+    first, last = _trimmed(text, words[0].start(), words[-1].end())
+    return (first, last) if first < last else None
 
 
 def _starts_a_term(text: str, finding: Finding) -> bool:
@@ -466,7 +731,10 @@ def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
             and group.id not in stored
             and bool(found)
             and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
-            and all(_plain_words(form) == _PLAIN for form in {group.canonical, *group.variants})
+            and all(
+                _plain_words(form) == _PLAIN or is_it_guess(form) or is_it_word(form)
+                for form in {group.canonical, *group.variants}
+            )
         )
 
     asked = [g for g in groups if guess(g)]

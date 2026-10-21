@@ -202,18 +202,20 @@ _MISTAKEN_FOR_NAMES = _terms(
 # in it is no term.
 _IT_ACRONYMS = _terms(
     """
-    SIEM, SOAR, SOC, EDR, EPP, EBA, NDR, XDR, MDR, DLP, PAM, IAM, MFA, SSO, VPN, WAF, IDS, IPS,
-    CASB, DAM, EPM, SaaS, PaaS, IaaS, API, SLA, EPS, FPM, UEBA, NGFW, DDoS,
+    SIEM, SOAR, EDR, EPP, EBA, NDR, XDR, MDR, DLP, VPN, WAF, CASB, SaaS, PaaS, IaaS, API, SLA, EPS, FPM, UEBA, NGFW, DDoS,
     KDV, MwSt, MWST, BTW, TVA, IVA, USt
     """
 )
+# Acronyms that are also a company's, a person's or a word: shown only after asking ("Not sure",
+# ruling R122), never dropped; a person is never taken for one.
+_AMBIGUOUS_ACRONYMS = _terms("SOC, PAM, IAM, MFA, SSO, IDS, IPS, DAM, EPM")
 _IT_TERMS = _terms(
     """
     Managed Services, Managed Security Services, Managed Cybersecurity Service, Managed
     Cybersecurity Services, Managed, Shared, Professional Services, Installation, Integration,
     Support, On-site Support, Onsite Support, Server Rental Service, Server Rental Services,
     Subscription, License, Licenses, Orchestration, Deception, Endpoint, Endpoints, Cybersecurity,
-    Operational Services, Cybersecurity Products
+    Operational Services, Cybersecurity Products, Shared SOAR
     """
 )
 # The words of a phrase that is a service or a product class and names nobody: "Shared SOAR",
@@ -275,7 +277,7 @@ _IT_WEAK_KEYS = frozenset(
     )
 )
 
-DEFAULT_NEVER_HIDE: frozenset[str] = (
+_BASE_DEFAULTS: frozenset[str] = (
     _ROLES
     | _DOCUMENT_WORDS
     | _LEGAL_WORDS
@@ -286,9 +288,8 @@ DEFAULT_NEVER_HIDE: frozenset[str] = (
     | _COUNTRIES
     | _NATIONALITIES
     | _MISTAKEN_FOR_NAMES
-    | _IT_ACRONYMS
-    | _IT_TERMS
 )
+DEFAULT_NEVER_HIDE: frozenset[str] = _BASE_DEFAULTS | _IT_ACRONYMS | _IT_TERMS
 
 # The document words a reference follows, and the reference itself: a number ("1", "4.2",
 # "28(3)"), a number with a letter ("1A"), a letter ("A") or a roman numeral ("II").
@@ -362,6 +363,7 @@ class _Terms:
 # are names. Everything else of the defaults is compared by key.
 _IT_ACRONYM_FORMS = frozenset(_IT_ACRONYMS)
 _DEFAULTS = _Terms(DEFAULT_NEVER_HIDE - _IT_ACRONYM_FORMS)
+_BASE = _Terms(_BASE_DEFAULTS)
 # The single words the contract vocabulary is built of ("Confidential" and "Information" of
 # "Confidential Information"; "Receiving" of "Receiving Party"): roles, document words and legal
 # words only, never a place, a month or a body, which are names in other combinations.
@@ -409,17 +411,94 @@ def _is_standard(text: str) -> bool:
 _HEADING_LABEL = re.compile(
     r"(?i:table|figure|fig\.?|annex|annexure|appendix|schedule|exhibit)[ \N{NO-BREAK SPACE}]+"
     r"(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[IVXLC]{1,6}|[A-Z])(?![\w])"
-    r"(?:[ \N{NO-BREAK SPACE}:.\-\N{EN DASH}\N{EM DASH}]+[^\W\d_][\w \N{NO-BREAK SPACE}&/\-]{0,60})?"
 )
 
 
+# The words a table's or a figure's title may have besides default and IT words.
+_HEADING_TITLE_WORDS = frozenset(
+    map(
+        normalize,
+        [
+            "Overview",
+            "Summary",
+            "List",
+            "Diagram",
+            "Architecture",
+            "Description",
+            "Requirements",
+            "Details",
+            "Breakdown",
+            "Comparison",
+            "Matrix",
+            "Plan",
+            "Timeline",
+            "Structure",
+            "Pricing",
+            "Prices",
+            "Costs",
+            "Fees",
+            "Schedule",
+            "Scope",
+            "Items",
+            "Features",
+            "Functions",
+            "Components",
+            "Levels",
+            "Options",
+            "Hours",
+            "Rates",
+            "Volumes",
+            "Quantities",
+            "Inventory",
+            "and",
+            "of",
+            "for",
+            "the",
+            "to",
+            "in",
+            "on",
+            "with",
+            "by",
+            "&",
+            "-",
+            "–",
+            "—",
+        ],
+    )
+)
+
+
+def _is_title_word(word: str) -> bool:
+    """Whether ``word`` can be in the title of a table: lower case, a number, a default or IT
+    word or one of ``_HEADING_TITLE_WORDS``; never a name.
+    """
+    bare = word.strip(".,:;()\"'")
+    if not bare or bare[0].islower() or bare.isdigit():
+        return True
+    key = normalize(bare)
+    if not key:
+        return True
+    forms = _number_forms(key)
+    return (
+        not _HEADING_TITLE_WORDS.isdisjoint(forms)
+        or not (_IT_STRONG_WORDS | _IT_WEAK_KEYS).isdisjoint(forms)
+        or _DEFAULTS.has(key)
+        or _is_it_acronym(bare)
+        or not _VOCABULARY_KEYS.isdisjoint(forms)
+    )
+
+
 def _is_heading_label(text: str) -> bool:
-    """Whether ``text`` is the label of a table, figure or annex with its title ("Table 1
-    Operational Services", "Annex 3 - Pricing"): a heading, never a company. A text with a legal
-    form ("Annex 3 Holdings Ltd") is a name.
+    """Whether ``text`` is the label of a table, figure or annex with a title made of plain words
+    ("Table 1 Operational Services", "Annex 3 - Pricing"): a heading, never a company. A title
+    with a name in it ("Annex 3 Deutsche Bank", "Appendix 1 John Smith") or a legal form ("Annex 3
+    Holdings Ltd") is not.
     """
     stripped = text.strip()
-    return _HEADING_LABEL.fullmatch(stripped) is not None and not has_legal_form(stripped)
+    label = _HEADING_LABEL.match(stripped)
+    if label is None or has_legal_form(stripped):
+        return False
+    return all(_is_title_word(word) for word in stripped[label.end() :].split())
 
 
 def _is_it_phrase(text: str) -> bool:
@@ -433,7 +512,7 @@ def _is_it_phrase(text: str) -> bool:
         return False
     strong = False
     for word in words:
-        if _is_it_acronym(word):
+        if _is_it_acronym(word) or _is_ambiguous_acronym(word):
             strong = True
             continue
         forms = _number_forms(term_key(word))
@@ -442,6 +521,14 @@ def _is_it_phrase(text: str) -> bool:
         elif _IT_WEAK_KEYS.isdisjoint(forms):
             return False
     return strong
+
+
+def _is_ambiguous_acronym(text: str) -> bool:
+    """Whether ``text`` is one of ``_AMBIGUOUS_ACRONYMS`` as written, in capitals."""
+    word = text.strip(" .,:;()\"'")
+    if word.casefold().startswith("the "):
+        word = word[4:].strip()
+    return _POSSESSIVE.sub("", word) in _AMBIGUOUS_ACRONYMS
 
 
 def _is_it_acronym(text: str) -> bool:
@@ -489,13 +576,17 @@ class CaseLists:
 
 
 def never_hide_check(
-    user: UserLists, case: CaseLists, names: Iterable[str] = ()
+    user: UserLists, case: CaseLists, names: Iterable[str] = (), *, owners_only: bool = False
 ) -> Callable[[str], bool]:
     """``is_never_hide`` for many texts: a function that tells whether a text is never hidden.
 
     ``names`` are the names of people and companies found in the document, in any spelling. A
     defined term that is one of them is a name and does not count as a term; the owner's lists
-    and the defaults always count.
+    and the defaults always count. With ``owners_only`` the IT and service defaults of training
+    round 1 (SIEM, Installation, "Table 1 …") do not count; the older defaults and the owner's
+    lists do. That is the test for what the owner herself asked to hide (an always-hide entry, a
+    stored key's value): the new vocabulary is only a guess about what a document means, and she
+    knows better (task D7, training round 1).
     """
     explicit = _Terms([*user.never_hide, *case.never_hide])
     defined = _Terms(case.defined_terms)
@@ -505,11 +596,13 @@ def never_hide_check(
         key = term_key(text)
         if not key:
             return False
-        if _DEFAULTS.has(key) or explicit.has(key) or _is_reference(text) or _is_date(text):
+        if explicit.has(key):
             return True
-        if _is_standard(text) or _is_heading_label(text) or _is_it_acronym(text):
+        if _BASE.has(key) or _is_reference(text) or _is_date(text) or _is_standard(text):
             return True
-        if _is_it_phrase(text):
+        if not owners_only and (
+            _DEFAULTS.has(key) or _is_heading_label(text) or _is_it_acronym(text)
+        ):
             return True
         return defined.has(key) and key not in name_keys
 
@@ -524,7 +617,32 @@ def is_month(text: str) -> bool:
 def is_default_term(text: str) -> bool:
     """Whether ``text`` is one of ``DEFAULT_NEVER_HIDE``, matched the way ``is_never_hide`` matches."""
     key = term_key(text)
-    return bool(key) and (_DEFAULTS.has(key) or _is_it_acronym(text) or _is_it_phrase(text))
+    return bool(key) and (_DEFAULTS.has(key) or _is_it_acronym(text))
+
+
+def is_it_acronym(text: str) -> bool:
+    """Whether ``text`` is a technical acronym of the defaults as written ("SIEM", "SaaS")."""
+    return _is_it_acronym(text)
+
+
+def is_it_word(text: str) -> bool:
+    """Whether the single word ``text`` is a word of the IT and service vocabulary ("Endpoint",
+    "Security", "Managed") or an acronym of it."""
+    key = normalize(text.strip(" .,:;()\"'"))
+    return bool(key) and (
+        not (_IT_STRONG_WORDS | _IT_WEAK_KEYS).isdisjoint(_number_forms(key))
+        or _is_it_acronym(text)
+        or _is_ambiguous_acronym(text)
+    )
+
+
+def is_it_guess(text: str) -> bool:
+    """Whether ``text`` only looks like IT vocabulary and may as well be a name: a phrase of IT
+    and service words that is no term of its own ("Network Integration", "Cloud Integration
+    Platform") or an acronym that is also a name or a word ("DAM", "PAM"). The language model's
+    guess of one is shown and asked about, not dropped (ruling R122).
+    """
+    return _is_ambiguous_acronym(text) or (not is_default_term(text) and _is_it_phrase(text))
 
 
 def on_never_hide_list(text: str, user: UserLists, case: CaseLists) -> bool:
