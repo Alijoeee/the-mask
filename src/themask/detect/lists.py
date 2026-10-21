@@ -35,7 +35,7 @@ from pathlib import Path
 
 from themask.errors import MaskError
 from themask.model import PlaceholderType
-from themask.textnorm import normalize
+from themask.textnorm import has_legal_form, normalize
 
 
 def _terms(text: str) -> frozenset[str]:
@@ -193,6 +193,51 @@ _MISTAKEN_FOR_NAMES = _terms(
     """
 )
 
+# IT, security and service vocabulary (training round 1; with the VAT names of other countries,
+# which are public tax names): the acronyms and the names of services
+# that a technical annex lists and the language model takes for companies. Explicit words only, not
+# COMMON_WORDS (a company such as "Royal Mail" stays hidden); a vendor's own name is never here,
+# it belongs on the owner's always-hide list. A company with a legal form made of these words
+# ("Managed Services Ltd") is still hidden: a rule finds it, and a text with more than a term
+# in it is no term.
+_IT_ACRONYMS = _terms(
+    """
+    SIEM, SOAR, SOC, EDR, EPP, EBA, NDR, XDR, MDR, DLP, PAM, IAM, MFA, SSO, VPN, WAF, IDS, IPS,
+    CASB, DAM, EPM, SaaS, PaaS, IaaS, API, SLA, EPS, FPM, UEBA, NGFW, DDoS,
+    KDV, MwSt, MWST, BTW, TVA, IVA, USt
+    """
+)
+_IT_TERMS = _terms(
+    """
+    Managed Services, Managed Security Services, Managed Cybersecurity Service, Managed
+    Cybersecurity Services, Managed, Shared, Professional Services, Installation, Integration,
+    Support, On-site Support, Onsite Support, Server Rental Service, Server Rental Services,
+    Subscription, License, Licenses, Orchestration, Deception, Endpoint, Endpoints, Cybersecurity,
+    Operational Services, Cybersecurity Products
+    """
+)
+# The words of a phrase that is a service or a product class and names nobody: "Shared SOAR",
+# "Managed Detection and Response Service". It needs one of the first kind (an acronym or a word
+# only technical text uses) and may have words of the second kind ("Managed", "Security").
+_IT_STRONG_WORDS = frozenset(
+    map(
+        normalize,
+        "Cybersecurity Endpoint Orchestration Deception Installation Integration Subscription".split()
+        + "Detection Response".split(),
+    )
+)
+_IT_WEAK_KEYS = frozenset(
+    map(
+        normalize,
+        """
+        Shared Dedicated Hosted Managed Professional Operational Security Service Services
+        Product Products Server Servers Rental Support Platform Cloud Network Monitoring and
+        Detection Response Extended Advanced Automation Management License Licence On-site
+        Onsite Suite Module Modules
+        """.split(),
+    )
+)
+
 DEFAULT_NEVER_HIDE: frozenset[str] = (
     _ROLES
     | _DOCUMENT_WORDS
@@ -204,6 +249,8 @@ DEFAULT_NEVER_HIDE: frozenset[str] = (
     | _COUNTRIES
     | _NATIONALITIES
     | _MISTAKEN_FOR_NAMES
+    | _IT_ACRONYMS
+    | _IT_TERMS
 )
 
 # The document words a reference follows, and the reference itself: a number ("1", "4.2",
@@ -274,13 +321,16 @@ class _Terms:
         return not self._keys.isdisjoint(_number_forms(key))
 
 
-_DEFAULTS = _Terms(DEFAULT_NEVER_HIDE)
+# The acronyms are compared as written, in capitals ("PAM", "SaaS"), never by key: "Pam" and "Dam"
+# are names. Everything else of the defaults is compared by key.
+_IT_ACRONYM_FORMS = frozenset(_IT_ACRONYMS)
+_DEFAULTS = _Terms(DEFAULT_NEVER_HIDE - _IT_ACRONYM_FORMS)
 # The single words the contract vocabulary is built of ("Confidential" and "Information" of
 # "Confidential Information"; "Receiving" of "Receiving Party"): roles, document words and legal
 # words only, never a place, a month or a body, which are names in other combinations.
 _VOCABULARY_KEYS = frozenset(
     key
-    for term in _ROLES | _DOCUMENT_WORDS | _LEGAL_WORDS
+    for term in _ROLES | _DOCUMENT_WORDS | _LEGAL_WORDS | _IT_TERMS
     for key in map(term_key, term.split())
     if key
 )
@@ -317,6 +367,55 @@ _STANDARD = re.compile(
 def _is_standard(text: str) -> bool:
     """Whether ``text`` is a standard with its number, which a contract cites: "ISO 9001"."""
     return _STANDARD.fullmatch(text.strip()) is not None
+
+
+_HEADING_LABEL = re.compile(
+    r"(?i:table|figure|fig\.?|annex|annexure|appendix|schedule|exhibit)[ \N{NO-BREAK SPACE}]+"
+    r"(?:\d{1,3}(?:\.\d{1,3})*[A-Za-z]?|[IVXLC]{1,6}|[A-Z])(?![\w])"
+    r"(?:[ \N{NO-BREAK SPACE}:.\-\N{EN DASH}\N{EM DASH}]+[^\W\d_][\w \N{NO-BREAK SPACE}&/\-]{0,60})?"
+)
+
+
+def _is_heading_label(text: str) -> bool:
+    """Whether ``text`` is the label of a table, figure or annex with its title ("Table 1
+    Operational Services", "Annex 3 - Pricing"): a heading, never a company. A text with a legal
+    form ("Annex 3 Holdings Ltd") is a name.
+    """
+    stripped = text.strip()
+    return _HEADING_LABEL.fullmatch(stripped) is not None and not has_legal_form(stripped)
+
+
+def _is_it_phrase(text: str) -> bool:
+    """Whether ``text`` is made of IT and service words only, with one that only technical text
+    uses: "Shared SOAR", "Managed Detection and Response Service". Not with a legal form.
+    """
+    words = [w for w in re.split(r"[\s/\-\N{EN DASH}]+", text.strip(" .,:;()\"'")) if w]
+    if words and words[0].casefold() == "the":
+        words = words[1:]
+    if not words or len(words) > 6 or has_legal_form(text.strip()):
+        return False
+    strong = False
+    for word in words:
+        if _is_it_acronym(word):
+            strong = True
+            continue
+        forms = _number_forms(term_key(word))
+        if not _IT_STRONG_WORDS.isdisjoint(forms):
+            strong = True
+        elif _IT_WEAK_KEYS.isdisjoint(forms):
+            return False
+    return strong
+
+
+def _is_it_acronym(text: str) -> bool:
+    """Whether ``text`` is an IT acronym as it is written: "SIEM", "SaaS", "the EDR". "Pam" and
+    "dam" are not "PAM" and "DAM".
+    """
+    word = text.strip(" .,:;()\"'")
+    if word.casefold().startswith("the "):
+        word = word[4:].strip()
+    word = _POSSESSIVE.sub("", word)
+    return word in _IT_ACRONYM_FORMS
 
 
 _MONTH_KEYS = frozenset(map(term_key, _MONTHS))
@@ -371,7 +470,9 @@ def never_hide_check(
             return False
         if _DEFAULTS.has(key) or explicit.has(key) or _is_reference(text) or _is_date(text):
             return True
-        if _is_standard(text):
+        if _is_standard(text) or _is_heading_label(text) or _is_it_acronym(text):
+            return True
+        if _is_it_phrase(text):
             return True
         return defined.has(key) and key not in name_keys
 
@@ -386,7 +487,7 @@ def is_month(text: str) -> bool:
 def is_default_term(text: str) -> bool:
     """Whether ``text`` is one of ``DEFAULT_NEVER_HIDE``, matched the way ``is_never_hide`` matches."""
     key = term_key(text)
-    return bool(key) and _DEFAULTS.has(key)
+    return bool(key) and (_DEFAULTS.has(key) or _is_it_acronym(text) or _is_it_phrase(text))
 
 
 def on_never_hide_list(text: str, user: UserLists, case: CaseLists) -> bool:

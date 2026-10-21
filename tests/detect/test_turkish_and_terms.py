@@ -123,3 +123,116 @@ def test_turkish_trade_name_mid_sentence_is_one_company(lists):
         (C, ["Borusan Yazılım Sanayi ve Ticaret A.Ş."]),
         (C, ["Delta Gıda Ltd. Şti."]),
     ]
+
+
+# --- 2. Generic IT and service terms are not companies ------------------------------------------
+
+from themask.detect.lists import (  # noqa: E402
+    CaseLists,
+    UserLists,
+    is_default_term,
+    is_never_hide,
+)
+
+GENERIC = [
+    "Managed",
+    "Managed Cybersecurity Service",
+    "Managed Cybersecurity Services",
+    "the Managed Cybersecurity Services",
+    "Table 1 Operational Services",
+    "Table 2 Cybersecurity Products",
+    "Installation",
+    "SIEM",
+    "Shared SOAR",
+    "Server Rental Service",
+    "EPP",
+    "EDR",
+    "EBA",
+    "NDR",
+    "XDR",
+    "On-site Support",
+    "Integration",
+    "Annex 4 - Pricing",
+    "Figure 3 Network Overview",
+]
+
+
+@pytest.mark.parametrize("term", GENERIC)
+def test_generic_terms_are_never_hide(term):
+    assert is_never_hide(term, UserLists([], []), CaseLists([], [], set()))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Managed Services Ltd",
+        "Endpoint Security B.V.",
+        "Pam",
+        "Dam",
+        "Annex 3 Holdings Ltd",
+        "Kronvolt",
+        "Royal Mail",
+        "Global Services",
+        "Zetaflow Security",
+    ],
+)
+def test_names_and_acronym_lookalikes_are_not_never_hide(name):
+    assert not is_never_hide(name, UserLists([], []), CaseLists([], [], set()))
+    assert not is_default_term(name)
+
+
+def test_a_model_guess_of_a_generic_term_is_not_hidden(lists):
+    t = (
+        "Table 1 Operational Services\nInstallation, SIEM and Shared SOAR are included.\n"
+        "Table 2 Cybersecurity Products\nEPP, EDR, EBA, NDR; Server Rental Service.\n"
+        "The Managed Cybersecurity Services run all year."
+    )
+    model = tuple(
+        (C, w)
+        for w in (
+            "Table 1 Operational Services",
+            "Installation",
+            "SIEM",
+            "Shared SOAR",
+            "Table 2 Cybersecurity Products",
+            "EPP",
+            "EDR",
+            "EBA",
+            "NDR",
+            "Server Rental Service",
+            "Managed Cybersecurity Services",
+            "The Managed Cybersecurity Services",
+        )
+    )
+    assert groups_of(t, ModelStub(*model), lists) == []
+
+
+def test_a_real_engine_shows_generic_terms_and_hides_the_parties(engine, lists):
+    t = (
+        "Annex between ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ and ZETAFLOW GLOBAL B.V.\n"
+        "Table 1 Operational Services\nInstallation\nSIEM\nShared SOAR\nServer Rental Service\n"
+        "Table 2 Cybersecurity Products\nEPP\nEDR\nEBA\nNDR\n"
+        "The Managed Cybersecurity Services are provided by ACMEVOLT."
+    )
+    result = groups_of(t, engine, lists)
+    assert [g[0] for g in result] == [C, C]
+    texts = {x for g in result for x in g[1]}
+    assert not texts & {"SIEM", "EPP", "EDR", "Installation", "Shared SOAR", "Managed"}
+
+
+def test_a_company_with_a_legal_form_of_generic_words_stays_hidden(engine, lists):
+    t = "The Customer buys from Managed Services Ltd and Endpoint Security B.V. in March."
+    result = groups_of(t, engine, lists)
+    assert [(g[0], g[1]) for g in result] == [
+        (C, ["Managed Services Ltd"]),
+        (C, ["Endpoint Security B.V."]),
+    ]
+
+
+def test_a_common_word_company_still_hidden(lists):
+    t = "Royal Mail and Global Services collect the parcels."
+    model = ((C, "Royal Mail"), (C, "Global Services"))
+    assert [g[1] for g in groups_of(t, ModelStub(*model), lists)] == [
+        ["Royal Mail"],
+        ["Global Services"],
+    ]
