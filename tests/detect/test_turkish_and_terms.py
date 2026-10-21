@@ -8,6 +8,7 @@ import pytest
 
 from themask.detect.contract_rules import find_legal_form_companies
 from themask.detect.engine import Engine
+from themask.detect.lists import CaseLists, UserLists, is_default_term, is_never_hide
 from themask.detect.pipeline import CombinedText, analyze
 from themask.model import Finding, PlaceholderType
 from themask.textnorm import has_legal_form, strip_legal_form
@@ -127,13 +128,6 @@ def test_turkish_trade_name_mid_sentence_is_one_company(lists):
 
 # --- 2. Generic IT and service terms are not companies ------------------------------------------
 
-from themask.detect.lists import (  # noqa: E402
-    CaseLists,
-    UserLists,
-    is_default_term,
-    is_never_hide,
-)
-
 GENERIC = [
     "Managed",
     "Managed Cybersecurity Service",
@@ -236,3 +230,81 @@ def test_a_common_word_company_still_hidden(lists):
         ["Royal Mail"],
         ["Global Services"],
     ]
+
+
+# --- 3. Licence and capacity counts are not amounts ---------------------------------------------
+
+
+def types_and_texts(text, engine, lists):
+    return [(t, texts) for t, texts, _ in groups_of(text, engine, lists)]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "The suite is sized at 2500 EPS.",
+        "SIEM-Foobar Security Suite 2500 EPS is included.",
+        "It covers 2,500 users.",
+        "It covers 1.500 devices.",
+        "It covers 3000 endpoints.",
+        "It has 2 000 seats and 4000 nodes.",
+        "It has 1200 licences and 1500 licenses.",
+        "Logs take 12000 GB.",
+        "Logs take 2 TB and 10000 Mbps.",
+        "A 5000-user licence is included.",
+        "Sized at 3000 FPM.",
+    ],
+)
+def test_a_licence_or_capacity_count_is_shown(line, engine, lists):
+    found = [g for g in groups_of(line, engine, lists) if g[0] is PlaceholderType.AMOUNT]
+    assert found == []
+
+
+def test_prices_and_quantities_of_goods_stay_hidden(engine, lists):
+    t = (
+        "The price is $ 42.000,00 and 60,000.00 $ in total.\n"
+        "The buyer orders 10,000 units, 1,200 pallets and 4,500 tonnes.\n"
+        "Total price 12000 for the setup.\n"
+    )
+    result = {x for g in groups_of(t, engine, lists) for x in g[1]}
+    assert {"$ 42.000,00", "60,000.00 $", "10,000 units", "1,200 pallets", "4,500 tonnes"} <= result
+    assert "12000" in result
+
+
+# --- 4. Public tax rates are not percentages to hide --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "All prices exclude 20% VAT.",
+        "VAT of 20% VAT applies.",
+        "VAT at 14% is added.",
+        "VAT rate: 15%.",
+        "The VAT (16%) is added.",
+        "KDV 18% eklenir.",
+        "MwSt 19 % und BTW 21% und TVA 22 % and IVA 23%.",
+        "A withholding tax of 11% applies; sales tax at 8% too; 9% withholding.",
+        "3 per cent VAT is due.",
+    ],
+)
+def test_a_tax_rate_is_shown(line, engine, lists):
+    found = [g for g in groups_of(line, engine, lists) if g[0] is PlaceholderType.PERCENT]
+    assert found == []
+
+
+@pytest.mark.parametrize(
+    "line,value",
+    [
+        ("A 20% discount is given.", "20%"),
+        ("Interest of 5% applies, plus VAT.", "5%"),
+        ("The commission is 3%.", "3%"),
+        ("The VAT-exclusive price carries a 12% fee.", "12%"),
+        ("Five (5) per cent discount applies.", "Five (5) per cent"),
+    ],
+)
+def test_other_percentages_stay_hidden(line, value, engine, lists):
+    found = [
+        x for g in groups_of(line, engine, lists) if g[0] is PlaceholderType.PERCENT for x in g[1]
+    ]
+    assert found == [value]

@@ -159,9 +159,21 @@ _HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
 # are one): "Acme ve Beta A.Ş." is two names.
 _TURKISH_TRADE_WORDS = frozenset(
     normalize(word)
-    for word in """
-    Sanayi San Ticaret Tic Turizm İnşaat Insaat Taahhüt Pazarlama Dış Dis Mühendislik Danışmanlık
-    """.split()
+    for word in [
+        "Sanayi",
+        "San",
+        "Ticaret",
+        "Tic",
+        "Turizm",
+        "İnşaat",
+        "Insaat",
+        "Taahhüt",
+        "Pazarlama",
+        "Dış",
+        "Dis",
+        "Mühendislik",
+        "Danışmanlık",
+    ]
 )
 
 # Job titles and departments: a "Name:" or "Attention:" line that holds one names nobody. A title is

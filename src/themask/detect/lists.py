@@ -222,19 +222,56 @@ _IT_TERMS = _terms(
 _IT_STRONG_WORDS = frozenset(
     map(
         normalize,
-        "Cybersecurity Endpoint Orchestration Deception Installation Integration Subscription".split()
-        + "Detection Response".split(),
+        [
+            "Cybersecurity",
+            "Endpoint",
+            "Orchestration",
+            "Deception",
+            "Installation",
+            "Integration",
+            "Subscription",
+        ]
+        + ["Detection", "Response"],
     )
 )
 _IT_WEAK_KEYS = frozenset(
     map(
         normalize,
-        """
-        Shared Dedicated Hosted Managed Professional Operational Security Service Services
-        Product Products Server Servers Rental Support Platform Cloud Network Monitoring and
-        Detection Response Extended Advanced Automation Management License Licence On-site
-        Onsite Suite Module Modules
-        """.split(),
+        [
+            "Shared",
+            "Dedicated",
+            "Hosted",
+            "Managed",
+            "Professional",
+            "Operational",
+            "Security",
+            "Service",
+            "Services",
+            "Product",
+            "Products",
+            "Server",
+            "Servers",
+            "Rental",
+            "Support",
+            "Platform",
+            "Cloud",
+            "Network",
+            "Monitoring",
+            "and",
+            "Detection",
+            "Response",
+            "Extended",
+            "Advanced",
+            "Automation",
+            "Management",
+            "License",
+            "Licence",
+            "On-site",
+            "Onsite",
+            "Suite",
+            "Module",
+            "Modules",
+        ],
     )
 )
 
