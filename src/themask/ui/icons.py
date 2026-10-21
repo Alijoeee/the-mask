@@ -1,5 +1,5 @@
 """The line icons of the window: the sidebar's Mask (a document with a mask on it), Restore (a
-key) and Cases (an archive box), the sidebar toggle of the tool bar, and the magnifier of the find
+key) and Cases (an archive box), the Settings gear under them, the sidebar toggle of the tool bar, and the magnifier of the find
 fields.
 
 They are drawn from paths, the ones of the approved mockups (an 18-unit box and a stroke of 1.6
@@ -10,6 +10,7 @@ a painter, which is how a widget that paints itself uses them, and ``icon`` and 
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from typing import NamedTuple
@@ -119,6 +120,26 @@ def _sidebar() -> QPainterPath:
     return _with(window, svg_path("M5.5 0.75V13.25"))
 
 
+def _gear() -> QPainterPath:
+    # A cog: eight teeth round a ring, and the hole in the middle.
+    teeth = 8
+    outer, inner = 7.6, 5.6
+    cog = QPainterPath()
+    for step in range(teeth * 4):
+        # Each tooth is a flat top (outer radius) and a flat gap (inner radius), 4 corners a tooth.
+        angle = 2 * math.pi * (step - 0.5) / (teeth * 4)
+        radius = outer if step % 4 in (1, 2) else inner
+        point = QPointF(9 + radius * math.cos(angle), 9 + radius * math.sin(angle))
+        if step:
+            cog.lineTo(point)
+        else:
+            cog.moveTo(point)
+    cog.closeSubpath()
+    hole = QPainterPath()
+    hole.addEllipse(QPointF(9, 9), 2.4, 2.4)
+    return _with(cog, hole)
+
+
 def _search() -> QPainterPath:
     glass = QPainterPath()
     glass.addEllipse(QPointF(6, 6), 4.2, 4.2)
@@ -138,6 +159,7 @@ _ICONS: dict[str, _Icon] = {
     "cases": _Icon(18, 18, 1.6, _cases),
     "sidebar": _Icon(16, 14, 1.5, _sidebar),
     "search": _Icon(14, 14, 1.6, _search),
+    "gear": _Icon(18, 18, 1.5, _gear),
 }
 NAMES = tuple(_ICONS)
 

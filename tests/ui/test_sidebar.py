@@ -229,14 +229,15 @@ def visible_texts(sidebar: Sidebar) -> list[str]:
     ]
 
 
-def test_the_home_note_is_the_engine_status_and_where_the_settings_are(
+def test_the_home_note_is_the_engine_status_and_no_longer_a_hint_to_the_menu(
     sidebar: Sidebar,
 ) -> None:
     sidebar.set_context("home")
     assert sidebar.context() == "home"
     texts = visible_texts(sidebar)
     assert "Engine ready · offline" in texts
-    assert "Settings: The MASK › Settings… (⌘,)" in texts
+    # The Settings are a button now (see below), not a sentence about the application menu.
+    assert not any("The MASK ›" in text for text in texts)
     assert sidebar.engine_dot.state() == "ready"
 
 
@@ -315,3 +316,78 @@ def test_only_the_note_of_the_screen_that_shows_is_shown(sidebar: Sidebar) -> No
         assert len(visible_texts(sidebar)) >= 1
     with pytest.raises(KeyError):
         sidebar.set_context("settings")  # Settings has no screen in the stack any more
+
+
+# ---- the Settings button ------------------------------------------------------------------------
+
+
+def test_the_settings_button_is_at_the_foot_with_a_name_and_a_tooltip(sidebar: Sidebar) -> None:
+    button = sidebar.settings_button
+    assert isinstance(button, SidebarItem) and not button.isCheckable()
+    assert button.text() == "Settings" and button.accessibleName() == "Settings"
+    assert button.toolTip() == "Settings (⌘,)"
+    assert button.focusPolicy() == Qt.FocusPolicy.TabFocus
+    assert "settings" not in sidebar.items and list(sidebar.items) == ["mask", "restore", "cases"]
+    sidebar.show()
+    assert button.geometry().top() > sidebar.items["cases"].geometry().bottom()
+    for screen in ("home", "review", "restore", "cases"):
+        sidebar.set_context(screen)
+        assert button.isVisibleTo(sidebar)  # on every screen, not only on the home note
+
+
+def test_the_settings_button_asks_for_the_settings_and_never_takes_a_check(
+    qtbot: QtBot, sidebar: Sidebar
+) -> None:
+    with qtbot.waitSignal(sidebar.settingsRequested, timeout=1000):
+        sidebar.settings_button.click()
+    assert not sidebar.settings_button.isChecked() and sidebar.current() == "mask"
+    sidebar.settings_button.setEnabled(False)
+    with qtbot.assertNotEmitted(sidebar.settingsRequested):
+        sidebar.settings_button.click()
+
+
+def test_the_settings_button_follows_the_keyboard(qtbot: QtBot, sidebar: Sidebar) -> None:
+    shown(sidebar, qtbot)
+    button = sidebar.settings_button
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    qtbot.waitUntil(button.hasFocus, timeout=2000)
+    with qtbot.waitSignal(sidebar.settingsRequested, timeout=1000):
+        QTest.keyClick(button, Qt.Key.Key_Return)
+    with qtbot.waitSignal(sidebar.settingsRequested, timeout=1000):
+        QTest.keyClick(button, Qt.Key.Key_Space)
+
+
+def test_the_settings_button_is_not_switched_with_the_sections(sidebar: Sidebar) -> None:
+    # The window switches it with the Settings action (it follows that action's state).
+    sidebar.set_navigation_enabled(False)
+    assert sidebar.settings_button.isEnabled()
+
+
+def test_the_settings_button_has_hover_focus_and_dimmed_states(
+    qtbot: QtBot, sidebar: Sidebar
+) -> None:
+    shown(sidebar, qtbot)
+    button = sidebar.settings_button
+    rest = button.grab().toImage()
+    QTest.mouseMove(button, button.rect().center())
+    qtbot.waitUntil(button.underMouse, timeout=2000)
+    assert button.grab().toImage() != rest  # the hover fill
+    QTest.mouseMove(sidebar, sidebar.rect().topLeft())
+    qtbot.waitUntil(lambda: not button.underMouse(), timeout=2000)
+    button.setFocus(Qt.FocusReason.TabFocusReason)
+    qtbot.waitUntil(button.hasFocus, timeout=2000)
+    assert button.grab().toImage() != rest  # the ring
+    button.clearFocus()
+    button.setEnabled(False)
+    assert button.grab().toImage() != rest  # dimmed
+
+
+def test_the_sidebar_has_no_colour_of_its_own_only_tokens() -> None:
+    import re
+    from pathlib import Path
+
+    from themask.ui import sidebar as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", source)
+    assert not re.search(r"QColor\(\s*[\"'0-9]", source)
