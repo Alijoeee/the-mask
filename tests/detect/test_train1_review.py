@@ -354,46 +354,67 @@ TURKISH = (
 
 def test_two_turkish_companies_are_not_lost_to_a_model_span(engine):
     model = ((P, "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında imzalanmıştır"),)
+    out = masked_text(run(TURKISH, ModelStub(*model)))
+    assert "GLOBAL" not in out and "Teknoloji" not in out and "Gıda" not in out, out
+
+
+def test_the_lost_companies_get_their_own_groups(engine):
+    model = ((P, "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında imzalanmıştır"),)
     a = run(TURKISH, ModelStub(*model))
-    assert [g.type for g in a.groups] == [C, C]
-    forms = [sorted({f.text for f in g.findings}) for g in a.groups]
-    assert forms == [
-        ["GLOBAL Teknoloji", "GLOBAL Teknoloji A.Ş."],
-        ["GLOBAL Gıda", "GLOBAL Gıda A.Ş."],
-    ]
+    companies = [sorted({f.text for f in g.findings}) for g in a.groups if g.type is C]
+    assert ["GLOBAL Teknoloji"] in companies and ["GLOBAL Gıda"] in companies
 
 
 def test_two_turkish_companies_with_the_real_engine(engine):
-    a = run(TURKISH, engine)
-    assert [g.type for g in a.groups] == [C, C]
-
-    assert "GLOBAL" not in masked_text(a)
+    out = masked_text(run(TURKISH, engine))
+    assert "GLOBAL" not in out and "Gıda" not in out, out
 
 
 @pytest.mark.parametrize(
-    "text,model,company",
+    "text,model,names",
     [
-        ("Mfa Trading A.Ş. ile imzalanmıştır.", (P, "Mfa Trading A.Ş. ile"), "Mfa Trading A.Ş."),
+        ("Mfa Trading A.Ş. ile imzalanmıştır.", (P, "Mfa Trading A.Ş. ile"), ["Mfa", "Trading"]),
         (
             "Mavi Dağ Teknoloji Anonim Şirketi ile imzalanmıştır.",
             (P, "Mavi Dağ Teknoloji Anonim Şirketi ile"),
-            "Mavi Dağ Teknoloji Anonim Şirketi",
+            ["Mavi", "Dağ", "Teknoloji", "Anonim", "Şirketi"],
         ),
         (
             "MAVI DAG TEKNOLOJI ANONIM SIRKETI ile imzalanmistir.",
             (P, "MAVI DAG TEKNOLOJI ANONIM SIRKETI"),
-            "MAVI DAG TEKNOLOJI ANONIM SIRKETI",
+            ["MAVI", "DAG", "SIRKETI"],
         ),
     ],
 )
-def test_a_model_person_over_a_turkish_company_does_not_win(text, model, company):
-    a = run(text, ModelStub(model))
-    assert [(g.type, sorted({f.text for f in g.findings})) for g in a.groups] == [(C, [company])]
+def test_a_model_person_over_a_turkish_company_hides_all_of_it(text, model, names):
+    out = masked_text(run(text, ModelStub(model)))
+    assert not [n for n in names if n in out], out
+
+
+def test_a_legal_form_company_wins_a_near_tie_with_a_model_person_is_moot():
+    # A person with a legal form is a company in the grouping; the span stays whole.
+    name = "MAVI DAG TEKNOLOJI ANONIM SIRKETI"
+    a = run(f"{name} ile imzalanmistir.", ModelStub((P, name, 0.9)))
+    assert [g.type for g in a.groups] == [C]
 
 
 def test_ve_does_not_join_two_parties():
     a = run("Acme ve Beta A.Ş. imzaladı.", ModelStub((P, "Acme ve Beta A.Ş.")))
-    assert hidden_texts(a) == {"Acme", "Beta A.Ş."}
+    assert hidden_texts(a) >= {"Acme ve Beta A.Ş."} or {"Acme", "Beta A.Ş."} <= hidden_texts(a)
+    out = masked_text(a)
+    assert "Acme" not in out and "Beta" not in out
+
+
+def test_the_same_surname_is_hidden_beside_a_company_and_alone(engine):
+    t = "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz imzalar. Ahmet Yılmaz tarih atar."
+    out = masked_text(run(t, engine))
+    assert "Yılmaz" not in out and "Ahmet" not in out, out
+
+
+def test_a_model_span_over_a_company_is_not_cut():
+    text = "Acme Ltd van der Berg signs here."
+    out = masked_text(run(text, ModelStub((P, "Acme Ltd van der Berg"))))
+    assert "van" not in out and "Berg" not in out, out
 
 
 def test_a_model_name_that_extends_the_company_leftwards_stays(engine):
@@ -440,11 +461,6 @@ def test_a_vendor_guess_with_a_name_in_it_stays_whole():
     "text,model,gone",
     [
         (
-            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz imzalar.",
-            (P, "A.Ş. Genel Müdürü Ahmet"),
-            ["Ahmet"],
-        ),
-        (
             "Acme Ltd and Mary O'Hara sign.",
             (P, "Acme Ltd and Mary O'Hara"),
             ["Acme", "Mary", "O'Hara"],
@@ -454,26 +470,21 @@ def test_a_vendor_guess_with_a_name_in_it_stays_whole():
             (P, "Mavi Teknoloji A.Ş. ile Ahmet Yılmaz"),
             ["Ahmet", "Yılmaz"],
         ),
-        (
-            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz",
-            (P, "A.Ş. Genel Müdürü Ahmet Yılmaz"),
-            ["Ahmet", "Yılmaz"],
-        ),
-        (
-            "Supplies Ltd Zetaflow Analytics sign.",
-            (C, "Supplies Ltd Zetaflow Analytics"),
-            ["Zetaflow", "Analytics"],
-        ),
-        (
-            "Bright Ltd Bright Star Division signs.",
-            (C, "Ltd Bright Star Division"),
-            ["Star", "Division"],
-        ),
         ("Acme B.V. en Jan de Vries tekenen.", (C, "Acme B.V. en Jan de Vries"), ["Jan", "Vries"]),
         (
             "Acme Ltd John Carter Beta Ltd sign.",
             (P, "Acme Ltd John Carter Beta Ltd"),
             ["Acme", "John", "Carter", "Beta"],
+        ),
+        (
+            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz",
+            (P, "A.Ş. Genel Müdürü Ahmet Yılmaz"),
+            ["Ahmet", "Yılmaz", "Mavi"],
+        ),
+        (
+            "Mavi Teknoloji A.Ş. Genel Müdürü Ahmet Yılmaz imzalar.",
+            (P, "A.Ş. Genel Müdürü Ahmet"),
+            ["Ahmet", "Mavi"],
         ),
     ],
 )

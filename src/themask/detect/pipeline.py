@@ -191,7 +191,7 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
-    found = _vendor_trimmed(_cut_at_legal_companies(found, text), text)
+    found = _vendor_trimmed(_extended_people(_united_with_companies(found, text), text), text)
     unlegal_source = found
     legal = legal_spans(text)
     unlegal = _without_legal_references(found, legal)
@@ -248,8 +248,10 @@ def analyze(
         only_one=is_default_term,
         is_term=is_term,
     )
+    placed = _one_per_place(found)
+    lost = _lost_companies(found, placed)
     groups = group_findings(
-        _one_per_place(found),
+        [*placed, *lost],
         text,
         seeds=seeds,
         keep=keep,
@@ -257,6 +259,11 @@ def analyze(
         surnames=policy,
     )
     stored = {seed.id for seed in seeds}
+    lost_spans = {(f.start, f.end) for f in lost}
+    for group in groups:  # a lost company is a group of variants only: its place is the model's
+        group.findings = [
+            f for f in group.findings if not (f.source == "rule" and (f.start, f.end) in lost_spans)
+        ]
     for group in groups:
         # No never-hide word is swept, but a person's bare name, which the sweep takes only
         # where it stands as a name (rulings R42, R50). What the owner asked to hide (her
@@ -534,13 +541,14 @@ def _vendor_trimmed(found: list[Finding], text: str) -> list[Finding]:
     return kept
 
 
-def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
-    """``found`` with the language model's people and companies cut at the edges of a contract
-    rule's company with a legal form that they overlap: the rule knows where the name ends. The
-    model's "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında imzalanmıştır" must not take two
-    companies down with it. What is left of a model finding, outside the companies, is kept when
-    it still has a capitalised word, without the lower case words ("ile", "ve", "and") and the bare
-    legal forms at the cut. Every piece is kept, before, between and after the companies.
+def _united_with_companies(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` with each person or company of the language model's that overlaps a contract
+    rule's company with a legal form, and neither holds the other, made the union of the two
+    spans. Nothing the model hid is shown, and nothing of the company is left out: the model's
+    "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş." over the rule's "GLOBAL Teknoloji A.Ş." becomes one span
+    from "GLOBAL" on (over-hiding a connector at the join is harmless). The company is grouped as
+    well (``_lost_companies``). A model span that runs on past the company from its start, of its
+    type, is left to ruling R45.
     """
     companies = [
         f
@@ -552,84 +560,74 @@ def _cut_at_legal_companies(found: list[Finding], text: str) -> list[Finding]:
     ]
     if not companies:
         return found
-    kept: list[Finding] = []
+    united = []
     for finding in found:
-        over = sorted(
-            (c for c in companies if c.start < finding.end and finding.start < c.end),
-            key=lambda c: c.start,
-        )
-        if (
-            finding.source != "model"
-            or finding.type not in _NAMES
-            or not over
-            or any((c.start, c.end) == (finding.start, finding.end) for c in over)
-            or any(_overruns_a_sentence_end(text, finding, c) for c in over)
-            or _extends_name_leftwards(text, finding, over[0], over[-1])
-        ):
-            kept.append(finding)
-            continue
-        position = finding.start
-        for c in [*over, None]:
-            end = finding.end if c is None else min(c.start, finding.end)
-            # Every piece that is left, before, between and after the companies, keeps its own
-            # finding: a person next to a company must never be lost with the cut.
-            piece = _left_over(text, position, end, c is not None, position > finding.start)
-            if piece is not None:
-                kept.append(
-                    replace(finding, start=piece[0], end=piece[1], text=text[piece[0] : piece[1]])
+        if finding.source == "model" and finding.type in _NAMES:
+            start, end = finding.start, finding.end
+            for company in companies:
+                partly = company.start < end and start < company.end
+                holds = start <= company.start and company.end <= end
+                inside = company.start <= start and end <= company.end
+                overruns = (
+                    start == company.start and finding.type is company.type and end > company.end
                 )
-            if c is not None:
-                position = max(position, c.end)
-    return kept
+                if partly and not holds and not inside and not overruns:
+                    start, end = min(start, company.start), max(end, company.end)
+            if (start, end) != (finding.start, finding.end):
+                finding = replace(finding, start=start, end=end, text=text[start:end])
+        united.append(finding)
+    return united
 
 
-def _overruns_a_sentence_end(text: str, finding: Finding, company: Finding) -> bool:
-    """Whether ``finding`` starts with ``company``, of its own type, and runs on past a full stop
-    that ends the sentence ("Acme Supplies Ltd. Passport"): the rule knows where the company ends
-    and ``_without_overruns`` takes the rest away (ruling R45).
+def _extended_people(found: list[Finding], text: str) -> list[Finding]:
+    """``found`` with each person of the language model's that ends on a capitalised word extended
+    to the capitalised word after it, when the two together are a full name found elsewhere in
+    the text: the model's "A.Ş. Genel Müdürü Ahmet" in front of "Yılmaz" must not leave the surname
+    visible where "Ahmet Yılmaz" is hidden at the next sentence.
     """
-    return (
-        finding.start == company.start
-        and finding.type is company.type
-        and finding.end > company.end
-        and text[company.end : company.end + 1] == "."
-    )
+    full_names = {
+        normalize(f.text)
+        for f in found
+        if f.type is PlaceholderType.PERSON and len(f.text.split()) > 1
+    }
+    extended = []
+    for finding in found:
+        words = finding.text.split()
+        following = _NEXT_WORD.match(text, finding.end)
+        if (
+            finding.type is PlaceholderType.PERSON
+            and finding.source == "model"
+            and words
+            and words[-1][:1].isupper()
+            and following is not None
+            and following[1][:1].isupper()
+            and normalize(f"{words[-1]} {following[1]}") in full_names
+        ):
+            end = following.end(1)
+            finding = replace(finding, end=end, text=text[finding.start : end])
+        extended.append(finding)
+    return extended
 
 
-def _extends_name_leftwards(text: str, finding: Finding, first: Finding, last: Finding) -> bool:
-    """Whether ``finding`` is the company ``last`` with more words in front, joined to it by
-    capitalised words ("Supplier Logistics Ltd" for the rule's "Logistics Ltd"): the model
-    extended the name, and keeps it (ruling R45). A lower case word before the company ("Acme ve
-    Beta A.Ş.") parts the two names instead.
+def _lost_companies(found: list[Finding], placed: list[Finding]) -> list[Finding]:
+    """The companies with a legal form that a contract rule found and that lost their place to a
+    longer finding of the language model ("Teknoloji A.Ş. ile GLOBAL Gıda A.Ş. arasında
+    imzalanmıştır" over two companies). The model's span is hidden as it is found, nothing is cut;
+    these companies are grouped as well, without their finding in that place, so that their other
+    occurrences are swept ("GLOBAL Teknoloji öder").
     """
-    if finding.end != last.end or finding.start >= first.start:
-        return False
-    word = _WORD_AT_THE_CUT.findall(text[finding.start : first.start])
-    return bool(word) and word[-1][:1].isupper()
-
-
-_WORD_AT_THE_CUT = re.compile(r"\S+")
-
-
-def _left_over(
-    text: str, start: int, end: int, cut_at_end: bool, cut_at_start: bool
-) -> tuple[int, int] | None:
-    """The part of ``start``-``end`` that is left of a model finding beside a company: without
-    the lower case words at a cut, None when no capitalised word is left."""
-    words = list(_WORD_AT_THE_CUT.finditer(text, start, end))
-
-    def capital(word: re.Match[str]) -> bool:
-        first = next((ch for ch in word.group() if ch.isalnum()), "")
-        return (first.isupper() or first.isdigit()) and not has_legal_form(word.group().strip(",;"))
-
-    while cut_at_end and words and not capital(words[-1]):
-        words.pop()
-    while cut_at_start and words and not capital(words[0]):
-        words.pop(0)
-    if not words or not any(capital(word) for word in words):
-        return None
-    first, last = _trimmed(text, words[0].start(), words[-1].end())
-    return (first, last) if first < last else None
+    taken = {(f.start, f.end) for f in placed}
+    models = [f for f in placed if f.source == "model" and f.type in _NAMES]
+    return [
+        f
+        for f in found
+        if f.type is PlaceholderType.COMPANY
+        and f.source == "rule"
+        and f.score >= RULE_NAME_SCORE
+        and has_legal_form(f.text)
+        and (f.start, f.end) not in taken
+        and any(m.start < f.end and f.start < m.end for m in models)
+    ]
 
 
 def _starts_a_term(text: str, finding: Finding) -> bool:
@@ -955,8 +953,8 @@ def _one_per_place(found: list[Finding]) -> list[Finding]:
 
 def _without_overruns(found: list[Finding]) -> list[Finding]:
     """``found`` without the model's findings that run on past a contract rule's name with its
-    legal form, from the same start and of the same type (ruling R45): the rule knows where the
-    company ends, and the model's "Acme Supplies Ltd. Passport" would become the canonical form
+    legal form and a full stop that ends the sentence, from the same start and of the same type
+    (ruling R45): the rule knows where the company ends, and the model's "Acme Supplies Ltd. Passport" would become the canonical form
     that a restore writes back everywhere.
     """
     ends: dict[tuple[PlaceholderType, int], list[int]] = defaultdict(list)
@@ -966,7 +964,13 @@ def _without_overruns(found: list[Finding]) -> list[Finding]:
     return [
         f
         for f in found
-        if not (f.source == "model" and any(end < f.end for end in ends.get((f.type, f.start), ())))
+        if not (
+            f.source == "model"
+            and any(
+                end < f.end and f.text[end - f.start : end - f.start + 1] == "."
+                for end in ends.get((f.type, f.start), ())
+            )
+        )
     ]
 
 

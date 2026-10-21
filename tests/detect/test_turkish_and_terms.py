@@ -116,14 +116,14 @@ def test_a_short_form_of_a_turkish_name_joins_the_group(lists):
     assert g[0] is C and "Acmevolt Teknoloji" in g[1]
 
 
-def test_turkish_trade_name_mid_sentence_is_one_company(lists):
+def test_turkish_trade_name_mid_sentence_is_hidden_whole(lists):
     t = "Bu sözleşme Borusan Yazılım Sanayi ve Ticaret A.Ş. ile Delta Gıda Ltd. Şti. arasındadır."
     model = ((P, "Borusan Yazılım Sanayi"), (P, "Ticaret A.Ş. ile"))
-    result = groups_of(t, ModelStub(*model), lists)
-    assert [(g[0], g[1]) for g in result] == [
-        (C, ["Borusan Yazılım Sanayi ve Ticaret A.Ş."]),
-        (C, ["Delta Gıda Ltd. Şti."]),
-    ]
+    a = analyze(CombinedText.join([("x", t)]), ModelStub(*model), lists)
+    covered = {i for g in a.groups for f in g.findings for i in range(f.start, f.end)}
+    for word in ("Borusan", "Yazılım", "Sanayi", "Ticaret", "Delta", "Gıda"):
+        start = t.index(word)
+        assert all(i in covered for i in range(start, start + len(word))), word
 
 
 # --- 2. Generic IT and service terms are not companies ------------------------------------------
