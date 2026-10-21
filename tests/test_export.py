@@ -186,8 +186,9 @@ def test_nothing_marked_still_exports_and_reports_unmarked(
     corpus: Path, engine: Engine, lists: UserLists, tmp_path: Path
 ) -> None:
     srcs, review = reviewed([corpus / "supply-01.docx"], engine, lists)
-    for g in review.groups:
-        review.set_group_enabled(g.id, False)
+    # Nothing marked (the owner added nothing and the analysis found nothing for them to decide
+    # about; a group switched off by hand is a choice, reported as shown on purpose instead).
+    review.groups.clear()
     res = export_case(srcs, review, ExportOptions(tmp_path), engine, lists, lambda c: None)
     # Nothing marked, so nothing to leak; the rescan reports what the owner skipped.
     assert not res.blocked and res.outputs and res.unmarked
@@ -1050,3 +1051,70 @@ def test_no_masked_file_is_left_without_its_key(
     with pytest.raises(OSError, match="disk is full"):
         export_case([source], review, ExportOptions(out), engine, lists, refuse)
     assert not out.exists() or list(out.iterdir()) == []
+
+
+def _review_with_choices(source: SourceDoc, lists: UserLists) -> tuple[ReviewState, Group, Group]:
+    """A review of ``source`` in which the company is hidden, the person was switched off by
+    hand (shown on purpose) and a guess is switched off and marked to check (a question)."""
+    text = combined_text([source]).text
+    review = ReviewState(text, [], [], lists, CaseLists([], [], set()))
+    review.hide_text("Northwind Trading B.V.", COMPANY)
+    person = review.hide_text("Mr Halvard Brennick", PERSON)
+    review.set_group_enabled(person.id, False)
+    guess = group_of(text, "[COMPANY_9]", COMPANY, "Equipment Services")
+    guess.enabled, guess.needs_check = False, True
+    review.groups.append(guess)
+    return review, person, guess
+
+
+CHOICES = (
+    "Northwind Trading B.V. and Bluefjord Logistics Ltd shall deliver to Equipment Services."
+    " Contact Mr Halvard Brennick, +31 20 555 0199."
+)
+
+
+def test_groups_switched_off_are_told_apart_from_what_nobody_marked(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    (source,) = load_sources([make_docx(para(CHOICES))], False)
+    review, _, _ = _review_with_choices(source, lists)
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert not res.blocked
+    assert [g.canonical for g in res.shown_on_purpose] == ["Mr Halvard Brennick"]
+    assert [g.canonical for g in res.still_asked] == ["Equipment Services"]
+    unmarked = {normalize(g.canonical) for g in res.unmarked}
+    assert normalize("Mr Halvard Brennick") not in unmarked
+    assert normalize("Equipment Services") not in unmarked
+
+
+def test_a_show_answer_moves_the_guess_to_shown_on_purpose(
+    make_docx: MakeDocx, engine: Engine, lists: UserLists, tmp_path: Path
+) -> None:
+    (source,) = load_sources([make_docx(para(CHOICES))], False)
+    review, _, guess = _review_with_choices(source, lists)
+    review.answered.add(guess.id)
+    res = export_case(
+        [source], review, ExportOptions(tmp_path / "out"), engine, lists, lambda c: None
+    )
+    assert res.still_asked == []
+    assert {g.canonical for g in res.shown_on_purpose} == {
+        "Mr Halvard Brennick",
+        "Equipment Services",
+    }
+
+
+def test_show_answers_survive_a_merge_and_a_split(lists: UserLists) -> None:
+    text = "Equipment Services and Equipment Service Co and Equipment Services again."
+    review = ReviewState(text, [], [], lists, CaseLists([], [], set()))
+    one = group_of(text, "[COMPANY_1]", COMPANY, "Equipment Services")
+    two = group_of(text, "[COMPANY_2]", COMPANY, "Equipment Service Co")
+    for g in (one, two):
+        g.enabled, g.needs_check = False, True
+    review.groups.extend([one, two])
+    review.answered.update({one.id, two.id})
+    kept = review.merge([one.id, two.id])
+    assert review.answered == {kept.id}
+    new = review.split(kept.id, [0])
+    assert review.answered == {kept.id, new.id}

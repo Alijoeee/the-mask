@@ -13,15 +13,25 @@ names repeat from case to case, so they cannot tell which contract a file belong
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
-from themask.instruction import AI_INSTRUCTION, BANNER_TEXT
+from themask.instruction import (
+    AI_INSTRUCTION,
+    AI_INSTRUCTION_NAMED,
+    BANNER_TEXT,
+    BANNER_TEXT_NAMED,
+)
+from themask.labels import find_labels, label_key
 from themask.model import Case
 from themask.placeholders import _TOKEN_RE, PlaceholderMatch, find_placeholders
 from themask.restore.report import RestoreItem, RestoreStatus
 from themask.textnorm import normalize
 
 # The MASK's own lines as a line is compared with them: letters and digits only, case folded.
-_OWN_LINES = frozenset(normalize(line) for line in (BANNER_TEXT, AI_INSTRUCTION))
+_OWN_LINES = frozenset(
+    normalize(line)
+    for line in (BANNER_TEXT, AI_INSTRUCTION, BANNER_TEXT_NAMED, AI_INSTRUCTION_NAMED)
+)
 # The words of a file name: its runs of letters and digits (a hyphen, a dot, a space, an
 # underscore or a bracket ends one).
 _NAME_WORD = re.compile(r"[^\W_]+")
@@ -53,13 +63,36 @@ def banner_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _placeholders(text: str) -> list[PlaceholderMatch]:
-    """The placeholders in ``text``, in text order, but none on The MASK's own lines."""
+def _placeholders(text: str, case: Case | None = None) -> list[PlaceholderMatch]:
+    """The placeholders in ``text``, in text order, but none on The MASK's own lines.
+
+    With ``case``, the bracketed names its key holds (ruling R127) are found too, each as a match
+    for the placeholder of its entry: ``exact`` when written ``[Name]`` as stored. A bare word is
+    never a name. A canonical ``[TYPE_N]`` of an entry that has a name is not ``exact``: the
+    masked files never wrote it, so the owner is asked before it is put back.
+    """
     spans = banner_spans(text)
+    found = find_placeholders(text)
+    if case is not None:
+        named = {e.placeholder: e for e in case.entries if e.label is not None}
+        found = [
+            replace(m, exact=False) if m.placeholder in named and m.exact else m for m in found
+        ]
+        by_label = {label_key(e.label): e for e in named.values() if e.label is not None}
+        for label in find_labels(text, case.label_index(), near=True):
+            if not any(m.start < label.end and label.start < m.end for m in found):
+                # A near miss ("[Providers]") has no entry: it is planned as unknown, reported
+                # and never replaced.
+                entry = None if label.key is None else by_label[label.key]
+                placeholder = label.raw if entry is None else entry.placeholder
+                found.append(
+                    PlaceholderMatch(label.start, label.end, label.raw, placeholder, label.exact)
+                )
+        found.sort(key=lambda m: m.start)
     # A placeholder never runs over a line break, so one that overlaps a span lies inside it.
     return [
         match
-        for match in find_placeholders(text)
+        for match in found
         if not any(match.start < end and start < match.end for start, end in spans)
     ]
 
@@ -92,7 +125,7 @@ def plan_restore(text: str, case: Case) -> list[RestoreItem]:
     """
     key = {entry.placeholder: entry for entry in case.entries}
     plan: list[RestoreItem] = []
-    for match in _placeholders(text):
+    for match in _placeholders(text, case):
         entry = key.get(match.placeholder)
         status: RestoreStatus = (
             "unknown" if entry is None else "exact" if match.exact else "altered"
@@ -127,9 +160,9 @@ def suggest_cases(text: str, cases: list[Case], file_name: str | None = None) ->
     follow in their order. Without a name, or with a name that does not point to one case, the
     order is the placeholders' alone.
     """
-    found = {match.placeholder for match in _placeholders(text)}
 
     def held(case: Case) -> int:
+        found = {match.placeholder for match in _placeholders(text, case)}
         return len(found & {entry.placeholder for entry in case.entries})
 
     ranked = sorted(cases, key=lambda case: (held(case), case.created_at), reverse=True)

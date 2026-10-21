@@ -57,7 +57,9 @@ from themask.docx.package import NS, DocxPackage
 from themask.docx.reader import TextNode, View, paragraph_nodes
 from themask.docx.restorer import replace_in_paragraph
 from themask.errors import MaskError
+from themask.labels import find_brackets
 from themask.model import Case
+from themask.placeholders import PlaceholderMatch
 from themask.restore.matcher import banner_spans, plan_restore, restore_span
 from themask.restore.report import (
     TRACKED_CHANGE,
@@ -212,6 +214,9 @@ class _Token:
     item: RestoreItem
     pieces: tuple[tuple[etree._Element, int, int], ...]
     changes: tuple[etree._Element | None, ...]
+    # A bracketed text that is no placeholder (ruling R127): it matters only where a tracked change
+    # puts it at the place of a name in the other reading, which then waits for the owner.
+    generic: bool = False
 
     def touches(self, other: _Token) -> bool:
         """Whether the two tokens cover a character of the same node."""
@@ -233,8 +238,17 @@ class _Reading:
     def tokens(self, restorer: TextRestorer) -> list[_Token]:
         """The placeholders of this reading, but those in a field instruction."""
         instructions = _spans([node for node in self.nodes if node.kind == "instr"])
+        items = plan_restore(self.text, restorer.case)
+        if restorer.case.label_index():
+            spans = banner_spans(self.text)
+            taken = [(i.match.start, i.match.end) for i in items]
+            items += [
+                RestoreItem(PlaceholderMatch(start, end, raw, raw, False), None, "unknown")
+                for start, end, raw in find_brackets(self.text)
+                if not any(start < e and s < end for s, e in [*taken, *spans])
+            ]
         tokens = []
-        for item in plan_restore(self.text, restorer.case):
+        for item in items:
             match = item.match
             if any(match.start < end and start < match.end for start, end in instructions):
                 continue
@@ -249,7 +263,7 @@ class _Reading:
                 for n in covered
             )
             changes = tuple(_change_of(n.elem, self.p) for n in covered)
-            tokens.append(_Token(self.view, item, pieces, changes))
+            tokens.append(_Token(self.view, item, pieces, changes, item.ordinal == -1))
         return tokens
 
 
@@ -264,6 +278,12 @@ def _restore_tracked(p: etree._Element, part: str, restorer: TextRestorer, apply
         "rejected": _taken_out_cuts(rejected, shared, restorer),
     }
     places = _places(accepted.tokens(restorer) + rejected.tokens(restorer), p)
+    # A bracketed text that no name stands against in the other reading is ordinary text.
+    places = [place for place in places if not all(t.generic for t in place.tokens)]
+    if restorer.case.label_index():
+        for place in places:
+            if place.plain is not None and _beside_other_bracket(place.plain):
+                place.held = True
     if any(edits.values()) and any(place.plain is None for place in places):
         # Cutting The MASK's line could take the nodes of a placeholder a change runs through:
         # the line stays, and every such placeholder is left to the owner (ruling R96).
@@ -293,6 +313,28 @@ def _restore_tracked(p: etree._Element, part: str, restorer: TextRestorer, apply
             replace_in_paragraph(p, view, sorted(edits[view]), breaks=True)
     for straddle in straddles:
         straddle.rewrite(p)
+
+
+_BRACKETS = (
+    "[]\N{FULLWIDTH LEFT SQUARE BRACKET}\N{FULLWIDTH RIGHT SQUARE BRACKET}\u3010\u3011\u3014\u3015"
+)
+
+
+def _beside_other_bracket(token: _Token) -> bool:
+    """Whether ``token`` lies in an insertion whose neighbour is a deletion with a bracket in it,
+    or the other way round: one name swapped for another text in brackets (ruling R127). The
+    two readings then show different tokens at one place, which only the owner can settle.
+    """
+    changes = [change for change in token.changes if change is not None]
+    if not changes:
+        return False
+    other = {"ins": "del", "del": "ins"}.get(etree.QName(changes[0]).localname)
+    return other is not None and any(
+        sibling is not None
+        and etree.QName(sibling).localname == other
+        and any(char in _BRACKETS for char in "".join(sibling.itertext()))
+        for sibling in (changes[0].getprevious(), changes[0].getnext())
+    )
 
 
 def _taken_out_cuts(

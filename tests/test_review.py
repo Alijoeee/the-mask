@@ -5,6 +5,7 @@ example contract with the real engine. The other tests build a review by hand fr
 they need (``hand_made``), so they do not depend on what the engine finds.
 """
 
+import re
 import uuid
 
 import pytest
@@ -12,7 +13,7 @@ import pytest
 from themask.detect.lists import CaseLists, UserLists
 from themask.model import Analysis, Finding, Group, PlaceholderType
 from themask.paths import lists_path
-from themask.review import ReviewCounts, ReviewState
+from themask.review import ReviewCounts, ReviewState, asks_about
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
 AMOUNT, CUSTOM = PlaceholderType.AMOUNT, PlaceholderType.CUSTOM
@@ -736,3 +737,68 @@ def test_a_merge_does_not_take_over_a_group_the_case_key_holds(lists):
     merged = review.merge([falcon.id, orion.id])
     assert merged.placeholder == "[CUSTOM_2]" and len(merged.findings) == 2
     assert [f.text for f in review.groups[0].findings] == ["Falcon"]
+
+
+def _asked(text: str, placeholder: str, value: str, enabled: bool, check: bool) -> Group:
+    findings = [
+        Finding(PlaceholderType.COMPANY, m.start(), m.end(), value, 0.6, "model")
+        for m in re.finditer(re.escape(value), text)
+    ]
+    return Group(
+        uuid.uuid4().hex, PlaceholderType.COMPANY, value, {value}, findings, placeholder,
+        enabled, check,
+    )  # fmt: skip
+
+
+def _state(lists: UserLists, *spec: tuple[str, str, bool, bool]) -> tuple[ReviewState, list[Group]]:
+    text = " and ".join(v for _, v, _, _ in spec) + " and " + spec[0][1] + "."
+    groups = [_asked(text, p, v, e, c) for p, v, e, c in spec]
+    return ReviewState(text, groups, [], lists, CaseLists([], [], set())), groups
+
+
+def test_merging_an_unanswered_asked_group_with_an_answered_one_stays_asked(
+    lists: UserLists,
+) -> None:
+    review, (one, two) = _state(
+        lists,
+        ("[COMPANY_1]", "Equipment Services", False, True),
+        ("[COMPANY_2]", "Gamma Works", False, True),
+    )
+    review.answered.add(two.id)
+    kept = review.merge([one.id, two.id])
+    assert kept.id not in review.answered and asks_about(kept, review.answered)
+
+
+def test_merging_with_nothing_answered_does_not_become_answered(lists: UserLists) -> None:
+    review, (one, two) = _state(
+        lists,
+        ("[COMPANY_1]", "Equipment Services", False, True),
+        ("[COMPANY_2]", "Gamma Works", False, True),
+    )
+    kept = review.merge([one.id, two.id])
+    assert review.answered == set() and asks_about(kept, review.answered)
+
+
+def test_splitting_an_unanswered_group_gives_an_unanswered_group(lists: UserLists) -> None:
+    review, (one,) = _state(lists, ("[COMPANY_1]", "Equipment Services", False, True))
+    new = review.split(one.id, [0])
+    assert review.answered == set() and asks_about(new, review.answered)
+
+
+def test_a_guess_merged_into_a_group_that_is_on_is_hidden_with_it(lists: UserLists) -> None:
+    review, (guess, gamma) = _state(
+        lists,
+        ("[COMPANY_1]", "Equipment Services", False, True),
+        ("[COMPANY_2]", "Gamma Works", True, False),
+    )
+    kept = review.merge([guess.id, gamma.id])
+    assert kept.enabled and kept.disabled == set()  # merging it means: hide it
+    # ... but one the owner answered "Show" to stays visible inside the merged group.
+    review, (guess, gamma) = _state(
+        lists,
+        ("[COMPANY_1]", "Equipment Services", False, True),
+        ("[COMPANY_2]", "Gamma Works", True, False),
+    )
+    review.answered.add(guess.id)
+    kept = review.merge([guess.id, gamma.id])
+    assert kept.enabled and kept.disabled != set()

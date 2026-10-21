@@ -27,11 +27,12 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 
 from themask.detect.grouping import PersonName
 from themask.detect.identity import value_key
+from themask.detect.legal import public_spans
 from themask.detect.lists import (
     CaseLists,
     UserLists,
@@ -40,6 +41,16 @@ from themask.detect.lists import (
     on_never_hide_list,
 )
 from themask.detect.sweep import Spans, existing_placeholders, is_searchable, occurrences, sweep
+from themask.labels import (
+    ClashProbe,
+    FormSet,
+    LabelError,
+    check_label,
+    clash_message,
+    clashes_with_values,
+    find_labels,
+    label_key,
+)
 from themask.model import (
     Analysis,
     Finding,
@@ -125,6 +136,14 @@ def key_variants(kind: PlaceholderType, canonical: str, forms: Iterable[str]) ->
     return sorted(v for v in set(forms) if is_searchable(v) and normalize(v) not in bare)
 
 
+def asks_about(group: Group, answered: Collection[str] = ()) -> bool:
+    """Whether the owner is asked about ``group``: the analysis was not sure of it and it is
+    switched off, so it stays visible unless the owner says hide. A group the owner has answered
+    "Show" to (``answered``) is not asked about again.
+    """
+    return group.needs_check and not group.enabled and group.id not in answered
+
+
 class ReviewState:
     """What the owner has decided about an analysis so far.
 
@@ -145,6 +164,7 @@ class ReviewState:
         user_lists: UserLists,
         case_lists: CaseLists,
         reserved: Collection[str] = (),
+        reserved_labels: Mapping[str, str] | None = None,
     ) -> None:
         self.text = text
         self.groups = groups
@@ -152,6 +172,19 @@ class ReviewState:
         self.user_lists = user_lists
         self.case_lists = case_lists
         self.reserved = frozenset(reserved)
+        # The ids of the groups the owner answered "Show" to under "Not sure — hide?": kept
+        # here, not in the screen, so that a merge, a split and the export know them.
+        self.answered: set[str] = set()
+        # The names an existing case's key gives its placeholders (ruling R127). A group the
+        # case holds keeps its name: the case's other masked files are written with it.
+        self.reserved_labels = dict(reserved_labels or {})
+        self._problems: tuple[object, list[tuple[str, str]]] | None = None
+        # A name the case's key holds that this text already writes in square brackets: a restore
+        # could not tell the two apart, and the export refuses it. Said here, in the review.
+        self._bracketed = self._stored_names_in_text()
+        for g in groups:
+            if g.label is None and g.placeholder in self.reserved_labels:
+                g.label = self.reserved_labels[g.placeholder]
 
     @classmethod
     def from_analysis(
@@ -160,6 +193,7 @@ class ReviewState:
         user_lists: UserLists,
         case_lists: CaseLists,
         reserved: Collection[str] = (),
+        reserved_labels: Mapping[str, str] | None = None,
     ) -> ReviewState:
         """A review of ``analysis``, on copies of its groups: the analysis stays as it was.
         Adding a file to an existing case, pass the placeholders of its key as ``reserved``.
@@ -170,7 +204,15 @@ class ReviewState:
             )
             for g in analysis.groups
         ]
-        return cls(analysis.text, groups, list(analysis.warnings), user_lists, case_lists, reserved)
+        return cls(
+            analysis.text,
+            groups,
+            list(analysis.warnings),
+            user_lists,
+            case_lists,
+            reserved,
+            reserved_labels,
+        )
 
     # --- Switches --------------------------------------------------------------------------------
 
@@ -190,7 +232,7 @@ class ReviewState:
 
     # --- Hiding text by hand ---------------------------------------------------------------------
 
-    def hide_text(self, value: str, type: PlaceholderType) -> Group:
+    def hide_text(self, value: str, type: PlaceholderType, label: str | None = None) -> Group:
         """Hide every occurrence of ``value`` as ``type`` and return the group that holds them.
 
         If a group of ``type`` has ``value`` among its forms, the occurrences join it. If only a
@@ -202,11 +244,14 @@ class ReviewState:
         ValueError for text too short to look for, and for text with no occurrence to hide: one
         that is not in the document, runs over a line break (a replacement lies within one
         paragraph) or is hidden already.
+
+        With ``label`` the group is named at once (``set_label``, ruling R127); a label that
+        cannot be used raises LabelError before anything is hidden.
         """
         value = value.strip()
         if not is_searchable(value):
             raise ValueError("Select at least two letters or digits to hide.")
-        group = self._hide(value, type)
+        group = self._hiding(value, type, label, retype=True)
         if group is None:
             raise ValueError(
                 "The selected text is not in the document, runs over a line break, or is hidden"
@@ -214,18 +259,30 @@ class ReviewState:
             )
         return group
 
-    def add_always_hide(self, value: str) -> None:
+    def add_always_hide(self, value: str, label: str | None = None) -> None:
         """Add ``value`` to the owner's always-hide list, saved for every document, and hide it
         here: as ``TYPE:value`` writes it, else as CUSTOM. A plain value that a group has among
         its forms joins that group and keeps its type; only a ``TYPE:value`` entry re-types it
         (ruling R62). A value this document lacks is only added. Raises ValueError for a blank
-        value.
+        value. With ``label`` the group it hides is named (ruling R127). Raises LabelError, and
+        changes nothing (the list neither), when the name cannot be used, when the value is too
+        short or not in this document so there is no group to name, or when the value would
+        clash with a name already given.
         """
+        kind, text = always_hide_entry(value)
+        retype = text != value.strip()
+        named = label is not None and bool(label.strip())
+        if named and not is_searchable(text):
+            raise LabelError("Select at least two letters or digits to hide and name.")
+        if named or is_searchable(text):
+            group = self._hiding(text, kind, label, retype=retype)
+            if named and group is None:
+                raise LabelError(
+                    "That text is not in this document (or is hidden already), so there is no"
+                    " group to give the name to. It was not added."
+                )
         self.user_lists.add_always(value)
         self.user_lists.save(lists_path())
-        kind, text = always_hide_entry(value)
-        if is_searchable(text):
-            self._hide(text, kind, retype=text != value.strip())
 
     def add_never_hide(self, value: str) -> None:
         """Add ``value`` to the owner's never-hide list, saved for every document, and stop
@@ -273,10 +330,38 @@ class ReviewState:
         if len(stored) > 1:
             raise ValueError(_two_stored(stored))
         keep = stored[0] if stored else min(groups, key=lambda g: _number(g.placeholder))
+        named = [g for g in groups if g.label is not None]
+        if len(named) > 1:
+            raise ValueError(
+                "These groups have different names; remove all but one name before merging."
+            )
+        if named and keep is not named[0] and keep.placeholder in self.reserved:
+            raise ValueError(
+                f"{keep.placeholder} is in the case's key without that name, so the name"
+                " cannot be given to it; remove the name before merging."
+            )
+        label = named[0].label if named else None
+        if label is not None and clashes_with_values(
+            label,
+            [f for g in groups for f in (g.canonical, *g.variants, *(x.text for x in g.findings))],
+        ):
+            raise ValueError(
+                f"The name {label} contains, or is part of, a value in the groups you are"
+                " merging, so the merged group would show part of it. Remove the name first, or"
+                " do not merge these groups."
+            )
         enabled = any(g.enabled for g in groups)
+        # The merged group is answered when it was asked about and every one of those was.
+        asked = [g for g in groups if g.needs_check and not g.enabled]
+        was_answered = any(g.id in self.answered for g in groups) and all(
+            g.id in self.answered for g in asked
+        )
+        # A guess the owner was asked about and did not answer is hidden along with the group it
+        # joins (they merged it to hide it): the safe direction, not left visible unasked.
+        unanswered = {g.id for g in asked if g.id not in self.answered}
         occurrences_off = sorted(
             (
-                (f, i in g.disabled or (enabled and not g.enabled))
+                (f, i in g.disabled or (enabled and not g.enabled and g.id not in unanswered))
                 for g in groups
                 for i, f in enumerate(g.findings)
             ),
@@ -286,10 +371,15 @@ class ReviewState:
         if not stored:
             keep.canonical = _canonical(keep.type, (g.canonical for g in groups))
         keep.needs_check = any(g.needs_check for g in groups)
+        keep.label = label
         keep.enabled = enabled
         keep.findings = [f for f, _ in occurrences_off]
         keep.disabled = {i for i, (_, off) in enumerate(occurrences_off) if off}
         merged = {g.id for g in groups} - {keep.id}
+        self.answered -= merged
+        self.answered.discard(keep.id)
+        if was_answered:
+            self.answered.add(keep.id)
         self.groups[:] = [g for g in self.groups if g.id not in merged]
         self._sweep()
         self._tidy()
@@ -334,22 +424,40 @@ class ReviewState:
             group.variants.add(group.canonical)
         group.disabled = {n for n, i in enumerate(stay) if i in group.disabled}
         group.findings = staying
+        if group.id in self.answered:
+            self.answered.add(new.id)
         self.groups.append(new)
         self._tidy()
         return new
 
     # --- What the owner decided ------------------------------------------------------------------
 
+    def fingerprint(self) -> tuple[object, ...]:
+        """What the owner has decided, as a value to compare: it differs after any switch, name,
+        merge, split, hide or answer. Used to tell whether a review is as it was when exported.
+        """
+        return (
+            tuple(
+                (
+                    g.id,
+                    g.placeholder,
+                    g.enabled,
+                    g.label,
+                    g.canonical,
+                    tuple(sorted(g.disabled)),
+                    tuple((f.start, f.end) for f in g.findings),
+                )
+                for g in self.groups
+            ),
+            frozenset(self.answered),
+        )
+
     def mask_plan(self) -> MaskPlan:
         """The replacements to make: every finding of a group that is on, but the single
         occurrences switched off.
         """
         return MaskPlan(
-            [
-                Replacement(f.start, f.end, g.placeholder)
-                for g in self.groups
-                for f in g.active_findings()
-            ]
+            [Replacement(f.start, f.end, g.token) for g in self.groups for f in g.active_findings()]
         )
 
     def key_entries(self) -> list[KeyEntry]:
@@ -360,7 +468,11 @@ class ReviewState:
         masked.sort(key=lambda g: (_TYPE_ORDER[g.type], _number(g.placeholder)))
         return [
             KeyEntry(
-                g.placeholder, g.type, g.canonical, key_variants(g.type, g.canonical, g.variants)
+                g.placeholder,
+                g.type,
+                g.canonical,
+                key_variants(g.type, g.canonical, g.variants),
+                g.label,
             )
             for g in masked
         ]
@@ -374,7 +486,229 @@ class ReviewState:
             replacements=sum(len(g.active_findings()) for g in self.groups),
         )
 
+    # --- Names the owner gives ---------------------------------------------------------------------
+
+    def set_label(self, group_id: str, label: str | None) -> str | None:
+        """Name a group (ruling R127): the masked file then writes ``[label]`` for it instead of
+        its placeholder, which stays its identity in the key. Returns the name the group now has.
+
+        An empty ``label`` or None removes the name, and so does the group's own placeholder
+        ("COMPANY_1" for the group that is [COMPANY_1]). A name can be changed any time before
+        the export. Raises LabelError, with the reason in plain words, for a name that is not
+        1 to 32 letters, digits, spaces, hyphens or underscores with a letter in it; that
+        another group has, or the placeholder of another group, or that spells any placeholder;
+        that is one of the confidential values or part of one (the leak check would find it in
+        the masked file); that the document already holds in square brackets (a restore could
+        not tell it from the name); and for the group of an existing case's key, which keeps
+        the name its other masked files were written with.
+        """
+        group = self._group(group_id)
+        self._check_stored(group.placeholder, label)
+        if group.placeholder in self.reserved and group.label is not None:
+            return group.label  # the case's own name, spelt again: no change
+        if label is None or not label.strip():
+            group.label = None
+            return None
+        group.label = self._checked_label(
+            label, group.placeholder, [group.canonical, *group.variants, *self._found_texts()]
+        )
+        return group.label
+
     # --- Helpers ---------------------------------------------------------------------------------
+
+    def _found_texts(self) -> list[str]:
+        return [f.text for g in self.groups for f in g.findings]
+
+    def _check_stored(self, placeholder: str, label: str | None) -> None:
+        """Raises LabelError for a change to the name of a group the case's key holds."""
+        if placeholder not in self.reserved:
+            return
+        stored = self.reserved_labels.get(placeholder)
+        wanted = None if label is None or not label.strip() else label
+        same = (stored is None and wanted is None) or (
+            stored is not None and wanted is not None and label_key(wanted) == label_key(stored)
+        )
+        if not same:
+            raise LabelError(
+                f"{placeholder} is in the case already, with its earlier files written as they"
+                " are; its name cannot be changed."
+            )
+
+    def _checked_label(self, label: str, own: str, own_forms: Iterable[str]) -> str | None:
+        """The label as ``check_label`` cleans it for the group ``own``, with the checks that
+        need the review: the document's own brackets and the confidential values."""
+        placeholders = {g.placeholder for g in self.groups} | self.reserved
+        labels = {
+            label_key(g.label): g.placeholder
+            for g in self.groups
+            if g.label is not None and g.placeholder != own
+        }
+        labels.update({label_key(v): p for p, v in self.reserved_labels.items() if p != own})
+        text = check_label(
+            label,
+            own=own,
+            other_placeholders=placeholders - {own},
+            other_labels=labels,
+        )
+        if text is None:
+            return None
+        key = label_key(text)
+        if find_labels(self.text, {key: text}):
+            raise LabelError(
+                f"The document already contains [{text}] in square brackets. A restore could not"
+                " tell it from the name you chose; choose another name."
+            )
+        forms = [*own_forms, *(f for g in self.groups for f in (g.canonical, *g.variants))]
+        forms += self._found_texts()
+        if clashes_with_values(text, forms):
+            raise LabelError(
+                f"{text} is, or contains a word of, a value that is being hidden, so the masked"
+                " file would still show part of it. Choose another name."
+            )
+        return text
+
+    def _hiding(
+        self, value: str, kind: PlaceholderType, label: str | None, retype: bool
+    ) -> Group | None:
+        """Hide ``value`` as ``kind`` and name the group ``label`` (if given), all or nothing:
+        every check runs before the hide, and a failure after it puts the review back as it was.
+        """
+        named = label is not None and bool(label.strip())
+        self._check_value_against_names(value)
+        if named:
+            self._check_label_before_hiding(value, kind, label or "", retype)
+        before = self._snapshot()
+        group = self._hide(value, kind, retype=retype)
+        if group is not None and named:
+            try:
+                self.set_label(group.id, label)
+            except LabelError:
+                self._restore(before)
+                raise
+        return group
+
+    def _snapshot(self) -> list[tuple[Group, Group]]:
+        """Every group with a copy of its state, to put the review back (``_restore``)."""
+        return [
+            (
+                g,
+                replace(
+                    g, variants=set(g.variants), findings=list(g.findings), disabled=set(g.disabled)
+                ),
+            )
+            for g in self.groups
+        ]
+
+    def _restore(self, snapshot: list[tuple[Group, Group]]) -> None:
+        for group, state in snapshot:
+            group.__dict__.update(state.__dict__)
+        self.groups[:] = [group for group, _ in snapshot]
+
+    def _check_value_against_names(self, value: str) -> None:
+        """Raises LabelError if hiding ``value`` would put part of it inside a name already given
+        to a group: the masked file would show that part. Nothing is changed."""
+        for g in self.groups:
+            if g.label is not None and clashes_with_values(g.label, [value]):
+                kept = (
+                    " That name is in the case already and cannot change."
+                    if g.placeholder in self.reserved
+                    else " Remove or change the name first."
+                )
+                raise LabelError(
+                    f"That text contains, or is part of, the name {g.label} given to"
+                    f" {g.placeholder}, so the masked file would still show part of it.{kept}"
+                )
+
+    def label_problems(self) -> list[str]:
+        """Plain messages for every name that clashes with a value that will be masked (a group
+        that is on): what an export would refuse. Switching the other group off, or choosing
+        another name, clears the message; a name from the case's key cannot change, so for
+        it the other group must go. Empty when all is well.
+        """
+        return [message for _, message in self.label_problem_pairs()]
+
+    def label_problem_pairs(self) -> list[tuple[str, str]]:
+        """``label_problems`` as (id of the group whose name clashes, message) pairs.
+
+        The answer is kept until a name, a switch, a place, a value or a key name changes, so the
+        screen can ask after every redraw without paying for the test each time.
+        """
+        if not any(g.label is not None for g in self.groups):
+            return list(self._bracketed)
+        key = (
+            tuple(
+                (
+                    g.id,
+                    g.label,
+                    g.enabled,
+                    g.canonical,
+                    tuple(sorted(g.variants)),
+                    tuple((f.start, f.end) for f in g.findings),
+                    tuple(sorted(g.disabled)),
+                )
+                for g in self.groups
+            ),
+            tuple(sorted(self.reserved_labels.items())),
+        )
+        if self._problems is not None and self._problems[0] == key:
+            return list(self._problems[1])
+        pairs = [*self._bracketed, *self._find_label_problems()]
+        self._problems = (key, pairs)
+        return list(pairs)
+
+    def _stored_names_in_text(self) -> list[tuple[str, str]]:
+        """(id of the group that has the name, or "" if the text has none; message) for each name
+        of the case's key that the text already holds in square brackets.
+        """
+        pairs = []
+        for placeholder, label in self.reserved_labels.items():
+            if find_labels(self.text, {label_key(label): label}):
+                owner = next((g.id for g in self.groups if g.placeholder == placeholder), "")
+                pairs.append(
+                    (
+                        owner,
+                        (
+                            f"The file already contains [{label}] in square brackets, the name"
+                            f" {placeholder} has in the case. A restore could not tell them"
+                            " apart; take it out of the file in Word and open the file again."
+                        ),
+                    )
+                )
+        return pairs
+
+    def _find_label_problems(self) -> list[tuple[str, str]]:
+        masked = [g for g in self.groups if g.active_findings()]
+        named = [g for g in masked if g.label is not None]
+        if not named:
+            return []
+        sets = {
+            g.id: FormSet([g.canonical, *g.variants, *(f.text for f in g.findings)]) for g in masked
+        }
+        pairs = []
+        for g in named:
+            assert g.label is not None
+            probe = ClashProbe(g.label)
+            stored = g.placeholder in self.reserved_labels
+            for other in masked:
+                forms = sets[other.id]
+                if probe.may_clash(forms) and probe.clashes(forms.forms):
+                    pairs.append(
+                        (g.id, clash_message(g.label, g.placeholder, other.placeholder, stored))
+                    )
+        return pairs
+
+    def _check_label_before_hiding(
+        self, value: str, kind: PlaceholderType, label: str, retype: bool = True
+    ) -> None:
+        """Raises LabelError if ``label`` could not name the group ``hide_text`` is about to
+        make or change for ``value``; nothing is changed."""
+        holder = self._holding(value, kind)
+        if holder is not None and (holder.type is kind or not retype):
+            self._check_stored(holder.placeholder, label)
+            own = holder.placeholder
+        else:
+            own = self._next_placeholder(kind)
+        self._checked_label(label, own, [value])
 
     def _group(self, group_id: str) -> Group:
         for group in self.groups:
@@ -387,6 +721,16 @@ class ReviewState:
         Without ``retype`` a group of another type that has the value keeps its type.
         """
         group = self._holding(value, kind)
+        if (
+            group is not None
+            and retype
+            and group.type is not kind
+            and group.placeholder in self.reserved_labels
+        ):
+            raise LabelError(
+                f"{group.placeholder} is in the case with the name {group.label}, so its type"
+                " cannot be changed."
+            )
         if group is None:
             group = Group(uuid.uuid4().hex, kind, value, {value}, [], self._next_placeholder(kind))
             self.groups.append(group)
@@ -453,13 +797,21 @@ class ReviewState:
         """
         is_term = never_hide_check(self.user_lists, self.case_lists)
         keyed = [g for g in self.groups if g.placeholder in self.reserved]
-        sweep(self.text, self.groups, fixed=[*fixed, *keyed], is_term=is_term)
+        names = [
+            form
+            for g in self.groups
+            if g.type in (PlaceholderType.PERSON, PlaceholderType.COMPANY)
+            for form in (g.canonical, *g.variants)
+        ]
+        public = public_spans(self.text, names)  # laws and standards are not swept (task D7)
+        sweep(self.text, self.groups, fixed=[*fixed, *keyed], is_term=is_term, public=public)
 
     def _tidy(self) -> None:
         """Drop the groups a sweep left with no finding, and put each group's findings and the
         groups themselves in the order they stand in the text.
         """
         self.groups[:] = [g for g in self.groups if g.findings]
+        self.answered &= {g.id for g in self.groups}
         for group in self.groups:
             _in_text_order(group)
         self.groups.sort(key=lambda g: g.findings[0].start)

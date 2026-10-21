@@ -52,13 +52,15 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from themask.detect.contract_rules import find_defined_terms, is_contract_wording
-from themask.detect.grouping import PersonName, SurnamePolicy, group_findings
+from themask.detect.grouping import CHECK_BELOW, PersonName, SurnamePolicy, group_findings
 from themask.detect.identity import value_key
+from themask.detect.legal import legal_spans, public_spans
 from themask.detect.lists import (
     CaseLists,
     UserLists,
     always_hide_entry,
     is_default_term,
+    is_vocabulary_word,
     never_hide_check,
     on_never_hide_list,
     term_key,
@@ -184,11 +186,19 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
-    found = _people_among_parties(found, text)
+    unlegal_source = found
+    legal = legal_spans(text)
+    unlegal = _without_legal_references(found, legal)
+    found = _people_among_parties(unlegal, text)
     seeds = [_seed(entry) for entry in seed_entries or []]
 
     is_term = never_hide_check(user_lists, case)  # what a person's bare name may be part of
     names = _names(found, seeds, is_term)
+    # A legal term that is part of a name of this document ("Data Act" of "Data Act Ltd") is the
+    # party's: what was dropped for it comes back, and the sweep takes it.
+    legal = public_spans(text, names)
+    if legal != legal_spans(text):
+        found = _people_among_parties(_without_legal_references(unlegal_source, legal), text)
     never_hidden = never_hide_check(user_lists, case, names=names)
 
     def keep(form: str) -> bool:
@@ -197,13 +207,18 @@ def analyze(
         common = len(form.split()) == 1 and is_contract_wording(form)
         return is_searchable(form) and not never_hidden(form) and not common
 
+    name_keys = [_words_key(name) for name in names]
     surnames = _surnames_kept(found, text, user_lists, case, is_term)
     defined = {term_key(term) for term in case.defined_terms}
     found = [
         f
         for f in found
         if (f.start, f.end) in surnames
-        or not (never_hidden(f.text) or _names_nobody(f) or _starts_a_term(text, f))
+        or not (
+            never_hidden(f.text)
+            or (_names_nobody(f, is_term) and not _part_of_a_name(f, name_keys))
+            or _starts_a_term(text, f)
+        )
     ]
     for seed in seeds:
         seed.variants = {v for v in seed.variants if keep(v)}
@@ -229,7 +244,7 @@ def analyze(
         group.variants = {
             v for v in group.variants if is_bare_name(group.type, v) or not never_hidden(v)
         }
-    sweep(text, groups, fixed=seeds, is_term=is_term)
+    sweep(text, groups, fixed=seeds, is_term=is_term, public=legal)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
@@ -237,6 +252,9 @@ def analyze(
             is_bare_name(group.type, f.text) and _ordinary(f.text, defined) for f in group.findings
         ):
             group.needs_check = True
+    stored = {seed.id for seed in seeds}
+    for group in _unsure_guesses(groups, stored):
+        group.enabled, group.needs_check = False, True
     groups.sort(key=lambda g: g.findings[0].start)
     _number(groups, seed_entries or [], placeholders)
     return Analysis(text, groups, _warnings(placeholders))
@@ -260,6 +278,23 @@ def _detected(combined: CombinedText, engine: Engine, case: CaseLists) -> list[F
             moved = replace(finding, start=finding.start + start, end=finding.end + start)
             found += _cleaned(combined.text, moved, notes)
     return found
+
+
+def _without_legal_references(found: list[Finding], spans: list[tuple[int, int]]) -> list[Finding]:
+    """``found`` without what the model or a pattern took from inside a reference to a law, a
+    regulation, a standard or a code ("6698" of "Law No. 6698", "GDPR", "Kanun No"): public text
+    (task D7). What the owner listed, a rule found or a person selected stays, and so does a
+    finding that is longer than the reference ("Act No. 5237 Holdings Ltd").
+    """
+    if not spans:
+        return found
+    starts = [start for start, _ in spans]
+
+    def inside(finding: Finding) -> bool:
+        index = bisect_right(starts, finding.start) - 1
+        return index >= 0 and finding.end <= spans[index][1]
+
+    return [f for f in found if f.source not in ("model", "pattern") or not inside(f)]
 
 
 def _listed(text: str, user: UserLists, case: CaseLists) -> list[Finding]:
@@ -331,11 +366,126 @@ def _starts_a_term(text: str, finding: Finding) -> bool:
     return following is not None and is_default_term(f"{finding.text} {following[1]}")
 
 
-def _names_nobody(finding: Finding) -> bool:
+def _names_nobody(finding: Finding, is_term: Callable[[str], bool]) -> bool:
     """Whether the language model found a text made of the contract's own words only, which
-    names nobody: "GOVERNING LAW", "the Recipient for the Purpose" (``is_contract_wording``).
+    names nobody: "GOVERNING LAW", "the Recipient for the Purpose" (``is_contract_wording``), or
+    a never-hide term with filler words, at low confidence: "the Confidential Information of
+    the other" (ruling R122, item 2). A confident guess, and any word that is not a default
+    never-hide term, keeps the finding: "The Capital Group" is a company.
     """
-    return finding.source == "model" and is_contract_wording(finding.text)
+    if finding.source != "model":
+        return False
+    if is_contract_wording(finding.text):
+        return True
+    return (
+        finding.type in _NAMES
+        and finding.score < CHECK_BELOW
+        and _plain_words(finding.text, whole=True) == _WITH_FILLER
+    )
+
+
+# Small words that join the ordinary words of a phrase without naming anybody.
+_FILLER = frozenset(
+    {"the", "of", "a", "an", "and", "or", "to", "in", "on", "for", "by", "with", "from", "other"}
+    | {"another", "any", "each", "either", "neither", "such", "this", "that", "these", "those"}
+    | {"its", "their", "his", "her", "as", "at", "between", "under", "upon", "&"}
+)
+_PLAIN_WORD = re.compile(r"[^\W\d_]+(?:['\N{RIGHT SINGLE QUOTATION MARK}\-][^\W\d_]+)*")
+# What ``_plain_words`` reports: made of default never-hide words with at least one filler word
+# (``_WITH_FILLER``); made of them with no filler (``_PLAIN``); anything else (``_NAME_SHAPED``).
+_WITH_FILLER, _PLAIN, _NAME_SHAPED = "filler", "plain", "name"
+
+
+def _plain_words(text: str, whole: bool = False) -> str:
+    """How ``text`` reads: ``_WITH_FILLER``, ``_PLAIN`` or ``_NAME_SHAPED`` (see above).
+
+    Only the default never-hide terms count (ruling R122), not COMMON_WORDS and not the terms a
+    document defines: every word must be a word of a default term and not a place, a month or a
+    body. Every run of words between filler words must be a default term itself ("Confidential
+    Information", not "Standard") or, unless ``whole``, made of default terms ("Services Agreement").
+    A word with a digit makes it name-shaped.
+    """
+    words = [word.strip(".,:;()\"'") for word in text.split()]
+    words = [word for word in words if word]
+    if not words or any(not _PLAIN_WORD.fullmatch(word) for word in words):
+        return _NAME_SHAPED
+    others = [word for word in words if word.casefold() not in _FILLER]
+    if not others or not all(is_vocabulary_word(word) for word in others):
+        return _NAME_SHAPED
+    runs: list[list[str]] = [[]]
+    for word in words:
+        if word.casefold() in _FILLER:
+            runs.append([])
+        else:
+            runs[-1].append(word)
+    for run in filter(None, runs):
+        if not (is_default_term(" ".join(run)) or (not whole and all(map(is_default_term, run)))):
+            return _NAME_SHAPED
+    return _WITH_FILLER if len(others) < len(words) else _PLAIN
+
+
+def _words_key(text: str) -> str:
+    """``text`` as its normalised words joined by single spaces: "Bank-Services  Ltd." gives
+    "bank services ltd". A hyphen, a dash or a slash parts words, and "and" and "&" are left
+    out, so "Software & Services" and "Software-and-Services" key alike.
+    """
+    words = map(normalize, re.split(r"[\s/\-\N{HYPHEN}-\N{HORIZONTAL BAR}]+", text))
+    return " ".join(word for word in words if word and word != "and")
+
+
+def _inside(short: str, long: str) -> bool:
+    """Whether the words of ``short`` stand as a run of whole words in ``long`` (both as
+    ``_words_key`` gives them).
+    """
+    a, b = short.split(), long.split()
+    return bool(a) and any(b[i : i + len(a)] == a for i in range(len(b) - len(a) + 1))
+
+
+def _part_of_a_name(finding: Finding, name_keys: list[str]) -> bool:
+    """Whether the words of ``finding`` stand as a run inside a name that is found in the text:
+    "Equipment and Software" of "Equipment and Software Group Ltd" is that company's short form,
+    not a phrase of the contract (R122 item 2 leaves it to the normal handling).
+    """
+    key = _words_key(finding.text)
+    return any(_inside(key, name) for name in name_keys)
+
+
+def _unsure_guesses(groups: list[Group], stored: set[str]) -> list[Group]:
+    """The groups that are low-confidence guesses of the language model made only of default
+    never-hide words ("Personal Services"): shown, not hidden, and the owner is asked (ruling
+    R122, item 1). Only a company is asked about, and only when the guess comes from the model
+    alone: a value a rule, a pattern, the owner or a stored key found, a person, anything
+    name-shaped, and any form that is, or holds, or sits inside a form of a name that stays
+    hidden is not.
+    """
+
+    def guess(group: Group) -> bool:
+        found = [f for f in group.findings if f.source != "sweep"]
+        return (
+            group.type is PlaceholderType.COMPANY
+            and group.id not in stored
+            and bool(found)
+            and all(f.source == "model" and f.score < CHECK_BELOW for f in found)
+            and all(_plain_words(form) == _PLAIN for form in {group.canonical, *group.variants})
+        )
+
+    asked = [g for g in groups if guess(g)]
+    kept = {id(g) for g in asked}
+    hidden = [
+        _words_key(form)
+        for g in groups
+        if id(g) not in kept and g.type in _NAMES
+        for form in {g.canonical, *g.variants}
+    ]
+    return [
+        g
+        for g in asked
+        if not any(
+            _inside(_words_key(form), other) or _inside(other, _words_key(form))
+            for form in {g.canonical, *g.variants}
+            for other in hidden
+        )
+    ]
 
 
 def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bool]) -> list[str]:
@@ -348,7 +498,9 @@ def _names(found: list[Finding], seeds: list[Group], is_term: Callable[[str], bo
     for finding in found:
         if finding.source == "list":
             names.append(finding.text)
-        elif finding.type in _NAMES and not (is_term(finding.text) or _names_nobody(finding)):
+        elif finding.type in _NAMES and not (
+            is_term(finding.text) or _names_nobody(finding, is_term)
+        ):
             names += [finding.text, strip_legal_form(finding.text)]
             names += variants_of(finding.text, finding.type)
             if finding.type is PlaceholderType.PERSON:

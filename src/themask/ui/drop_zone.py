@@ -3,6 +3,11 @@
 The files The MASK reads go on as ``filesDropped``. The others are not ignored: they go on as
 ``filesRefused``, so that the owner is told why nothing happened to them (an old .doc can be saved
 as .docx in Word) and not left with a drop that did nothing.
+
+The zone is a card: an illustration, a title, a caption, the button and, when it is told one, a
+hint at the shortcut. A drag over it takes the accent's border and background (the stylesheet
+reads the ``dragOver`` property). The screens that need more in the card put it under the caption
+(``status_layout``).
 """
 
 from __future__ import annotations
@@ -11,15 +16,28 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
-from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent, QFont
+from PySide6.QtWidgets import (
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from themask.ui.art import Illustration
 
 FILE_FILTER = "Contracts (*.docx *.pdf)"
 # A file is read as one of these by its extension, in any case (themask.export.load_sources).
 SUFFIXES = frozenset({".docx", ".pdf"})
 CHOOSE_TITLE = "Choose contracts"
-TITLE = "Drop your contracts here"
-HINT = "Word (.docx) or PDF files with selectable text. Files dropped together share one key."
+TITLE = "Drop a contract here"
+HINT = (
+    "Word or PDF. Confidential values are swapped for placeholders before anything leaves this Mac."
+)
+CHOOSE_TEXT = "Choose file…"
 
 
 def contract_paths(paths: Iterable[Path], suffixes: frozenset[str] = SUFFIXES) -> list[Path]:
@@ -48,10 +66,13 @@ class DropZone(QFrame):
     """A frame that takes files dropped on it: the Word and PDF files go on with
     ``filesDropped``, the other files of the same drop with ``filesRefused`` (after it).
 
-    The "Choose files…" button does the same through the system's file dialog. Something that is
-    not a list of files is not taken, and a disabled zone takes nothing. A zone for other files
-    than the contracts is told which (``suffixes``), what it says (``title`` and ``hint``) and what
-    its file dialog is called and shows (``dialog_title`` and ``file_filter``).
+    The button (``choose_button``, "Choose file…") does the same through the system's file
+    dialog. Something that is not a list of files is not taken, and a disabled zone takes nothing.
+    A zone for other files than the contracts is told which (``suffixes``), what it says
+    (``title`` and ``hint``) and what its file dialog is called and shows (``dialog_title`` and
+    ``file_filter``). ``art`` names the illustration over the title ("mask" or "check", none by
+    default), ``choose_text`` is the words of the button and ``shortcut_hint`` the little text
+    beside it that says which key does the same.
     """
 
     filesDropped = Signal(list)  # list[Path]
@@ -66,6 +87,9 @@ class DropZone(QFrame):
         hint: str = HINT,
         dialog_title: str = CHOOSE_TITLE,
         file_filter: str = FILE_FILTER,
+        art: str | None = None,
+        choose_text: str = CHOOSE_TEXT,
+        shortcut_hint: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._suffixes = suffixes
@@ -74,22 +98,47 @@ class DropZone(QFrame):
         self.setObjectName("dropZone")
         self.setAcceptDrops(True)
         self.setProperty("dragOver", False)
-        # Room for the title, the hint on two lines and the button: a label that wraps cannot say
-        # how tall it needs to be for the width it gets, so the layout would squeeze them.
-        self.setMinimumHeight(220)
+        self.setAccessibleName(title)
+        self.setAccessibleDescription(hint)
+        self.illustration = Illustration(art) if art is not None else None
         self.title_label = QLabel(title)
         self.title_label.setObjectName("dropTitle")
+        self.title_label.setWordWrap(True)
+        title_font = self.title_label.font()
+        title_font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing, -0.2
+        )  # as the mockup's title
+        self.title_label.setFont(title_font)
         self.hint_label = QLabel(hint)
+        self.hint_label.setObjectName("dropHint")
         self.hint_label.setWordWrap(True)
-        self.choose_button = QPushButton("Choose files…")
+        self.status_layout = QVBoxLayout()  # what a screen adds under the caption
+        self.status_layout.setSpacing(8)
+        self.choose_button = QPushButton(choose_text)
+        self.choose_button.setObjectName("chooseButton")
         self.choose_button.clicked.connect(self.choose_files)
+        self.shortcut_label = QLabel(shortcut_hint or "")
+        self.shortcut_label.setObjectName("dropShortcut")
+        self.shortcut_label.setVisible(bool(shortcut_hint))
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setContentsMargins(32, 44, 32, 36)
         layout.setSpacing(12)
+        if self.illustration is not None:
+            layout.addWidget(self.illustration, alignment=Qt.AlignmentFlag.AlignHCenter)
+            layout.addSpacing(8)
         for widget in (self.title_label, self.hint_label):
             widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(widget)
-        layout.addWidget(self.choose_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addLayout(self.status_layout)
+        layout.addSpacing(12)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        buttons.addStretch(1)
+        buttons.addWidget(self.choose_button)
+        buttons.addWidget(self.shortcut_label)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
 
     def choose_files(self) -> None:
         """Ask for files with the system's dialog, and pass them on."""

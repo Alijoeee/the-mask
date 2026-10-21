@@ -149,7 +149,7 @@ def test_main_tells_the_owner_when_the_lists_cannot_be_read(
     shown: list[str] = []
     monkeypatch.setattr(app, "show_error", lambda parent, message: shown.append(message))
     monkeypatch.setattr(
-        app, "apply_theme", lambda application: None
+        app.theme, "apply", lambda application: None
     )  # the test's app keeps its look
     assert app.main() == 1  # no window, and a failure for the system to see
     assert len(shown) == 1 and "always-hide" in shown[0]
@@ -164,6 +164,6 @@ def test_main_tells_the_owner_when_the_data_folder_cannot_be_used(
     shown: list[str] = []
     monkeypatch.setattr(app, "build_context", refuse)
     monkeypatch.setattr(app, "show_error", lambda parent, message: shown.append(message))
-    monkeypatch.setattr(app, "apply_theme", lambda application: None)
+    monkeypatch.setattr(app.theme, "apply", lambda application: None)
     assert app.main() == 1
     assert len(shown) == 1 and "Permission denied" in shown[0] and "/Users" not in shown[0]
