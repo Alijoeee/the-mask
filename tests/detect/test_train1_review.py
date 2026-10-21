@@ -605,3 +605,96 @@ def test_a_currency_code_does_not_start_a_company_name():
         "Toplam 42.000,00 TL. Acmevolt Teknoloji Anonim Şirketi öder."
     )
     assert [f.text for f in found] == ["Acmevolt Teknoloji Anonim Şirketi"]
+
+
+# --- Round 7: a name with an apostrophe and a Turkish suffix; a sweep match that overlaps ---------
+
+
+class _OnTop:
+    """The real engine, with extra person spans added to what its model finds."""
+
+    def __init__(self, base, extra):
+        self.base, self.extra = base, extra
+
+    def analyze(self, text):
+        out = list(self.base.analyze(text))
+        for needle in self.extra:
+            start = text.find(needle)
+            while start >= 0:
+                out.append(Finding(P, start, start + len(needle), needle, 0.85, "model"))
+                start = text.find(needle, start + 1)
+        return sorted(out, key=lambda f: (f.start, f.end, f.type))
+
+
+@pytest.mark.parametrize(
+    "surname,form,left",
+    [
+        ("O'Brien", "O'Brien'ın", "Brien"),
+        ("D'Souza", "D'Souza'nın", "Souza"),
+        ("O'Connor", "O'Connor'a", "Connor"),
+        ("N'Diaye", "N'Diaye'nin", "Diaye"),
+        ("Yılmaz", "Yılmaz'ın", "Yılmaz"),
+        ("van der Berg", "van der Berg'in", "Berg"),
+    ],
+)
+def test_a_surname_with_an_apostrophe_and_a_turkish_suffix_is_hidden(engine, surname, form, left):
+    first = "Liam" if "'" in surname else "Ahmet"
+    t = (
+        f"Hukuk Müşaviri {first} {form} imzası ile Anatolia Bilişim Limited Şirketi bağlanır. "
+        f"{first} {surname} onaylar."
+    )
+    a = run(t, _OnTop(engine, [f"Müşaviri {first}"]))
+    out = masked_text(a)
+    assert left not in out and first not in out and "Anatolia" not in out, out
+
+
+def test_the_owners_sentence_with_epm_and_o_brien(engine):
+    t = (
+        "EPM's Hukuk Müşaviri Liam O'Brien'ın imzası ile Anatolia Bilişim Limited Şirketi bağlanır."
+        " Liam O'Brien onaylar."
+    )
+    a = run(t, _OnTop(engine, ["Müşaviri Liam"]))
+    out = masked_text(a)
+    assert "O'Brien" not in out and "Liam" not in out, out
+    # EPM is an acronym that is also a company: shown but asked about, listed as not sure.
+    (epm,) = [g for g in a.groups if "EPM" in {f.text for f in g.findings}]
+    assert not epm.enabled and epm.needs_check  # asked about, as ruling R122 says
+
+
+def test_a_sweep_match_over_a_finding_in_part_grows_that_finding():
+    from themask.detect.sweep import sweep
+    from themask.model import Group
+
+    text = "Hukuk Müşaviri Liam O'Brien signs. Liam O'Brien pays."
+    start = text.index("Müşaviri")
+    held = Finding(P, start, start + len("Müşaviri Liam"), "Müşaviri Liam", 0.85, "model")
+    other = Group("a", P, "Müşaviri Liam", {"Müşaviri Liam"}, [held], "[PERSON_1]")
+    swept = Group("b", P, "Liam O'Brien", {"Liam O'Brien"}, [], "[PERSON_2]")
+    sweep(text, [other, swept])
+    assert [f.text for f in other.findings] == ["Müşaviri Liam O'Brien"]
+    assert [f.text for f in swept.findings] == ["Liam O'Brien"]  # the later one only
+
+
+@pytest.mark.parametrize(
+    "first,written,name",
+    [
+        ("Liam", "O'Brien'ın", "O'Brien"),
+        ("Liam", "D'Souza'nın", "D'Souza"),
+        ("Liam", "O'Connor'a", "O'Connor"),
+        ("Liam", "N'Diaye'nin", "N'Diaye"),
+        ("Ahmet", "Yılmaz'ın", "Yılmaz"),
+        ("Jan", "Berg'in", "Berg"),
+        ("Liam", "O'Brien", "O'Brien"),
+        ("Liam", "O\u2019Brien\u2019ın", "O\u2019Brien"),
+    ],
+)
+def test_a_person_is_extended_over_a_surname_with_an_apostrophe(first, written, name):
+    from themask.detect.pipeline import _extended_people
+
+    text = f"Hukuk Müşaviri {first} {written} imzası. {first} {name} onaylar."
+    start = text.index("Müşaviri")
+    short = Finding(P, start, start + len(f"Müşaviri {first}"), f"Müşaviri {first}", 0.85, "model")
+    later = text.rindex(f"{first} {name}")
+    full = Finding(P, later, later + len(f"{first} {name}"), f"{first} {name}", 0.85, "model")
+    extended = _extended_people([short, full], text)[0]
+    assert extended.text == f"Müşaviri {first} {name}"

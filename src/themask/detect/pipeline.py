@@ -545,6 +545,13 @@ def _vendor_trimmed(found: list[Finding], text: str) -> list[Finding]:
 
 
 _POSSESSIVE_END = re.compile(r"['\N{RIGHT SINGLE QUOTATION MARK}][sS]\Z")
+# The next word of a name, with the apostrophes inside it ("O'Brien", "D'Souza'nın").
+_NAME_WORD = re.compile(r"[ \t]+([^\W\d_][\w\-]*(?:['\N{RIGHT SINGLE QUOTATION MARK}][\w\-]+)*)")
+# A Turkish case suffix after the last apostrophe of a name: "Ahmet'in", "Berg'in", "O'Brien'ın".
+_TURKISH_SUFFIX = re.compile(
+    r"['\N{RIGHT SINGLE QUOTATION MARK}](?:n?[ıiuü]n|n?[ae]|[dt][ae]|[dt][ae]n|l[ae]|y[ae]|y[ıiuü])\Z",
+    re.IGNORECASE,
+)
 _TITLE_WORDS = frozenset(
     [
         "director",
@@ -597,7 +604,7 @@ def _extended_people(found: list[Finding], text: str) -> list[Finding]:
     extended = []
     for finding in found:
         words = finding.text.split()
-        following = _NEXT_WORD.match(text, finding.end)
+        following = _NAME_WORD.match(text, finding.end)
         if (
             finding.type is PlaceholderType.PERSON
             and finding.source == "model"
@@ -608,6 +615,7 @@ def _extended_people(found: list[Finding], text: str) -> list[Finding]:
             and following[1][:1].isupper()
         ):
             word = _POSSESSIVE_END.sub("", following[1])
+            word = _TURKISH_SUFFIX.sub("", word)
             end = following.start(1) + len(word)
             if normalize(f"{words[-1]} {word}") in full_names and not any(
                 o is not finding and o.start < end and following.start(1) < o.end for o in found

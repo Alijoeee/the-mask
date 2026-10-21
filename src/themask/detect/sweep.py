@@ -384,6 +384,9 @@ class _Place:
     group: Group
 
 
+_GROWS = frozenset({PlaceholderType.PERSON, PlaceholderType.COMPANY, PlaceholderType.ADDRESS})
+
+
 class _Places:
     """The findings of the groups, in order of where they start."""
 
@@ -424,6 +427,39 @@ class _Places:
             or not group.enabled
             or _index(group, finding) in group.disabled
         )
+
+    def grow(self, inside: list[_Place], start: int, end: int, sweeper: Group, text: str) -> bool:
+        """Grow the first finding of ``inside`` to the union of itself, the occurrence at
+        ``start``-``end`` and the other findings it overlaps, when the occurrence overlaps them
+        only in part: hiding only grows, an occurrence that is skipped because a finding of
+        another group holds half of it would leave the other half shown. The union stays in the
+        first finding's group. Only the language model's and the sweep's own findings of people,
+        companies and addresses grow, not the owner's decisions; returns whether it did.
+        """
+        if not sweeper.enabled or sweeper.type not in _GROWS:
+            return False
+        for place in inside:
+            finding, group = place.finding, place.group
+            if (
+                finding.start <= start
+                and end <= finding.end  # held whole: hidden already
+                or finding.type not in _GROWS
+                or finding.source in OWNER_SOURCES
+                or id(group) in self._fixed
+                or not group.enabled
+                or _index(group, finding) in group.disabled
+            ):
+                return False
+        first = min(inside, key=lambda place: place.finding.start)
+        low = min([start] + [place.finding.start for place in inside])
+        high = max([end] + [place.finding.end for place in inside])
+        target, kept = first.group, first.finding
+        for place in inside:
+            self.take_over(place)
+        grown = Finding(kept.type, low, high, text[low:high], kept.score, kept.source)
+        target.findings.append(grown)
+        self.add(grown, target)
+        return True
 
     def take_over(self, place: _Place) -> None:
         """Take ``place``'s finding out of its group and out of the places."""
@@ -516,15 +552,23 @@ def sweep(
         while (match := pattern.search(text, position)) is not None:
             start, end = match.span()
             inside = places.overlapping(start, end)
-            refused = (
+            unfit = (
                 start == end
                 or crosses_a_line(text, start, end)
                 or placeholders.overlaps(start, end)
                 or (not owners and _within(public_spans, start, end))
                 or (as_a_name and not stands_as_a_name(text, start, end, is_term, is_name=is_name))
-                or not all(places.may_take_over(place, start, end, group) for place in inside)
             )
-            if refused:
+            takes_over = all(places.may_take_over(place, start, end, group) for place in inside)
+            if (
+                not unfit
+                and inside
+                and not takes_over
+                and places.grow(inside, start, end, group, text)
+            ):
+                position = end  # the finding it overlaps in part grew to hold it
+                continue
+            if unfit or not takes_over:
                 position = start + 1  # a match that starts inside this one may still fit
                 continue
             for place in inside:
