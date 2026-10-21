@@ -5,9 +5,9 @@ import time
 import pytest
 
 from themask.detect.engine import Engine
-from themask.detect.lists import CaseLists, UserLists
+from themask.detect.lists import UserLists
 from themask.detect.pipeline import CombinedText, analyze
-from themask.model import Finding, KeyEntry, PlaceholderType
+from themask.model import Finding, PlaceholderType
 
 P, C = PlaceholderType.PERSON, PlaceholderType.COMPANY
 AMOUNT, PERCENT, CUSTOM = PlaceholderType.AMOUNT, PlaceholderType.PERCENT, PlaceholderType.CUSTOM
