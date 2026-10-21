@@ -559,8 +559,10 @@ def test_the_settings_action_is_in_a_menu_of_the_menu_bar(window: MainWindow) ->
     assert any(window.settings_action in menu.actions() for menu in menus)
 
 
-def test_the_settings_are_not_in_the_sidebar_or_the_tool_bar(window: MainWindow) -> None:
+def test_the_settings_are_not_a_section_or_in_the_tool_bar(window: MainWindow) -> None:
+    # Adapted: the Settings are a button under the sections now, but still not one of them.
     assert "settings" not in window.sidebar.items
+    assert list(window.sidebar.items) == ["mask", "restore", "cases"]
     assert window.settings_action not in window.toolbar.actions()
 
 
@@ -578,6 +580,56 @@ def test_the_settings_action_opens_the_settings_window(
     )
     assert window.settings_screen.always_edit.toPlainText() == "Project Falcon"
     assert window.current_screen_name() == "home"  # the screen under it did not change
+
+
+def test_the_sidebar_button_opens_the_same_settings_window(
+    qtbot: QtBot, window: MainWindow, app_ctx: AppContext
+) -> None:
+    app_ctx.user_lists.add_always("Project Falcon")
+    assert not window.settings_window.isVisible()
+    window.sidebar.settings_button.click()
+    assert window.settings_window.isVisible()
+    assert window.settings_screen.always_edit.toPlainText() == "Project Falcon"
+    assert window.current_screen_name() == "home"
+
+
+def test_the_settings_button_is_off_with_the_action_while_a_file_is_analysed(
+    qtbot: QtBot, window: MainWindow, corpus: Path
+) -> None:
+    button = window.sidebar.settings_button
+    assert button.isEnabled()
+    with qtbot.waitSignal(window.analysisFinished, timeout=ANALYSIS_TIMEOUT):
+        window.open_files([corpus / "supply-01.docx"], redline_split=False)
+        assert not window.settings_action.isEnabled() and not button.isEnabled()
+        button.click()  # a disabled button does nothing
+        assert not window.settings_window.isVisible()
+    assert window.settings_action.isEnabled() and button.isEnabled()
+
+
+def test_the_settings_button_is_off_with_the_action_while_the_export_runs(
+    window: MainWindow,
+) -> None:
+    button = window.sidebar.settings_button
+    window.settings_action.setEnabled(False)  # what show_export does while the export runs
+    assert not button.isEnabled()
+    window.settings_action.setEnabled(True)
+    assert button.isEnabled()
+
+
+def test_the_settings_are_also_in_a_plain_menu_entry_for_a_menu_bar_that_hides_the_role(
+    window: MainWindow,
+) -> None:
+    # The Mac moves the Preferences-role action into the application menu; if it does not (an
+    # app bundle with a menu bar that lost it), this entry is still there and does the same.
+    fallback = window.settings_menu_action
+    assert fallback.menuRole() == QAction.MenuRole.NoRole and fallback.text() == "Settings"
+    menus = [a.menu() for a in window.menuBar().actions() if a.menu() is not None]
+    assert any(fallback in menu.actions() for menu in menus if menu is not None)
+    window.settings_action.setEnabled(False)
+    assert not fallback.isEnabled()
+    window.settings_action.setEnabled(True)
+    fallback.trigger()
+    assert window.settings_window.isVisible()
 
 
 def test_opening_the_settings_again_does_not_throw_away_what_was_typed(

@@ -22,8 +22,8 @@ def opaque_pixels(image: QImage) -> list[tuple[int, int]]:
     ]
 
 
-def test_the_icons_are_the_four_of_the_sidebar_and_the_search_field() -> None:
-    assert set(icons.NAMES) == {"mask", "restore", "cases", "sidebar", "search"}
+def test_the_icons_are_the_ones_of_the_sidebar_the_gear_and_the_search_field() -> None:
+    assert set(icons.NAMES) == {"mask", "restore", "cases", "sidebar", "search", "gear"}
 
 
 @pytest.mark.parametrize("name", icons.NAMES)

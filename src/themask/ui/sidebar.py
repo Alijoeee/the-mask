@@ -52,7 +52,7 @@ ENGINE_TEXT = {
 }
 # The token the colour of the dot is, for each state of the engine.
 DOT_TOKEN = {"ready": "success", "loading": "tertiary", "problem": "danger"}
-SETTINGS_HINT = "Settings: The MASK › Settings… (⌘,)"
+SETTINGS_TOOLTIP = "Settings (⌘,)"
 RESTORE_NOTE = (
     "The restored file is written next to the AI’s file, never over it."
     " Copied text is on the clipboard in clear."
@@ -84,10 +84,12 @@ class SidebarItem(QPushButton):
 
     neighbourRequested = Signal(int)  # -1 for the arrow up, 1 for the arrow down
 
-    def __init__(self, icon_name: str, text: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, icon_name: str, text: str, parent: QWidget | None = None, *, checkable: bool = True
+    ) -> None:
         super().__init__(text, parent)
         self._icon_name = icon_name
-        self.setCheckable(True)
+        self.setCheckable(checkable)
         self.setFlat(True)
         self.setFixedHeight(ITEM_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -215,6 +217,7 @@ class Sidebar(QFrame):
     """
 
     sectionRequested = Signal(str)
+    settingsRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -238,15 +241,21 @@ class Sidebar(QFrame):
             layout.addWidget(item)
         layout.addStretch(1)
         layout.addWidget(self._notes)
+        # The Settings: a button under the notes, on every screen. It is not a section (nothing
+        # is chosen by it); the window opens the Settings window and switches the button with
+        # the Settings action.
+        self.settings_button = SidebarItem("gear", "Settings", checkable=False)
+        self.settings_button.setToolTip(SETTINGS_TOOLTIP)
+        self.settings_button.clicked.connect(lambda checked=False: self.settingsRequested.emit())
+        layout.addWidget(self.settings_button)
 
         self.engine_dot = StatusDot()
         self.engine_label = _note(ENGINE_TEXT["ready"])
-        self.settings_hint = _note(SETTINGS_HINT)
         engine = QHBoxLayout()
         engine.setSpacing(8)
         engine.addWidget(self.engine_dot, alignment=Qt.AlignmentFlag.AlignVCenter)
         engine.addWidget(self.engine_label, 1)
-        self._add_page("home", _block(engine, self.settings_hint))
+        self._add_page("home", _block(engine))
 
         self.legend: dict[str, Swatch] = {}
         self._add_page("review", self._legend_block())

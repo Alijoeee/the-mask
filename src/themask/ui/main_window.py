@@ -5,7 +5,8 @@ The window is a tool bar on top (the sidebar toggle, the title of the screen and
 action), the sidebar on the left (Mask, Restore, Cases, and a note that goes with the screen) and,
 filling the rest, the screens in a stack, each under a name: "home", "review", "restore" and
 "cases". The Settings are not a screen: they are a window of their own (``SettingsWindow``),
-opened by the Settings action of the application menu (Cmd+,). The export is a dialog over the
+opened by the Settings action of the application menu (Cmd+,) and by the gear button at the
+foot of the sidebar. The export is a dialog over the
 review, not a screen of its own (``show_export``).
 
 What the screens can wire into (the shell's surface, kept stable):
@@ -354,6 +355,7 @@ class MainWindow(QMainWindow):
     def _wire(self) -> None:
         """Connect the screens, the sidebar and the actions to the window."""
         self.sidebar.sectionRequested.connect(self._section_requested)
+        self.sidebar.settingsRequested.connect(self._settings_triggered)
         self.sidebar_toggle.clicked.connect(self._toggle_sidebar)
         self.home.drop_zone.filesDropped.connect(self._files_dropped)
         self.home.drop_zone.filesRefused.connect(self._files_refused)
@@ -421,9 +423,9 @@ class MainWindow(QMainWindow):
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, bar)
-        # The way through the window with Tab: the toggle, the primary action, the sections.
+        # The way through the window with Tab: the toggle, the primary action, the sections, the Settings button.
         previous: QWidget = self.sidebar_toggle
-        for following in (button, *self.sidebar.items.values()):
+        for following in (button, *self.sidebar.items.values(), self.sidebar.settings_button):
             QWidget.setTabOrder(previous, following)
             previous = following
 
@@ -444,6 +446,18 @@ class MainWindow(QMainWindow):
         menu.addAction(self.choose_action)
         menu.addSeparator()
         menu.addAction(self.settings_action)
+        # A plain entry for the same, in a menu of its own. The Mac moves the Preferences-role
+        # action above out of "File" into the application menu; if a bundle's menu bar does not
+        # (the role is lost, or the native menu bar is not the one that shows), this one is
+        # still on the bar. It has no key (the shortcut is the action's), and no role.
+        self.settings_menu_action = QAction("Settings", self)
+        self.settings_menu_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.settings_menu_action.triggered.connect(self._settings_triggered)
+        self.window_menu = self.menuBar().addMenu("Window")
+        self.window_menu.addAction(self.settings_menu_action)
+        # Both entries and the sidebar's button are on or off with the Settings action.
+        self.settings_action.changed.connect(self._settings_action_changed)
+        self._settings_action_changed()
 
     def _build_primary(self) -> None:
         """What the primary action does on each screen, and when it is on."""
@@ -553,6 +567,11 @@ class MainWindow(QMainWindow):
 
     def _settings_saved(self) -> None:
         self.sidebar.set_retention_days(self.ctx.settings.retention_days)
+
+    def _settings_action_changed(self) -> None:
+        enabled = self.settings_action.isEnabled()
+        self.settings_menu_action.setEnabled(enabled)
+        self.sidebar.settings_button.setEnabled(enabled)
 
     def _settings_triggered(self) -> None:
         if self.settings_action.isEnabled():
