@@ -389,6 +389,92 @@ CASES = [
         ((P, "A.Ş. Ahmet"), (P, "Ayşe Kaya")),
         ("A@0", "Ş@0", "Ahmet@0", "Ayşe@0", "Kaya@0"),
     ),
+    (
+        "ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ & ZETA GLOBAL B.V. shall pay.",
+        None,
+        ("ACMEVOLT@0", "TEKNOLOJİ@0", "ANONİM@0", "ŞİRKETİ@0", "ZETA@0", "GLOBAL@0", "B@0", "V@0"),
+    ),
+    (
+        "Acmevolt Teknoloji Anonim Şirketi & Zeta Global B.V. shall pay.",
+        None,
+        ("Acmevolt@0", "Teknoloji@0", "Anonim@0", "Şirketi@0", "Zeta@0", "Global@0", "B@0", "V@0"),
+    ),
+    (
+        "ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ & Quorix Security Ltd shall pay.",
+        None,
+        ("ACMEVOLT@0", "TEKNOLOJİ@0", "ANONİM@0", "ŞİRKETİ@0", "Quorix@0", "Security@0", "Ltd@0"),
+    ),
+    (
+        "Pieter de Vries, Harborpoint Systems LLC signed.",
+        ((P, "Pieter de Vries"), (C, "Vries, Harborpoint")),
+        ("Pieter@0", "de@0", "Vries@0", "Harborpoint@0", "Systems@0", "LLC@0"),
+    ),
+    (
+        "Pieter de Vries, Harborpoint Systems LLC signed.",
+        None,
+        ("Pieter@0", "de@0", "Vries@0", "Harborpoint@0", "Systems@0", "LLC@0"),
+    ),
+    (
+        'Ege Yazılım AŞ ("Ege Yazılım") imzalar.',
+        None,
+        ("Ege@0", "Yazılım@0", "AŞ@0", "Ege@1", "Yazılım@1"),
+    ),
+    (
+        "Mr Van Dijk, Harborpoint Systems LLC signed.",
+        ((P, "Van Dijk, Harborpoint"),),
+        ("Mr@0", "Van@0", "Dijk@0", "Harborpoint@0", "Systems@0", "LLC@0"),
+    ),
+    (
+        "Mavi Teknoloji A.Ş. Hukuk Müşaviri Ahmet Yılmaz's imzası. Ahmet Yılmaz öder.",
+        None,
+        (
+            "Mavi@0",
+            "Teknoloji@0",
+            "A@0",
+            "Ş@0",
+            "Hukuk@0",
+            "Müşaviri@0",
+            "Ahmet@0",
+            "Yılmaz's@0",
+            "Ahmet@1",
+            "Yılmaz@0",
+        ),
+    ),
+    (
+        "Mavi Teknoloji A.Ş. Hukuk Müşaviri Ahmet Yılmaz's imzası.",
+        ((P, "Hukuk Müşaviri Ahmet"), (P, "Müşaviri Ahmet")),
+        ("Mavi@0", "Teknoloji@0", "A@0", "Ş@0", "Hukuk@0", "Müşaviri@0", "Ahmet@0"),
+    ),
+    (
+        "Acme B.V. Managing Director Liam O'Brien signs.",
+        ((P, "Managing Director Liam"), (P, "Director Liam")),
+        ("Acme@0", "B@0", "V@0", "Managing@0", "Director@0", "Liam@0"),
+    ),
+    (
+        "Mavi Ltd Director, Atatürk Mah No: 7 Kadıköy/İstanbul signs.",
+        None,
+        ("Mavi@0", "Ltd@0", "Atatürk@0", "Mah@0"),
+    ),
+    (
+        "Harborpoint Systems LLC Genel Müdürü Jan van der Berg signs.",
+        ((C, "Harborpoint Systems LLC Genel"),),
+        ("Harborpoint@0", "Systems@0", "LLC@0"),
+    ),
+    (
+        "Harborpoint Systems LLC Genel Müdürü Jan van der Berg signs.",
+        None,
+        (
+            "Harborpoint@0",
+            "Systems@0",
+            "LLC@0",
+            "Genel@0",
+            "Müdürü@0",
+            "Jan@0",
+            "van@0",
+            "der@0",
+            "Berg@0",
+        ),
+    ),
 ]
 
 
@@ -463,3 +549,12 @@ def test_these_words_are_hidden_everywhere(engine, text, model, words):
     for m in _WORD.finditer(a.text):
         if m.group() in words:
             assert all(covered[m.start() : m.end()]), (m.group(), m.start())
+
+
+def test_a_second_company_after_an_ampersand_is_not_lost_with_the_owners_vendor(engine):
+    t = "ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ & Quorix Security Ltd shall pay."
+    a = analyze(CombinedText.join([("x", t)]), engine, UserLists(["Quorix"], []))
+    covered = {i for g in a.groups if g.enabled for f in g.findings for i in range(f.start, f.end)}
+    for word in ("ACMEVOLT", "ŞİRKETİ", "Quorix"):
+        start = t.index(word)
+        assert all(i in covered for i in range(start, start + len(word))), word

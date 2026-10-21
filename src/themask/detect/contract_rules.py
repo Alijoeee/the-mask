@@ -502,6 +502,17 @@ def _joins_backward(doc: _Document, j: int, words: int, form: int) -> bool:
         doc.joined(j)
         and _is_name_word(doc.word(before), _NOT_IN_A_COMPANY)
         and not _legal_form_length(doc, before)
+        and not _ends_a_legal_form(doc, before)
+    )
+
+
+def _ends_a_legal_form(doc: _Document, i: int) -> bool:
+    """Whether word ``i`` is the last word of a legal form ("Şirketi" of "Anonim Şirketi"): the
+    name ends there, and what a "&" joins after it is another name.
+    """
+    return any(
+        j >= 0 and j + (length := _legal_form_length(doc, j)) - 1 == i and length > 0
+        for j in (i, i - 1)
     )
 
 

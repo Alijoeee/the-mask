@@ -522,3 +522,46 @@ def test_two_companies_sharing_a_three_letter_name_do_not_lose_either():
 def test_a_capital_word_that_is_no_name_is_not_a_short_form():
     t = "This is between THE Ltd and Zeta Corp.\nTHE parties sign.\n"
     assert "THE parties" in masked_text(run(t, ModelStub()))
+
+
+# --- Round 5: growth, extension limits, the ampersand after a legal form ------------------------
+
+
+def test_an_ampersand_after_a_legal_form_starts_a_new_name():
+    from themask.detect.contract_rules import find_legal_form_companies
+
+    found = find_legal_form_companies("ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ & ZETA GLOBAL B.V. pays.")
+    assert [f.text for f in found] == ["ACMEVOLT TEKNOLOJİ ANONİM ŞİRKETİ", "ZETA GLOBAL B.V."]
+
+
+def test_extension_stops_at_a_title_and_at_another_finding():
+    from themask.detect.pipeline import _extended_people
+
+    text = "Mavi Managing Director Liam O'Brien signs. Director Liam waits. Atatürk Mah No 7."
+
+    def at(kind, needle, source="model", last=False):
+        start = text.rindex(needle) if last else text.index(needle)
+        return Finding(kind, start, start + len(needle), needle, 0.85, source)
+
+    title = at(P, "Mavi Managing Director")
+    junk = at(P, "Director Liam", last=True)
+    assert _extended_people([title, junk], text)[0].text == "Mavi Managing Director"
+    name = Finding(P, text.index("Atatürk"), text.index("Atatürk") + 7, "Atatürk", 0.85, "model")
+    elsewhere = at(P, "Atatürk Mah")
+    address = Finding(
+        PlaceholderType.ADDRESS, text.index("Mah"), text.index("Mah") + 3, "Mah", 0.8, "rule"
+    )
+    assert _extended_people([name, elsewhere, address], text)[0].text == "Atatürk"
+
+
+def test_a_loser_that_overlaps_a_winner_in_part_grows_it():
+    text = "Pieter de Vries, Harborpoint Systems LLC signed."
+    model = ((P, "Pieter de Vries"), (C, "Vries, Harborpoint"))
+    out = masked_text(run(text, ModelStub(*model)))
+    assert "Pieter" not in out and "Harborpoint" not in out and "Systems" not in out, out
+
+
+def test_a_defined_short_name_inside_a_longer_model_span_is_still_swept():
+    t = 'Ege Yazılım Ltd ("Ege") signs here. Ege pays.'
+    out = masked_text(run(t, ModelStub((C, 'Ege Yazılım Ltd ("Ege'))))
+    assert "Ege" not in out, out

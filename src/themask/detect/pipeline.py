@@ -191,7 +191,7 @@ def analyze(
 
     found = _detected(combined, engine, case) + _listed(text, user_lists, case)
     found = [f for f in found if not in_placeholder.overlaps(f.start, f.end)]
-    found = _vendor_trimmed(_extended_people(_united_with_companies(found, text), text), text)
+    found = _vendor_trimmed(_extended_people(found, text), text)
     unlegal_source = found
     legal = legal_spans(text)
     unlegal = _without_legal_references(found, legal)
@@ -248,8 +248,13 @@ def analyze(
         only_one=is_default_term,
         is_term=is_term,
     )
-    placed = _one_per_place(found)
-    lost = _lost_companies(found, placed)
+    placed, united = _one_per_place(found, text)
+    placed_spans = {(f.start, f.end) for f in placed}
+    lost = [
+        f
+        for f in [*_lost_companies(found, placed), *united]
+        if (f.start, f.end) not in placed_spans
+    ]
     groups = group_findings(
         [*placed, *lost],
         text,
@@ -261,9 +266,7 @@ def analyze(
     stored = {seed.id for seed in seeds}
     lost_spans = {(f.start, f.end) for f in lost}
     for group in groups:  # a lost company is a group of variants only: its place is the model's
-        group.findings = [
-            f for f in group.findings if not (f.source == "rule" and (f.start, f.end) in lost_spans)
-        ]
+        group.findings = [f for f in group.findings if (f.start, f.end) not in lost_spans]
     for group in groups:
         # No never-hide word is swept, but a person's bare name, which the sweep takes only
         # where it stands as a name (rulings R42, R50). What the owner asked to hide (her
@@ -541,49 +544,50 @@ def _vendor_trimmed(found: list[Finding], text: str) -> list[Finding]:
     return kept
 
 
-def _united_with_companies(found: list[Finding], text: str) -> list[Finding]:
-    """``found`` with each person or company of the language model's that overlaps a contract
-    rule's company with a legal form, and neither holds the other, made the union of the two
-    spans. Nothing the model hid is shown, and nothing of the company is left out: the model's
-    "Teknoloji A.Ş. ile GLOBAL Gıda A.Ş." over the rule's "GLOBAL Teknoloji A.Ş." becomes one span
-    from "GLOBAL" on (over-hiding a connector at the join is harmless). The company is grouped as
-    well (``_lost_companies``). A model span that runs on past the company from its start, of its
-    type, is left to ruling R45.
-    """
-    companies = [
-        f
-        for f in found
-        if f.type is PlaceholderType.COMPANY
-        and f.source == "rule"
-        and f.score >= RULE_NAME_SCORE
-        and has_legal_form(f.text)
+_POSSESSIVE_END = re.compile(r"['\N{RIGHT SINGLE QUOTATION MARK}][sS]\Z")
+_TITLE_WORDS = frozenset(
+    [
+        "director",
+        "managing",
+        "ceo",
+        "cfo",
+        "coo",
+        "cto",
+        "chairman",
+        "president",
+        "manager",
+        "secretary",
+        "counsel",
+        "general",
+        "genel",
+        "müdürü",
+        "müdür",
+        "müşaviri",
+        "mr",
+        "mrs",
+        "ms",
+        "mx",
+        "dr",
+        "prof",
+        "sir",
+        "dame",
+        "mah",
+        "mahallesi",
+        "cad",
+        "cadde",
+        "sok",
+        "sokak",
+        "street",
     ]
-    if not companies:
-        return found
-    united = []
-    for finding in found:
-        if finding.source == "model" and finding.type in _NAMES:
-            start, end = finding.start, finding.end
-            for company in companies:
-                partly = company.start < end and start < company.end
-                holds = start <= company.start and company.end <= end
-                inside = company.start <= start and end <= company.end
-                overruns = (
-                    start == company.start and finding.type is company.type and end > company.end
-                )
-                if partly and not holds and not inside and not overruns:
-                    start, end = min(start, company.start), max(end, company.end)
-            if (start, end) != (finding.start, finding.end):
-                finding = replace(finding, start=start, end=end, text=text[start:end])
-        united.append(finding)
-    return united
+)
 
 
 def _extended_people(found: list[Finding], text: str) -> list[Finding]:
     """``found`` with each person of the language model's that ends on a capitalised word extended
     to the capitalised word after it, when the two together are a full name found elsewhere in
     the text: the model's "A.Ş. Genel Müdürü Ahmet" in front of "Yılmaz" must not leave the surname
-    visible where "Ahmet Yılmaz" is hidden at the next sentence.
+    visible where "Ahmet Yılmaz" is hidden at the next sentence. A name that ends on a job title or an honorific is not extended, and neither over a word that
+    belongs to another finding.
     """
     full_names = {
         normalize(f.text)
@@ -599,12 +603,16 @@ def _extended_people(found: list[Finding], text: str) -> list[Finding]:
             and finding.source == "model"
             and words
             and words[-1][:1].isupper()
+            and words[-1].casefold().strip(".,") not in _TITLE_WORDS
             and following is not None
             and following[1][:1].isupper()
-            and normalize(f"{words[-1]} {following[1]}") in full_names
         ):
-            end = following.end(1)
-            finding = replace(finding, end=end, text=text[finding.start : end])
+            word = _POSSESSIVE_END.sub("", following[1])
+            end = following.start(1) + len(word)
+            if normalize(f"{words[-1]} {word}") in full_names and not any(
+                o is not finding and o.start < end and following.start(1) < o.end for o in found
+            ):
+                finding = replace(finding, end=end, text=text[finding.start : end])
         extended.append(finding)
     return extended
 
@@ -937,18 +945,93 @@ def _seed_matches(
 # --- Overlaps, numbers, warnings --------------------------------------------------------------
 
 
-def _one_per_place(found: list[Finding]) -> list[Finding]:
-    """Of the findings that overlap, the one that wins (see the module), in text order."""
+# The types whose findings carry text to hide, and so are grown to the union when they overlap
+# (``_one_per_place``).
+_WORDS = frozenset(
+    {
+        PlaceholderType.PERSON,
+        PlaceholderType.COMPANY,
+        PlaceholderType.ADDRESS,
+        PlaceholderType.CUSTOM,
+    }
+)
+
+
+def _one_per_place(found: list[Finding], text: str) -> tuple[list[Finding], list[Finding]]:
+    """Of the findings that overlap, the one that wins (see the module), in text order, and the
+    findings that lost their place to one that held only a part of them.
+
+    Hiding only grows: a person, company or address that loses to a finding it overlaps only in
+    part is not dropped. The winner grows to the union of the two spans (and again, when that
+    reaches another finding), so that no word of the loser is shown. The owner's own values never
+    grow. What lost this way is returned too, to be grouped for the sweep.
+    """
     spans: dict[tuple[int, int], list[Finding]] = defaultdict(list)
     for finding in _without_overruns(found):
         spans[(finding.start, finding.end)].append(finding)
     taken = Spans()
-    kept = []
+    kept: list[Finding] = []
+    rejected: list[Finding] = []
     for finding in sorted(map(_span_winner, spans.values()), key=_strength):
         if not taken.overlaps(finding.start, finding.end):
             taken.add(finding.start, finding.end)
             kept.append(finding)
-    return sorted(kept, key=lambda f: (f.start, f.end))
+        else:
+            rejected.append(finding)
+    united: list[Finding] = []
+    progress = True
+    while progress:
+        progress = False
+        for loser in rejected:
+            if loser.type not in _WORDS:
+                continue
+            for index, winner in enumerate(kept):
+                if (
+                    winner.type in _WORDS
+                    and winner.source not in _OWNERS
+                    and loser.start < winner.end
+                    and winner.start < loser.end
+                    and not (winner.start <= loser.start and loser.end <= winner.end)
+                ):
+                    grown = _grown(kept, index, loser, text)
+                    if grown is not None:
+                        kept, absorbed = grown
+                        united += [loser, *absorbed]
+                        rejected = [r for r in rejected if r is not loser]
+                        progress = True
+                        break
+            if progress:
+                break
+    # What a contract rule found and a longer finding took in (a defined short name inside the
+    # model's span) is grouped for the sweep as well.
+    united += [r for r in rejected if r.type in _WORDS and r.source == "rule"]
+    return sorted(kept, key=lambda f: (f.start, f.end)), united
+
+
+def _grown(
+    kept: list[Finding], index: int, loser: Finding, text: str
+) -> tuple[list[Finding], list[Finding]] | None:
+    """``kept`` with the finding at ``index`` grown to the union with ``loser`` and with every
+    finding that union reaches (a person's, a company's or an address, never the owner's own), and
+    the findings taken in; None when the union would reach one of the owner's values or a finding
+    of another kind.
+    """
+    winner = kept[index]
+    start, end = min(winner.start, loser.start), max(winner.end, loser.end)
+    others = [k for i, k in enumerate(kept) if i != index]
+    absorbed: list[Finding] = []
+    while True:
+        more = [k for k in others if k not in absorbed and k.start < end and start < k.end]
+        if not more:
+            break
+        for k in more:
+            if k.source in _OWNERS or k.type not in _WORDS:
+                return None
+            start, end = min(start, k.start), max(end, k.end)
+        absorbed += more
+    survivors = [k for k in others if k not in absorbed]
+    survivors.append(replace(winner, start=start, end=end, text=text[start:end]))
+    return survivors, absorbed
 
 
 def _without_overruns(found: list[Finding]) -> list[Finding]:
