@@ -119,6 +119,24 @@ def test_full_round_trip_every_docx(corpus, engine, lists, tmp_path):
             assert "[PERSON_9]" in rep.unknown and "[PERSON 1]" in text
 
 
+@pytest.mark.slow
+def test_restored_text_is_the_original_text_every_docx(corpus, engine, lists, tmp_path):
+    """Mask every Word file of the corpus and restore it as it is: the restored text is the
+    original's, but for the places that were short forms of a value (see
+    ``same_but_for_short_forms`` in tests/test_restore_exact.py), which come back as the value.
+    """
+    from tests.test_restore_exact import round_trip, same_but_for_short_forms
+
+    manifest = json.loads((corpus / "manifest.json").read_text(encoding="utf-8"))
+    differing = {}
+    for doc in (d for d in manifest if d["format"] == "docx"):
+        original, restored = round_trip(corpus / doc["file"], engine, lists, tmp_path / doc["file"])
+        bad = same_but_for_short_forms(original, restored)
+        if bad:
+            differing[doc["file"]] = bad[:3]
+    assert differing == {}
+
+
 # --- How the evaluation counts -------------------------------------------------------------------
 
 

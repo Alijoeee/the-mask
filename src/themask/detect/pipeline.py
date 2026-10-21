@@ -280,6 +280,7 @@ def analyze(
         }
     sweep(text, groups, fixed=seeds, is_term=is_term, public=legal)
     groups = [g for g in groups if g.findings]  # a seed not in this text, a group taken over
+    groups = _with_own_groups(groups, stored)
     for group in groups:
         group.findings.sort(key=lambda f: (f.start, f.end))
         if any((f.start, f.end) in surnames for f in group.findings) or any(
@@ -948,6 +949,52 @@ def _seed_matches(
         for start, end in spans:
             found.append(Finding(seed.type, start, end, text[start:end], 1.0, "sweep"))
     return found
+
+
+def _with_own_groups(groups: list[Group], stored: set[str]) -> list[Group]:
+    """``groups`` where each finding that is no form of its group (the words of its text are not
+    all words of the group's canonical form and it is none of the forms the group lists, as a union
+    a growth made) is moved to a group of its
+    own, with that text as its canonical form and its only variant. A restore writes the
+    canonical form back in every place: a place whose words the canonical form does not hold
+    would lose them. A short form of the value (fewer words, all of them the canonical form's)
+    stays. The case's key is left as it is.
+    """
+
+    def words(text: str) -> set[str]:
+        return {normalize(word) for word in re.findall(r"[^\W_]+", text)}
+
+    out: list[Group] = []
+    for group in groups:
+        out.append(group)
+        if group.id in stored:
+            continue
+        held = words(group.canonical)
+        forms = {normalize(form) for form in (group.canonical, *group.variants)}
+        foreign: dict[str, list[Finding]] = defaultdict(list)
+        for finding in group.findings:
+            if not words(finding.text) <= held and normalize(finding.text) not in forms:
+                foreign[normalize(finding.text)].append(finding)
+        if not foreign:
+            continue
+        moved = {id(f) for found in foreign.values() for f in found}
+        group.findings = [f for f in group.findings if id(f) not in moved]
+        group.disabled = set()
+        for found in foreign.values():
+            first = found[0]
+            out.append(
+                Group(
+                    uuid.uuid4().hex,
+                    group.type,
+                    first.text,
+                    {f.text for f in found},
+                    found,
+                    "",
+                    enabled=group.enabled,
+                    needs_check=group.needs_check,
+                )
+            )
+    return [g for g in out if g.findings]
 
 
 # --- Overlaps, numbers, warnings --------------------------------------------------------------

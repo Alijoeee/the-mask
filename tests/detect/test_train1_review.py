@@ -698,3 +698,25 @@ def test_a_person_is_extended_over_a_surname_with_an_apostrophe(first, written, 
     full = Finding(P, later, later + len(f"{first} {name}"), f"{first} {name}", 0.85, "model")
     extended = _extended_people([short, full], text)[0]
     assert extended.text == f"Müşaviri {first} {name}"
+
+
+def test_a_finding_that_is_no_form_of_its_group_gets_a_group_of_its_own():
+    from themask.detect.pipeline import _with_own_groups
+    from themask.model import Group
+
+    text = "Genel Müdürü Gülşen Öztürk'ın imzası. Gülşen Öztürk. Gülşen."
+    end = text.index("'ın")
+    grown = Finding(P, 0, end, text[:end], 0.85, "model")
+    second = text.index("Gülşen Öztürk.")
+    same = Finding(P, second, second + 13, text[second : second + 13], 0.85, "model")
+    last = text.rindex("Gülşen")
+    short = Finding(P, last, last + 6, "Gülşen", 0.85, "model")  # a short form, not listed
+    group = Group("g", P, "Gülşen Öztürk", {"Gülşen Öztürk"}, [grown, same, short], "")
+    out = _with_own_groups([group], set())
+    assert [(g.canonical, [f.text for f in g.findings]) for g in out] == [
+        ("Gülşen Öztürk", ["Gülşen Öztürk", "Gülşen"]),
+        ("Genel Müdürü Gülşen Öztürk", ["Genel Müdürü Gülşen Öztürk"]),
+    ]
+    assert out[1].variants == {"Genel Müdürü Gülşen Öztürk"}
+    kept = _with_own_groups([Group("s", P, "Gülşen Öztürk", set(), [grown], "[PERSON_1]")], {"s"})
+    assert [f.text for f in kept[0].findings] == [grown.text]  # the case's key is left as it is

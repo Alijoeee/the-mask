@@ -653,3 +653,22 @@ def test_an_amount_before_a_company_is_hidden_and_so_is_the_company(engine, text
     )
     start = text.index(word)
     assert all(i in covered for i in range(start, start + len(word))), text
+
+
+@pytest.mark.parametrize("text,model,must_hide", CASES, ids=[str(i) for i in range(len(CASES))])
+def test_a_restore_gives_back_the_text_of_every_recorded_case(engine, text, model, must_hide):
+    from tests.test_restore_exact import same_but_for_short_forms
+
+    a = analyze(
+        CombinedText.join([("x", text)]),
+        engine if model is None else _Stub(model),
+        UserLists([], []),
+    )
+    value_at = sorted(
+        ((f.start, f.end, g.canonical) for g in a.groups if g.enabled for f in g.active_findings()),
+        reverse=True,
+    )
+    restored = a.text
+    for start, end, value in value_at:
+        restored = restored[:start] + value + restored[end:]
+    assert same_but_for_short_forms(a.text, restored) == [], text

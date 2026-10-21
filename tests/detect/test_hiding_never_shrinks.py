@@ -88,7 +88,7 @@ def _make_cases(seed=20261021, count=600):
             s2 = "Kestrelon"
         c1, c2 = f"{s1} {rng.choice(FORMS)}", f"{s2} {rng.choice(FORMS)}"
         conn, title, verb = rng.choice(CONNECTORS), rng.choice(TITLES), rng.choice(VERBS)
-        shape = number % 12
+        shape = number % 14
         secrets: list[str] = []
         model: list[tuple[PlaceholderType, str]] = []
         if shape == 0:
@@ -123,6 +123,14 @@ def _make_cases(seed=20261021, count=600):
             text = f"{c1} {title} {person}'s signature, {c2}."
             secrets = [s1, person, s2]
             model = [(P, f"{title} {first}"), (C, f"{c1} {title}"), (P, person)]
+        elif shape >= 12:
+            suffix = rng.choice(["ın", "in", "nın", "nin", "a", "da"])
+            text = (
+                f"{c2}'s {title} {first} {last}'{suffix} imzası ile {c1} bağlanır. "
+                f"{first} {last} onaylar."
+            )
+            secrets = [s1, s2, person]
+            model = [(P, f"{title.split()[-1]} {first}"), (P, f"{first} {last}", "last")]
         elif shape >= 8:
             value, kind = rng.choice(VALUES)
             cur = rng.choice(CURRENCIES)
@@ -152,12 +160,14 @@ class _Stub(Engine):
 
     def _presidio_findings(self, text):
         out = []
-        for kind, needle in self.model:
-            start = text.find(needle)
-            while start >= 0:
-                score = 0.85 if kind is P else 0.6
-                out.append(Finding(kind, start, start + len(needle), needle, score, "model"))
-                start = text.find(needle, start + 1)
+        for kind, needle, *only in self.model:
+            where = P if kind is P else C
+            score = 0.85 if kind is P else 0.6
+            starts = [m.start() for m in re.finditer(re.escape(needle), text)]
+            if only:  # the model finds this one at its last place only
+                starts = starts[-1:]
+            for start in starts:
+                out.append(Finding(where, start, start + len(needle), needle, score, "model"))
         return out
 
 
@@ -218,3 +228,41 @@ def test_every_secret_of_a_template_is_hidden(case):
 def test_every_secret_is_hidden_with_the_stub_spans_on_top_of_the_real_model(engine, case):
     text, model, secrets, config = case
     assert leaks(text, model, secrets, config, engine) == [], text
+
+
+# --- The restore invariant: a place never loses a word the value does not have ---------------------
+
+
+def restored_text(a):
+    """The analysed text with each hidden place written as its group's value, as a restore does."""
+    spans = sorted(
+        ((f.start, f.end, g.canonical) for g in a.groups if g.enabled for f in g.active_findings()),
+        reverse=True,
+    )
+    out = a.text
+    for start, end, value in spans:
+        out = out[:start] + value + out[end:]
+    return out
+
+
+def analysed(case, base=None):
+    text, model, _, config = case
+    always = [CODE_NAME] if config == 1 else []
+    engine = _Stub(model) if base is None else _OnTop(base, model)
+    return analyze(CombinedText.join([("x", text)]), engine, UserLists(always, []))
+
+
+@pytest.mark.parametrize("case", CASES, ids=[str(i) for i in range(len(CASES))])
+def test_a_restore_gives_back_the_text_of_every_generated_case(case):
+    from tests.test_restore_exact import same_but_for_short_forms
+
+    a = analysed(case)
+    assert same_but_for_short_forms(a.text, restored_text(a)) == [], case[0]
+
+
+@pytest.mark.parametrize("case", CASES[::2], ids=[str(i) for i in range(0, len(CASES), 2)])
+def test_a_restore_is_exact_with_the_stub_spans_on_top_of_the_real_model(engine, case):
+    from tests.test_restore_exact import same_but_for_short_forms
+
+    a = analysed(case, engine)
+    assert same_but_for_short_forms(a.text, restored_text(a)) == [], case[0]
