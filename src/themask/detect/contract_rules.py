@@ -154,6 +154,16 @@ _NAME_PARTICLES = _vocabulary(
 )
 _HONORIFIC_KEYS = frozenset(normalize(honorific) for honorific in HONORIFICS)
 
+# "ve" ("and") joins the two trade words of a Turkish company name: "Sanayi ve Ticaret A.Ş.", "San.
+# ve Tic. Ltd. Şti.". Only between these words (compared by normalize, so "Ticaret" and "TİCARET"
+# are one): "Acme ve Beta A.Ş." is two names.
+_TURKISH_TRADE_WORDS = frozenset(
+    normalize(word)
+    for word in """
+    Sanayi San Ticaret Tic Turizm İnşaat Insaat Taahhüt Pazarlama Dış Dis Mühendislik Danışmanlık
+    """.split()
+)
+
 # Job titles and departments: a "Name:" or "Attention:" line that holds one names nobody. A title is
 # made of these words only, with at least one of the first kind ("Head of Sales", "Legal Counsel").
 _JOB_TITLE_NOUNS = _vocabulary(
@@ -409,7 +419,20 @@ def _joins_forward(doc: _Document, j: int, stop: frozenset[str]) -> bool:
         )
     if word in _NAME_PARTICLES:
         return _is_name_word(doc.word(following), stop) or doc.word(following) in _NAME_PARTICLES
+    if word == "ve":
+        return _between_trade_words(doc, j)
     return False
+
+
+def _between_trade_words(doc: _Document, j: int) -> bool:
+    """Whether the "ve" at word ``j`` stands between two Turkish trade words ("Sanayi ve Ticaret")."""
+    return (
+        0 < j < len(doc) - 1
+        and doc.joined(j)
+        and doc.joined(j + 1)
+        and normalize(_core(doc.word(j - 1))) in _TURKISH_TRADE_WORDS
+        and normalize(_core(doc.word(j + 1))) in _TURKISH_TRADE_WORDS
+    )
 
 
 def _read_name(doc: _Document, i: int, stop: frozenset[str] = _NOT_IN_A_NAME) -> _Name | None:
@@ -452,6 +475,8 @@ def _joins_backward(doc: _Document, j: int, words: int, form: int) -> bool:
     backward from its legal form at word ``form``, ``words`` name words having been read so far.
     """
     word = doc.word(j).casefold()
+    if word == "ve":
+        return words > 0 and _between_trade_words(doc, j)
     if words == 0:  # straight before the legal form: only "Smith & Co." and "Smith and Co."
         if not (word in {"&", "and"} and normalize(doc.word(form)) == "co"):
             return False

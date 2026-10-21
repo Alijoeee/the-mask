@@ -45,6 +45,19 @@ LEGAL_FORMS: tuple[str, ...] = (
     "A.Ş.",
     "Ltd. Şti.",
     "Ltd. Sti.",  # "Ltd. Şti." typed without the Turkish letter
+    "Ltd.Şti.",  # written without the space
+    "Ltd.Sti.",
+    "Şti.",
+    "Sti.",
+    "AŞ",
+    "Anonim Şirketi",  # Turkish joint-stock company, in full
+    "Anonim Sirketi",  # ... typed without the Turkish letters
+    "Limited Şirketi",
+    "Limited Sirketi",
+    "Kollektif Şirket",
+    "Kollektif Sirket",
+    "Komandit Şirket",
+    "Komandit Sirket",
     "Oy",
     "AB",
     "ApS",
